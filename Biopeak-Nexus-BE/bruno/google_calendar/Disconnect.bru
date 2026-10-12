@@ -1,0 +1,39 @@
+meta {
+  name: Disconnect
+  type: http
+  seq: 4
+}
+
+delete {
+  url: {{baseURL}}/google-calendar/disconnect/
+  body: none
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Revokes the token with Google and clears the signed-in user's own
+  google_access_token / google_refresh_token / google_access_token_expires_at
+  on GoogleCalendarConnection. google_email (the "connected as ___" address)
+  is deliberately left as a record of the last-connected account — check
+  google_refresh_token, not google_email, to know if actually connected.
+  Always acts on request.user's connection - never a client-supplied id.
+
+  If the signed-in user is the fixed shared calendar organizer
+  (google_email == settings.GOOGLE_CALENDAR_ID), disconnecting kills
+  appointment sync for every center — platform Admin may disconnect; an
+  associate must also hold is_admin=True on at least one center assignment.
+  Otherwise: 403.
+
+  Method: DELETE
+  Path: /google-calendar/disconnect/
+  Source: integrations.google_calendar.views.GoogleCalendarDisconnectView
+  Auth: Admin or Associate (JWT).
+}

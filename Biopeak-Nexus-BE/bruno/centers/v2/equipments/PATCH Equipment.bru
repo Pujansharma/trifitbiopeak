@@ -1,0 +1,35 @@
+meta {
+  name: PATCH Equipment
+  type: http
+  seq: 3
+}
+
+patch {
+  url: {{baseURL}}/centers/{{center_id}}/v2/equipments/{{equipment_id}}/
+  body: json
+  auth: inherit
+}
+
+headers {
+  X-Center-ID: {{center_id}}
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "is_active": false
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 30000
+}
+
+docs {
+  Update equipment. room_id null clears room. is_active false = soft deactivate.
+  operational_status: operational | maintenance | downtime (mutually exclusive).
+  Read-only is_in_maintenance / is_downtime derived on GET responses.
+  Optional equipment_type_id / room_id must be active for this center; inactive → 400.
+  Name unique per center, case-insensitive. Same row may keep its name. Duplicate → 400 name: "An equipment with this name already exists."
+}

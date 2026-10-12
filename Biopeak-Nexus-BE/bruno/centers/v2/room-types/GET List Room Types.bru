@@ -1,0 +1,30 @@
+meta {
+  name: GET List Room Types
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseURL}}/centers/{{center_id}}/v2/room-types/?page=1&limit=10&search=
+  body: none
+  auth: inherit
+}
+
+params:query {
+  page: 1
+  limit: 10
+  search: 
+}
+
+headers {
+  X-Center-ID: {{center_id}}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 30000
+}
+
+docs {
+  List per-center room types. Query: page, limit, search, optional active=0|1 (omit = active + inactive).
+}

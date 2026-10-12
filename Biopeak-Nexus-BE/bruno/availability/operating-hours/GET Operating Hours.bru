@@ -1,0 +1,28 @@
+meta {
+  name: GET Operating Hours
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseURL}}/centers/{{center_id}}/availability/operating-hours/?active=1
+  body: none
+  auth: inherit
+}
+
+params:query {
+  active: 1
+}
+
+headers {
+  X-Center-ID: {{center_id}}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 30000
+}
+
+docs {
+  List CenterOperatingHour rows for the center. Optional active=0|1 (default active only).
+}

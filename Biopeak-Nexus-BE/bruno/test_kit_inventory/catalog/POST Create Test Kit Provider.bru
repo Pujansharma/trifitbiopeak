@@ -1,0 +1,26 @@
+meta {
+  name: POST Create Test Kit Provider
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseURL}}/test_kit_inventory/providers/add/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "name": "Thyrocare",
+    "provider_id": "{{provider_id}}"
+  }
+}
+
+settings {
+  encodeUrl: true
+}

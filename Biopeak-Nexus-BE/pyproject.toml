@@ -1,0 +1,47 @@
+[project]
+name = "biopeak-nexus-fe"
+version = "0.2.0"
+description = "Biopeak Nexus Interface Backend"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "arrow",
+    "cryptography>=50.0.1",
+    "django",
+    "django-cors-headers",
+    "django-debug-toolbar",
+    "django-storages[s3]",
+    "django-stubs",
+    "djangorestframework",
+    "djangorestframework-simplejwt",
+    "djangorestframework-stubs",
+    "drf-spectacular",
+    "firebase-admin",
+    "gunicorn",
+    "ipython",
+    "langchain-core>=1.0",
+    "langchain-openai>=1.0",
+    "langchain>=1.0",
+    "langfuse>=3.0,<4.0",
+    "nest-asyncio>=1.6",
+    "pandas",
+    "pandas-stubs",
+    "phonenumbers",
+    "pillow",
+    "pillow-heif>=1.4.0",
+    "psycopg",
+    "pydantic>=2.0",
+    "pymupdf>=1.24",
+    "pyotp",
+    "python-decouple",
+    "python-docx>=1.1",
+    "python-dotenv>=1.2.2",
+    "qrcode",
+    "requests",
+    "ruff",
+    "whitenoise",
+]
+
+
+[tool.ruff]
+extend-exclude = ["migrations"]

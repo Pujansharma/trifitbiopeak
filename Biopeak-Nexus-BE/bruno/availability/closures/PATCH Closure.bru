@@ -1,0 +1,31 @@
+meta {
+  name: PATCH Closure
+  type: http
+  seq: 3
+}
+
+patch {
+  url: {{baseURL}}/centers/{{center_id}}/availability/closures/{{closure_id}}/
+  body: json
+  auth: inherit
+}
+
+headers {
+  X-Center-ID: {{center_id}}
+  content-type: application/json
+}
+
+body:json {
+  {
+    "is_active": false
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 30000
+}
+
+docs {
+  Soft-deactivate (reopen) with is_active=false. Optional PATCH fields: type (holiday|manual), reason (non-blank if sent).
+}

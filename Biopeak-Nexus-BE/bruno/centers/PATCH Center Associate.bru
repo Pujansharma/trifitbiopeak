@@ -1,0 +1,43 @@
+meta {
+  name: PATCH Center Associate
+  type: http
+  seq: 4
+}
+
+patch {
+  url: {{baseURL}}/centers/associates/{{associate_id}}/
+  body: json
+  auth: inherit
+}
+
+headers {
+  X-Center-ID: {{center_id}}
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "role_ids": ["{{role_id}}"],
+    "is_active": true
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}
+
+docs {
+  Update center associate assignment. pk = associate UUID (same as list id). Center from X-Center-ID, not URL.
+  
+  HARD-BREAK: write `role_ids` UUID[] only (no `role_id`). Response: `role_ids` + nested `roles[]` (no singular `role` / `role_id`).
+  Omit role_ids = leave unchanged; [] / null = clear. Admin associates cannot have care roles.
+  Roles must be active for this center (or system); inactive → 400.
+  
+  Care-staff flag: is_care_staff.
+  Status: is_active (user active flag).
+  
+  PATCH partial — send only fields to change.
+  
+  Auth: bearer {{access_token}}. Set env center_id, associate_id, role_id (sample UUID for role_ids[]).
+}

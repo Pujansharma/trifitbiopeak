@@ -1,0 +1,20 @@
+meta {
+  name: GET Exception Count
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseURL}}/centers/{{center_id}}/appointments/exceptions/count/
+  body: none
+  auth: inherit
+}
+
+settings {
+  encodeUrl: true
+  timeout: 30000
+}
+
+docs {
+  Open exception count for sidenav badge.
+}

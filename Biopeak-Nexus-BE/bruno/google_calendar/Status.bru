@@ -1,0 +1,37 @@
+meta {
+  name: Status
+  type: http
+  seq: 6
+}
+
+get {
+  url: {{baseURL}}/google-calendar/
+  body: none
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Returns the signed-in user's Google Calendar connection state so
+  the frontend can show the right UI after a page reload without ever
+  reading token fields off GoogleCalendarConnection.
+
+  is_connected reflects is_active AND google_refresh_token, not
+  google_email - google_email is left populated after disconnect as a
+  "connected as ___" record. Soft-off (is_active=false) is disconnected.
+
+  last_synced_at is null until Sync.bru has completed at least once for this
+  connection; it's set (not just "attempted") only on a successful sync.
+
+  Method: GET
+  Path: /google-calendar/
+  Source: integrations.google_calendar.views.GoogleCalendarStatusView
+  Auth: Admin or Associate (JWT).
+}

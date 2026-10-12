@@ -1,0 +1,40 @@
+meta {
+  name: Refresh
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseURL}}/google-calendar/refresh/
+  body: none
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Forces a refresh of the signed-in user's own Google Calendar tokens
+  right now - fetches a fresh access_token (and a new refresh_token, if
+  Google rotates it) from Google, regardless of whether the stored access
+  token has actually expired yet, and saves them onto GoogleCalendarConnection.
+  Unlike the lazy, only-if-expired refresh get_valid_access_token() does
+  internally before every Calendar API call, this always hits Google.
+  Always acts on request.user's connection - never a client-supplied id, same
+  as Disconnect.
+
+  400 "No Google Calendar connection to refresh." if the user never
+  connected (no google_refresh_token) or the connection is_active=false.
+
+  Method: POST
+  Path: /google-calendar/refresh/
+  Source: integrations.google_calendar.views.GoogleCalendarRefreshTokenView
+  Auth: Admin or Associate (JWT).
+
+  Success: {"detail": "Google Calendar token refreshed."}
+}

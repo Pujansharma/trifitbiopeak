@@ -1,0 +1,26 @@
+meta {
+  name: POST Mark Late
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseURL}}/centers/{{center_id}}/appointments/{{appointment_id}}/mark-late/
+  body: json
+  auth: inherit
+}
+
+headers {
+  content-type: application/json
+}
+
+body:json {
+  {
+    "late_by": 15
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 30000
+}

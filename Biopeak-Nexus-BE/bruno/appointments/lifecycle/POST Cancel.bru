@@ -1,0 +1,38 @@
+meta {
+  name: POST Cancel
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseURL}}/centers/{{center_id}}/appointments/{{appointment_id}}/cancel/
+  body: json
+  auth: inherit
+}
+
+headers {
+  content-type: application/json
+}
+
+body:json {
+  {
+    "reason": "Customer requested cancellation"
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 30000
+}
+
+docs {
+  Allowed from confirmed or checked_in. Not from in_progress. Reason required.
+  Auth: staff or customer JWT. Customer may only cancel their own profile's appointments (else 404).
+  When linked to a therapy program_service: RedemptionHistory scheduled→cancelled.
+  sessions_used unchanged. active_appointment on therapy services list becomes null.
+  Google Calendar: if the appointment was mirrored, a Google Calendar outbox row is queued after
+  commit to delete the event from the fixed shared account's calendar (GOOGLE_CALENDAR_ID).
+  google_event_id/google_meet_link are left as-is. Best-effort — if that Google call fails, the
+  failure is logged and the cancellation stays saved (the Google event may still exist and need
+  manual cleanup). Cancel HTTP success does not mean the Calendar event is already gone.
+}
