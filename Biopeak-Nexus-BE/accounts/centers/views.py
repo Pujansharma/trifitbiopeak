@@ -108,7 +108,7 @@ class CenterDetailView(BaseRetrieveUpdateDestroyAPIView, CenterViewMeta):
                 update_center_associate_centers_count(instance.pk)
                 super().perform_destroy(instance)
                 decrement_organization_centers_count()
-        except (ProtectedError, RestrictedError):
+        except ProtectedError, RestrictedError:
             logger.exception(msg="Error in Center DELETE", exc_info=True)
             self.raise_bad_request(
                 "This center cannot be deleted since some objects are dependant on it"
