@@ -140,6 +140,7 @@ REST_FRAMEWORK = {
         "wearable_connect": "20/min",
         "wearable_status": "60/min",
         "health_read": "120/min",
+        "test_direct_phone_login": "20/min",
     },
 }
 
@@ -151,6 +152,11 @@ SPECTACULAR_SETTINGS = {
     "COMPONENT_SPLIT_REQUEST": True,
     "SCHEMA_PATH_PREFIX": r"/",
 }
+
+# Direct-login test bypass is OFF unless development/staging explicitly opts in.
+# Production never enables it (also enforced by the view's settings-module gate).
+TEST_PHONE_LOGIN_ENABLED = False
+TEST_PHONE_LOGIN_KEY = ""
 
 # Simple JWT
 # https://django-rest-framework-simplejwt.readthedocs.io/en/latest/settings.html

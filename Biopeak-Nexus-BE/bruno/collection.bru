@@ -52,6 +52,8 @@ docs {
   Biopeak Nexus API — synced incrementally from Django.
   Auth: collection pre-request sets Authorization from env/collection access_token
   (skips empty runtime var — avoids 401 "Authorization header must contain two space-delimited values").
-  Run Auth → Login Phone Direct first. Webhooks + Google callback + Google
+  On isolated staging, run Auth → Login Phone Direct using Staging-Test env
+  and X-Test-Login-Key. For production, use real OTP login.
+  Webhooks + Google callback + Google
   Calendar webhook + /app/ download redirect skip JWT.
 }

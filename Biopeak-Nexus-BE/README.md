@@ -2,6 +2,8 @@
 
 A robust Biopeak Management Backend built with Django, Django REST Framework, PostgeSQL, etc
 
+**ROOK + Aiven + Render staging full setup:** [step-by-step setup, migrations, webhooks, and background jobs](docs/ROOK-FULL-SETUP-AIVEN-RENDER.md).
+
 ## Features
 
 - **JWT Authentication**: Secure token-based authentication with access and refresh tokens
@@ -479,3 +481,9 @@ For support and questions, please open an issue in the repository or contact the
 
 **Note**: Remember to keep your `.env` file secure and never commit it to version control. Always use environment
 variables for sensitive configuration in production.
+
+## Isolated staging customer/ROOK smoke tests
+
+For the eight synthetic customer accounts and the Aiven/Render setup, see
+[`docs/STAGING-TEST-ACCOUNTS-AIVEN-RENDER.md`](docs/STAGING-TEST-ACCOUNTS-AIVEN-RENDER.md).
+This opt-in test shortcut is not a replacement for production OTP authentication.

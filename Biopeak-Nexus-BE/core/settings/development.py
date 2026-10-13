@@ -104,6 +104,10 @@ WHATSAPP_WABA_ID = config("DEV_WHATSAPP_WABA_ID", None)
 WHATSAPP_APP_ID = config("DEV_WHATSAPP_APP_ID", None)
 WHATSAPP_TEMPLATE_LANGUAGE = config("DEV_WHATSAPP_TEMPLATE_LANGUAGE", "en")
 
+# Restricted synthetic phone-only login for isolated development tests.
+TEST_PHONE_LOGIN_ENABLED = config("DEV_TEST_PHONE_LOGIN_ENABLED", False, cast=bool)
+TEST_PHONE_LOGIN_KEY = config("DEV_TEST_PHONE_LOGIN_KEY", "")
+
 # Wearables / ROOK
 WEARABLES_ENABLED = config("DEV_WEARABLES_ENABLED", True, cast=bool)
 WEARABLES_REQUIRE_PROFILE_FEATURE = config(

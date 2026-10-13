@@ -84,6 +84,7 @@ class RookClient:
         return {
             "Authorization": f"Basic {credentials}",
             "Accept": "application/json",
+            "User-Agent": "BiopeakNexus/1.0",
         }
 
     def request_json(
@@ -191,7 +192,7 @@ class RookClient:
     def revoke_source(self, *, rook_user_id: str, data_source: str) -> None:
         url = (
             f"{self.base_url}/api/v1/user_id/{rook_user_id}/"
-            "data_source/revoke_auth"
+            "data_sources/revoke_auth"
         )
         self.request_json("POST", url, json_body={"data_source": data_source})
 

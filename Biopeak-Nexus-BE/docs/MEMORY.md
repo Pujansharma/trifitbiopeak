@@ -326,3 +326,9 @@ Canonical: [`docs/google-calendar-integration.md`](google-calendar-integration.m
 - Never convert missing health data to zero or interpolate gaps. Frontend receives backend-computed states/actions/graph data and must not calculate trends.
 - Environment flags plus the existing profile feature model gate rollout. Production defaults wearable/timeline APIs off.
 - **No agent migration** — user runs `makemigrations wearables customers` after reviewing models and retention requirements.
+
+## 2026-10-13 — Secure synthetic customer smoke tests
+
+- Temporary `/auth/login-phone-direct/` is a sensitive OTP bypass: keep it disabled in production; development/staging require an explicit flag, a secret `X-Test-Login-Key`, and an allowlist restricted to the eight synthetic customer identities. Never embed that secret in a distributed app.
+- Onboarding test users for ROOK health APIs needs `UserAccount.account_type=customer`, main `CustomerProfile`, and the `wearables` profile feature (when rollout gate enabled). Test against a dedicated staging Aiven DB only.
+- Synthetic phones must use the existing backend's canonical `+91-<10-digit>` format: the earlier seed used compact `+91<10-digit>` and could cause login 400s. Migration owner still owns generating ROOK model migrations.

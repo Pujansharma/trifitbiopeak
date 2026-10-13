@@ -1,7 +1,11 @@
 from django.utils import timezone
 from rest_framework import serializers
 
+from accounts.customers.models import CustomerProfile
+from accounts.models import UserAccount
 from accounts.utils import get_user_model
+from accounts.utils.constants import UserType
+from accounts.verifications.utils.direct_login_testing import TEST_LOGIN_EMAIL_BY_PHONE
 from core.utils.authentication import perform_login_for_user
 from core.utils.fields import PhoneNumberSerializerField
 from core.utils.serializers import BaseSerializer
@@ -65,16 +69,36 @@ class LoginOTPSerializer(BaseSerializer):
 
 
 class DirectPhoneLoginSerializer(BaseSerializer):
-    """Temporary: phone-only login without OTP. Remove in a future release."""
+    """Only allow the eight seeded customer identities, never arbitrary users."""
 
     phone = PhoneNumberSerializerField()
 
     def validate(self, attrs):
         phone = attrs.get("phone")
-        user = User.objects.filter(phone__iexact=phone, is_active=True).first()
-        if not user:
+        expected_email = TEST_LOGIN_EMAIL_BY_PHONE.get(phone)
+        if expected_email is None:
             raise serializers.ValidationError(
-                {"phone": ["Phone number is not registered."]}
+                {"phone": ["Phone is not an authorized synthetic test identity."]}
+            )
+
+        user = User.objects.filter(
+            phone__iexact=phone,
+            email__iexact=expected_email,
+            is_active=True,
+            is_staff=False,
+            is_superuser=False,
+        ).first()
+        if (
+            user is None
+            or not UserAccount.objects.filter(
+                user=user, account_type=UserType.CUSTOMER
+            ).exists()
+            or not CustomerProfile.objects.filter(
+                customer__user=user, is_main=True
+            ).exists()
+        ):
+            raise serializers.ValidationError(
+                {"phone": ["Test customer is not provisioned. Run the seed command."]}
             )
         return perform_login_for_user(user)
 

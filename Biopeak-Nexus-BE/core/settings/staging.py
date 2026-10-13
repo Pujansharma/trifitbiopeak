@@ -17,7 +17,7 @@ DATABASES = {
         "HOST": config("STG_DB_HOST"),
         "PORT": config("STG_DB_PORT"),
         "OPTIONS": {
-            "sslmode": "prefer",
+            "sslmode": config("STG_DB_SSLMODE", "prefer"),
         },
     }
 }
@@ -137,6 +137,10 @@ WHATSAPP_API_VERSION = config("STG_WHATSAPP_API_VERSION", "v23.0")
 WHATSAPP_WABA_ID = config("STG_WHATSAPP_WABA_ID", None)
 WHATSAPP_APP_ID = config("STG_WHATSAPP_APP_ID", None)
 WHATSAPP_TEMPLATE_LANGUAGE = config("STG_WHATSAPP_TEMPLATE_LANGUAGE", "en")
+
+# Restricted synthetic phone-only login; never configure on production.
+TEST_PHONE_LOGIN_ENABLED = config("STG_TEST_PHONE_LOGIN_ENABLED", False, cast=bool)
+TEST_PHONE_LOGIN_KEY = config("STG_TEST_PHONE_LOGIN_KEY", "")
 
 # Wearables / ROOK
 WEARABLES_ENABLED = config("STG_WEARABLES_ENABLED", False, cast=bool)
