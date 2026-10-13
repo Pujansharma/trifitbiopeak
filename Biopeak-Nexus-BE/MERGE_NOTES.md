@@ -38,3 +38,8 @@
 
 ## Retained old-only paths
 - `bruno/leads/v2/PATCH Lead v2 (converted ΓÇö onboarding sent only).bru`
+
+
+## Plain-English change documentation
+
+See `CHANGELOG_FOR_HUMANS.md` for a layman-friendly explanation, full added/changed/old-only file lists, detected Python function/class changes, syntax fixes, validation status, and deployment checklist. `MERGE_MANIFEST.json` contains the same comparison in machine-readable form.

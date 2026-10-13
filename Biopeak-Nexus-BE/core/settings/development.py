@@ -4,6 +4,21 @@ from core.settings.base import *
 
 DEBUG = True
 
+# Fixed OTP is for local development only. Keep disabled unless explicitly needed.
+# The serializer also restricts this bypass to the eight allowlisted test phones.
+LOCAL_TEST_OTP_ENABLED = config("LOCAL_TEST_OTP_ENABLED", False, cast=bool)
+LOCAL_TEST_OTP_CODE = "123456"
+LOCAL_TEST_OTP_PHONES = [
+    "+919000000001",
+    "+919000000002",
+    "+919000000003",
+    "+919000000004",
+    "+919000000005",
+    "+919000000006",
+    "+919000000007",
+    "+919000000008",
+]
+
 ALLOWED_HOSTS = ["*"]
 
 # Debug toolbar
