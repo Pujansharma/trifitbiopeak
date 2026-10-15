@@ -1,0 +1,54 @@
+meta {
+  name: Biopeak-Nexus
+}
+
+auth {
+  mode: none
+}
+
+vars:pre-request {
+  baseURL: http://localhost:8000
+  phone: +91-9999999990
+  customer_user_id: 
+  checklist_item_id: 
+  customer_profile_id: 
+  product_id: 
+  center_id: 
+  appointment_id:
+  idempotency_key: 
+  diagnostics_address: 12 MG Road, Bengaluru, Karnataka 560001
+  diagnostics_request_date: 2026-08-15
+  diagnostics_slot_datetime: 2026-08-15T06:00:00
+  diagnostics_request_id: 
+  diagnostics_test_id: 12345
+  diagnostics_idempotency_key:
+  gcal_webhook_channel_id:
+  gcal_webhook_resource_id:
+}
+
+script:pre-request {
+  const url = String(req.getUrl() || '');
+  if (
+    url.includes('/webhooks/')
+    || url.includes('/google-calendar/callback')
+    || url.includes('/google-calendar/webhook')
+  ) {
+    return;
+  }
+  const token =
+    bru.getEnvVar('access_token') ||
+    bru.getCollectionVar('access_token') ||
+    bru.getVar('access_token') ||
+    '';
+  if (token) {
+    req.setHeader('Authorization', `Bearer ${token}`);
+  }
+}
+
+docs {
+  Biopeak Nexus API — synced incrementally from Django.
+  Auth: collection pre-request sets Authorization from env/collection access_token
+  (skips empty runtime var — avoids 401 "Authorization header must contain two space-delimited values").
+  Run Auth → Login Phone Direct first. Webhooks + Google callback + Google
+  Calendar webhook skip JWT.
+}

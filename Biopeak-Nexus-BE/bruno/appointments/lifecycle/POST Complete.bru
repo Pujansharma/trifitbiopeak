@@ -1,0 +1,24 @@
+meta {
+  name: POST Complete
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseURL}}/centers/{{center_id}}/appointments/{{appointment_id}}/complete/
+  body: json
+  auth: inherit
+}
+
+headers {
+  content-type: application/json
+}
+
+body:json {
+  {}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 30000
+}
