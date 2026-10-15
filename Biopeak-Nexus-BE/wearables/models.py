@@ -76,7 +76,7 @@ class WearableConsent(BaseUUIDModel):
     class Meta:
         ordering = ["-granted_at"]
         indexes = [
-            models.Index(fields=["customer_profile", "status", "granted_at"]),
+            models.Index(fields=["customer_profile", "status", "granted_at"], name="w_wearablecons_1_idx"),
         ]
 
     def __str__(self):
@@ -138,8 +138,8 @@ class WearableConnection(BaseUUIDModel):
             ),
         ]
         indexes = [
-            models.Index(fields=["customer_profile", "status"]),
-            models.Index(fields=["identity", "data_source"]),
+            models.Index(fields=["customer_profile", "status"], name="w_wearableconn_1_idx"),
+            models.Index(fields=["identity", "data_source"], name="w_wearableconn_2_idx"),
         ]
 
     def __str__(self):
@@ -168,7 +168,7 @@ class WearableConnectionEvent(BaseUUIDModel):
 
     class Meta:
         ordering = ["-created_at"]
-        indexes = [models.Index(fields=["connection", "created_at"])]
+        indexes = [models.Index(fields=["connection", "created_at"], name="w_conn_event_1_idx")]
 
     def __str__(self):
         return f"{self.connection_id}:{self.event_type}"
@@ -208,12 +208,12 @@ class RookHealthDocument(BaseUUIDModel):
     class Meta:
         ordering = ["-observed_at"]
         indexes = [
-            models.Index(fields=["customer_profile", "observed_at"]),
+            models.Index(fields=["customer_profile", "observed_at"], name="w_rookhealthdo_1_idx"),
             models.Index(
                 fields=["customer_profile", "data_structure", "observed_at"],
                 name="wear_doc_prof_struct_time",
             ),
-            models.Index(fields=["status", "received_at"]),
+            models.Index(fields=["status", "received_at"], name="w_rookhealthdo_3_idx"),
         ]
 
     def __str__(self):
@@ -242,7 +242,7 @@ class RookWebhookReceipt(BaseUUIDModel):
 
     class Meta:
         ordering = ["-received_at"]
-        indexes = [models.Index(fields=["status", "received_at"])]
+        indexes = [models.Index(fields=["status", "received_at"], name="w_rookwebhookr_1_idx")]
 
     def __str__(self):
         return self.receipt_key
@@ -281,6 +281,8 @@ class HealthObservation(BaseUUIDModel):
     provenance = models.JSONField(default=dict, blank=True)
     confidence = models.FloatField(default=1.0)
     document_version = models.PositiveIntegerField(default=1)
+    # Retain superseded versions for the canonical append-only audit timeline.
+    is_current = models.BooleanField(default=True, db_index=True)
 
     class Meta:
         ordering = ["-observed_at"]
@@ -414,7 +416,7 @@ class HealthProcessingJob(BaseUUIDModel):
 
     class Meta:
         ordering = ["scheduled_at"]
-        indexes = [models.Index(fields=["status", "scheduled_at"])]
+        indexes = [models.Index(fields=["status", "scheduled_at"], name="w_healthproces_1_idx")]
 
     def __str__(self):
         return f"{self.job_type}:{self.status}:{self.idempotency_key}"

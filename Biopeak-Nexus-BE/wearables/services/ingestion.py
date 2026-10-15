@@ -1,4 +1,5 @@
 import hashlib
+from collections import defaultdict
 import json
 from datetime import UTC, date, datetime, time
 from functools import partial
@@ -15,6 +16,7 @@ from wearables.models import (
     RookHealthDocument,
     RookMemberIdentity,
     RookWebhookReceipt,
+    WearableConsent,
     WearableConnection,
 )
 from wearables.services.connections import (
@@ -31,6 +33,7 @@ from wearables.services.provenance import extract_provenance
 from wearables.utils.constants import (
     AuthorizationStatus,
     ConnectionStatus,
+    ConsentStatus,
     DocumentStatus,
     HealthDomain,
     HealthJobType,
@@ -66,7 +69,7 @@ def json_digest(value: Any) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def find_first_value(node: Any, field_names: set[str]) -> Any:
+def find_first_value(node: Any, field_names: list[str]) -> Any:
     if isinstance(node, dict):
         for field_name in field_names:
             if field_name in node and node[field_name] is not None:
@@ -84,7 +87,12 @@ def find_first_value(node: Any, field_names: set[str]) -> Any:
 
 
 def document_datetime_value(payload: dict) -> Any:
-    return find_first_value(payload, set(DOCUMENT_TIME_FIELDS))
+    root_order = ("datetime", "datetime_string", "date_time", "start_datetime_string")
+    for field_name in root_order:
+        value = payload.get(field_name)
+        if value is not None:
+            return value
+    return find_first_value(payload, DOCUMENT_TIME_FIELDS)
 
 
 def parse_document_datetime(payload: dict) -> datetime:
@@ -128,15 +136,10 @@ def document_identity_digest(
     observed_at: datetime,
     payload: dict,
 ) -> str:
-    external_identifier = payload.get("document_id") or payload.get("event_id") or ""
-    return json_digest(
-        [
-            str(customer_profile_id),
-            data_structure,
-            observed_at.isoformat(),
-            str(external_identifier),
-        ]
-    )
+    # ROOK's canonical correction key: same member, structure and UTC instant.
+    # Provider event IDs are intentionally excluded so a higher document_version
+    # can supersede the same observation without creating a duplicate document.
+    return json_digest([str(customer_profile_id), data_structure, observed_at.isoformat()])
 
 
 def receipt_payload(payload: dict) -> dict:
@@ -213,10 +216,11 @@ def promote_matching_connections(
                 PermissionStatus.NOT_DETERMINED,
             }:
                 connection.permission_status = PermissionStatus.GRANTED
-            connection.import_status = HistoricalImportStatus.COMPLETED
+            # Receiving a live document proves sync, not that the entire
+            # historical import completed. ROOK import/recovery completion
+            # is reported separately; keep the progressive-import state.
             connection.last_successful_sync = received_at
             connection.connected_at = connection.connected_at or received_at
-            connection.import_completed_at = received_at
         connection.save()
         if previous_status != connection.status:
             record_connection_event(
@@ -268,6 +272,28 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool) -> dict:
             reason="unknown_user",
         )
         return {"accepted": True, "skipped": True, "reason": "unknown_user"}
+
+    # A recorded withdrawal blocks further ingestion for this customer profile.
+    # Legacy records with no consent row are not silently rejected here; the
+    # connect endpoint enforces explicit consent for all new connections.
+    active_consent = WearableConsent.objects.filter(
+        customer_profile=identity.customer_profile,
+        status=ConsentStatus.GRANTED,
+        revoked_at__isnull=True,
+    ).exists()
+    prior_revocation = WearableConsent.objects.filter(
+        customer_profile=identity.customer_profile,
+        status=ConsentStatus.REVOKED,
+    ).exists()
+    if prior_revocation and not active_consent:
+        create_receipt(
+            receipt_key=receipt_key,
+            payload=payload,
+            signature_valid=signature_valid,
+            status=DocumentStatus.REJECTED,
+            reason="consent_revoked",
+        )
+        return {"accepted": True, "skipped": True, "reason": "consent_revoked"}
 
     observed_at = parse_document_datetime(payload)
     data_structure = document_structure(payload)
@@ -352,6 +378,8 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool) -> dict:
         observed_at=observed_at,
         received_at=received_at,
     )
+    from wearables.services.analytics import invalidate_health_dashboard
+    transaction.on_commit(partial(invalidate_health_dashboard, identity.customer_profile))
     transaction.on_commit(
         partial(
             enqueue_health_job,
@@ -370,13 +398,17 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool) -> dict:
     }
 
 
-def local_date_for_document(document: RookHealthDocument) -> date:
+def local_date_for_instant(document: RookHealthDocument, observed_at: datetime) -> date:
     timezone_name = document.identity.timezone_name
     try:
         member_timezone = ZoneInfo(timezone_name)
-    except ZoneInfoNotFoundError:
+    except (ZoneInfoNotFoundError, ValueError):
         member_timezone = ZoneInfo("UTC")
-    return document.observed_at.astimezone(member_timezone).date()
+    return observed_at.astimezone(member_timezone).date()
+
+
+def local_date_for_document(document: RookHealthDocument) -> date:
+    return local_date_for_instant(document, document.observed_at)
 
 
 def observation_from_metric(
@@ -387,7 +419,13 @@ def observation_from_metric(
     connection: WearableConnection | None,
 ) -> HealthObservation:
     observation_identity = json_digest(
-        [document.document_identity, extracted_metric.field_path, extracted_metric.metric]
+        [document.document_identity, document.document_version, extracted_metric.field_path, extracted_metric.metric]
+    )
+    observed_at = extracted_metric.observed_at or document.observed_at
+    local_date = (
+        local_date_for_instant(document, observed_at)
+        if extracted_metric.observed_at is not None
+        else local_date
     )
     numeric_value = None
     text_value = ""
@@ -406,7 +444,7 @@ def observation_from_metric(
         domain=extracted_metric.domain,
         metric=extracted_metric.metric,
         field_path=extracted_metric.field_path,
-        observed_at=document.observed_at,
+        observed_at=observed_at,
         local_date=local_date,
         numeric_value=numeric_value,
         text_value=text_value,
@@ -433,7 +471,7 @@ def workout_count_observation(
         customer_profile=document.customer_profile,
         document=document,
         connection=connection,
-        observation_identity=json_digest([document.document_identity, "workout_count"]),
+        observation_identity=json_digest([document.document_identity, document.document_version, "workout_count"]),
         domain=HealthDomain.WORKOUTS,
         metric="workout_count",
         field_path="workout_count",
@@ -479,6 +517,7 @@ def rebuild_daily_summaries(
             local_date=local_date,
             domain__in=domains,
             numeric_value__isnull=False,
+            is_current=True,
         )
         .values("domain", "metric", "source_key", "unit")
         .annotate(
@@ -501,6 +540,7 @@ def rebuild_daily_summaries(
                 metric=group["metric"],
                 source_key=group["source_key"],
                 numeric_value__isnull=False,
+                is_current=True,
             )
             .order_by("-observed_at", "-created_at")
             .first()
@@ -562,17 +602,54 @@ def normalize_health_document(document_id) -> dict:
                 connection=connection,
             )
         )
-    affected_domains = set(
-        document.observations.values_list("domain", flat=True).distinct()
+    previous = document.observations.filter(is_current=True)
+    # Query source continuity once per canonical metric, not once per reading.
+    # Event payloads may include thousands of heart-rate readings; a per-event
+    # PostgreSQL query was a major remote-DB latency/SSL risk.
+    earliest_by_metric: dict[tuple[str, str], HealthObservation] = {}
+    for observation in observations:
+        metric_key = (observation.domain, observation.metric)
+        earliest = earliest_by_metric.get(metric_key)
+        if earliest is None or observation.observed_at < earliest.observed_at:
+            earliest_by_metric[metric_key] = observation
+    for earliest in earliest_by_metric.values():
+        prior = (
+            HealthObservation.objects.filter(
+                customer_profile=document.customer_profile,
+                domain=earliest.domain,
+                metric=earliest.metric,
+                is_current=True,
+                observed_at__lte=earliest.observed_at,
+            )
+            .order_by("-observed_at", "-created_at")
+            .first()
+        )
+        if (prior and prior.source_key and earliest.source_key
+                and prior.source_key != earliest.source_key):
+            earliest.provenance["sourceChange"] = {
+                "from": prior.data_sources,
+                "to": earliest.data_sources,
+                "at": earliest.observed_at.isoformat(),
+            }
+            earliest.confidence = 0.5
+    domains_by_day: dict[date, set[str]] = defaultdict(set)
+    for previous_day, previous_domain in previous.values_list("local_date", "domain"):
+        domains_by_day[previous_day].add(previous_domain)
+    for observation in observations:
+        domains_by_day[observation.local_date].add(observation.domain)
+    affected_domains = set().union(*domains_by_day.values()) if domains_by_day else set()
+    # Append-only: historical versions remain queryable for audit/reprocessing;
+    # only the latest version participates in the dashboard and active timeline.
+    previous.filter(document_version__lt=document.document_version).update(
+        is_current=False, updated_at=timezone.now()
     )
-    affected_domains.update(observation.domain for observation in observations)
-    document.observations.all().delete()
-    HealthObservation.objects.bulk_create(observations)
-    if affected_domains:
+    # Keep inserts small: high-resolution ROOK events can carry thousands of readings.
+    HealthObservation.objects.bulk_create(observations, batch_size=200, ignore_conflicts=True)
+    for affected_date, daily_domains in sorted(domains_by_day.items()):
         rebuild_daily_summaries(
             customer_profile=document.customer_profile,
-            local_date=local_date,
-            domains=affected_domains,
+            local_date=affected_date,
+            domains=daily_domains,
         )
     document.status = DocumentStatus.PROCESSED
     document.processed_at = timezone.now()
@@ -589,11 +666,13 @@ def normalize_health_document(document_id) -> dict:
             enqueue_health_job,
             job_type=HealthJobType.REFRESH_ANALYTICS,
             idempotency_key=(
-                f"analytics:{document.customer_profile_id}:"
-                f"{local_date.isoformat()}:{document.document_version}"
+                f"analytics:{document.pk}:{document.document_version}"
             ),
             customer_profile=document.customer_profile,
-            payload={"local_date": local_date.isoformat()},
+            payload={
+                "local_dates": [day.isoformat() for day in sorted(domains_by_day)],
+                "domains": sorted(affected_domains),
+            },
         )
     )
     return {
@@ -601,4 +680,48 @@ def normalize_health_document(document_id) -> dict:
         "observationCount": len(observations),
         "domains": sorted(affected_domains),
         "localDate": local_date.isoformat(),
+        "affectedLocalDates": [day.isoformat() for day in sorted(domains_by_day)],
     }
+
+
+@transaction.atomic
+def remap_member_local_days(customer_profile) -> dict:
+    """Rebuild local-day buckets after timezone travel/change, preserving UTC instants.
+
+    The raw instant and observation version remain unchanged. Both current and
+    superseded observations retain audit history; only current versions are
+    rolled up into materialized summaries.
+    """
+    identity = RookMemberIdentity.objects.select_for_update().get(
+        customer_profile=customer_profile
+    )
+    try:
+        member_zone = ZoneInfo(identity.timezone_name)
+    except ZoneInfoNotFoundError:
+        member_zone = ZoneInfo("UTC")
+    affected_dates: dict[date, set[str]] = {}
+    updated = 0
+    batch = []
+    for observation in HealthObservation.objects.filter(
+        customer_profile=customer_profile
+    ).iterator(chunk_size=500):
+        mapped = observation.observed_at.astimezone(member_zone).date()
+        if mapped != observation.local_date:
+            if observation.is_current:
+                affected_dates.setdefault(observation.local_date, set()).add(observation.domain)
+                affected_dates.setdefault(mapped, set()).add(observation.domain)
+            observation.local_date = mapped
+            batch.append(observation)
+            updated += 1
+            if len(batch) >= 500:
+                HealthObservation.objects.bulk_update(batch, ["local_date"])
+                batch.clear()
+    if batch:
+        HealthObservation.objects.bulk_update(batch, ["local_date"])
+    for local_date, domains in affected_dates.items():
+        rebuild_daily_summaries(
+            customer_profile=customer_profile, local_date=local_date, domains=domains
+        )
+    from wearables.services.analytics import invalidate_health_dashboard
+    transaction.on_commit(lambda: invalidate_health_dashboard(customer_profile))
+    return {"remapped": updated, "affectedDates": len(affected_dates)}

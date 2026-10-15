@@ -14,29 +14,10 @@ REQUEST_TIMEOUT = 10
 BIOPEAK_OUTBOUND_PRIVATE_KEY = "biopeakOutbound"
 BIOPEAK_OUTBOUND_PRIVATE_VALUE = "1"
 
-# Shared (not private) extended property stamped on appointment events. Google
-# keeps private props on the organizer's copy only, shared props also reach every
-# attendee's copy, which is what an associate's personal calendar sync reads
-BIOPEAK_IS_APPOINTMENT_SHARED_KEY = "isAppointment"
-BIOPEAK_IS_APPOINTMENT_SHARED_VALUE = "1"
-
 
 def event_is_biopeak_outbound(event: dict) -> bool:
     private = (event.get("extendedProperties") or {}).get("private") or {}
     return private.get(BIOPEAK_OUTBOUND_PRIVATE_KEY) == BIOPEAK_OUTBOUND_PRIVATE_VALUE
-
-
-def event_is_appointment(event: dict) -> bool:
-    shared = (event.get("extendedProperties") or {}).get("shared") or {}
-    return (
-        shared.get(BIOPEAK_IS_APPOINTMENT_SHARED_KEY)
-        == BIOPEAK_IS_APPOINTMENT_SHARED_VALUE
-    )
-
-
-def event_is_organized_by(event: dict, email: str | None) -> bool:
-    organizer_email = (event.get("organizer") or {}).get("email")
-    return bool(email and organizer_email and organizer_email.lower() == email.lower())
 
 
 def _date_value(value):
@@ -69,7 +50,6 @@ def _event_body(
     all_day: bool = False,
     recurrence: list[str] | None = None,
     biopeak_outbound: bool = False,
-    is_appointment: bool = False,
 ):
     if all_day:
         body = {
@@ -91,17 +71,12 @@ def _event_body(
         }
     if recurrence:
         body["recurrence"] = recurrence
-    extended_properties = {}
     if biopeak_outbound:
-        extended_properties["private"] = {
-            BIOPEAK_OUTBOUND_PRIVATE_KEY: BIOPEAK_OUTBOUND_PRIVATE_VALUE,
+        body["extendedProperties"] = {
+            "private": {
+                BIOPEAK_OUTBOUND_PRIVATE_KEY: BIOPEAK_OUTBOUND_PRIVATE_VALUE,
+            }
         }
-    if is_appointment:
-        extended_properties["shared"] = {
-            BIOPEAK_IS_APPOINTMENT_SHARED_KEY: BIOPEAK_IS_APPOINTMENT_SHARED_VALUE,
-        }
-    if extended_properties:
-        body["extendedProperties"] = extended_properties
     return body
 
 
@@ -138,7 +113,6 @@ def insert_event(
     all_day: bool = False,
     recurrence: list[str] | None = None,
     biopeak_outbound: bool = False,
-    is_appointment: bool = False,
 ):
     body = _event_body(
         title,
@@ -150,7 +124,6 @@ def insert_event(
         all_day=all_day,
         recurrence=recurrence,
         biopeak_outbound=biopeak_outbound,
-        is_appointment=is_appointment,
     )
     if event_id:
         body["id"] = event_id
@@ -191,7 +164,6 @@ def patch_event(
     all_day: bool = False,
     recurrence: list[str] | None = None,
     biopeak_outbound: bool = False,
-    is_appointment: bool = False,
 ):
     # add_meet_link=True rotates the Meet link if the event already has one -
     # only pass True the first time a Meet link is added to this event.
@@ -208,7 +180,6 @@ def patch_event(
         all_day=all_day,
         recurrence=recurrence,
         biopeak_outbound=biopeak_outbound,
-        is_appointment=is_appointment,
     )
     params = {}
     if add_meet_link:

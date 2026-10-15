@@ -1,0 +1,83 @@
+status,relative_path,reason,sha256_in_release
+modified,.env.example,Document safe defaults for ROOK recovery fallback and health cache,5950167e332cde2213dfaf85d9995fddb7b71235574d1de4e70e76eefb5a1ca2
+added,PHASE1_MINIMAL_CHANGE_MANIFEST.csv,Auditable file-by-file release change inventory; SHA omitted to avoid self-reference,
+modified,accounts/admins/views.py,Correct pre-existing invalid Python multi-exception syntax only,74aa5733b38db6cd6ad1290c41f4d567f6db58a7f0ce0212584a66c5488d7b9d
+modified,accounts/centers/views.py,Correct pre-existing invalid Python multi-exception syntax only,59fb97d8ae2a32f9f2011ae24af48b06da8ed930da51f4e8e4e78c885912323b
+added,accounts/customers/migrations/0020_customerprofilefeature_wearables_tab.py,State-only wearable feature tab choice migration; original customer profile fields unchanged,a173eeadbff208b1228027a8ab227c8e756b2e6cb3985acca91da149612e8a22
+added,accounts/organizations/migrations/0003_platformfeature_wearables_tab.py,State-only wearable feature tab choice migration; original customer profile fields unchanged,c0c8980f66da435845b740b953a915cbb79d06abc95cb7ca1f91f3ae7a19b1ce
+modified,accounts/organizations/utils/constants.py,Allow wearable feature-tab choice without changing existing roles,d12a98b55c2202704b7ac2458a55eebb35b796f21f060240b7522c00f0627f29
+added,bruno/devices/GET Devices.bru,"Bruno API test/example for member devices, health or ROOK webhooks",de0fc6937d64d0c32c633fe4bfa80980737fbe032df7cd1479846af36e059316
+added,bruno/devices/GET SDK Config.bru,"Bruno API test/example for member devices, health or ROOK webhooks",575f3f342a413c55425ddb098f404b7107c704ff66b6351d94684f0ea995a4a6
+added,bruno/devices/POST Connect.bru,"Bruno API test/example for member devices, health or ROOK webhooks",bf59f0debef8c9a27d17cfeabea7097f69b518162c33e50f49bc9318f0210526
+added,bruno/devices/POST Disconnect.bru,"Bruno API test/example for member devices, health or ROOK webhooks",326bd483aa66ceab004b5a4694d578d6c77efa16764248decf1df5ab50259e2e
+added,bruno/devices/POST Native Status.bru,"Bruno API test/example for member devices, health or ROOK webhooks",45c2b78430a64d6ed280e2c6069eff48e2d1fc6b6e05f92064a944d3b1f42a08
+added,bruno/devices/POST Retry Sync.bru,"Bruno API test/example for member devices, health or ROOK webhooks",31f1b72962327cb5177015862f5169e835f37b3400b778ea8ff70262d710d5da
+added,bruno/devices/POST Revoke Consent.bru,"Bruno API test/example for member devices, health or ROOK webhooks",cb1477fc3dcfddb732c532133618c7b4c9c227445364deb31658544052180259
+added,bruno/devices/folder.bru,"Bruno API test/example for member devices, health or ROOK webhooks",ea31e634405041d476ab34fcb2e5f3453cb84ce5c24f700c04ab45974c1a7876
+added,bruno/health/GET Dashboard.bru,"Bruno API test/example for member devices, health or ROOK webhooks",ef583096b9f3592024121ff99a9e7233396334ca0e0698e4971070e68db67130
+added,bruno/health/GET Domain.bru,"Bruno API test/example for member devices, health or ROOK webhooks",901d77d1b550c171d1a18987d17e2b54886dba12005d2524069926773baea7e7
+added,bruno/health/GET Timeline.bru,"Bruno API test/example for member devices, health or ROOK webhooks",eae6536093c970a87fe42f3050f7db09a71f0a2eb04bc3e16ab370d049530787
+added,bruno/health/folder.bru,"Bruno API test/example for member devices, health or ROOK webhooks",96c68fd7d0f74a328a6501887d7f2ffa4454608f11540e438eb58b66d432202d
+added,bruno/webhooks/rook/POST Data.bru,"Bruno API test/example for member devices, health or ROOK webhooks",8a549425c9e4db5cbabaf5c60a14843eb233a10188366c500cf5c23bfca3c3dc
+added,bruno/webhooks/rook/POST Notification.bru,"Bruno API test/example for member devices, health or ROOK webhooks",0ec31e9f7437c86d67c043ce06a386f4458c2ba497b6ee7e8356d12994f2585d
+added,bruno/webhooks/rook/folder.bru,"Bruno API test/example for member devices, health or ROOK webhooks",1b1335ea9ab02f367f29d22b161dcef143faabaceb9232f2cedc2c20a9a5c371
+modified,core/api/urls.py,Register member-scoped /devices/ and /health/ endpoints,b0b98e01ec3bdfe7080b6590a030a3601ed6fbfc2bd5cf01c7a05c95e0bf2299
+modified,core/settings/base.py,"Register wearables Django app, API throttles, health cache, CORS setting",30d2cfb2fe9000426d68b44bba0567c3c50f19b5b128022337aa163df1fa1f44
+modified,core/settings/development.py,Environment-scoped ROOK health and bounded opt-in event fallback settings,ad3693fb15faae499201c9d27af1815f584c2b3d172348034c4cfdc14d1152a4
+modified,core/settings/production.py,Environment-scoped ROOK health and feature flags (disabled by default),1b5a5d7adde67ef7e9638cc94dc27b63d587ed25d2dfa1af48fc117a7ed04532
+modified,core/settings/staging.py,Environment-scoped ROOK health and bounded opt-in event fallback settings,4ca46d0add1511b19b8c24e122e42b8b17b31f16e8de6157f3912251daf0b42d
+added,docs/PHASE1_MINIMAL_INTEGRATION_HANDOVER.md,Wearable Phase 1 API/setup/implementation documentation,3782ec6adac3b0fd5b63409eb976473f0807deda34c74d1495625913565155c2
+added,docs/PHASE1_PRD_FIXES_AND_REMAINING_GATES.md,"Audit follow-up: fixes, PRD alignment and explicit operational release gates",71817fbce40a4f1bb46a1217b5effe5b8715fe313cec885d77bb397162dcf1b4
+added,docs/PHASE1_PRD_IMPLEMENTATION_STATUS.md,Wearable Phase 1 API/setup/implementation documentation,5eae3de57833e74e7343ca13f1ecd85589677f1dbd4d95def8a4a0180eafa576
+added,docs/wearables-phase-1-backend.md,Wearable Phase 1 API/setup/implementation documentation,4d4c7354b71524c0ccc0edf464a2cafa80133ad0e25ebad75d9876e53735f40a
+modified,products/views.py,Correct pre-existing invalid Python multi-exception syntax only,c04844ded4df104cf24df6fa8bcd28347b057459d6e81721d939d876dc321a13
+modified,programs/services/assessment/views.py,Correct pre-existing invalid Python multi-exception syntax only,b67d139cf341b252b389d5fb7dafc82b4ae0b7c3712b1e6c17acdb55bd42a2ee
+modified,programs/services/therapy/views.py,Correct pre-existing invalid Python multi-exception syntax only,3cfdcba47f1c7129778d90153626d94a84d5d1744cb14dbd4d815362069b946c
+modified,programs/services/views.py,Correct pre-existing invalid Python multi-exception syntax only,4f012ebeceac0f43eb00aef2ca6caf563edd4566f38579c58aaf79fce3ab73e8
+added,scripts/check_phase1_behavior_offline.py,Dependency-free pure behavior regression checks (not Django integration suite),e0457f343ab1bead5cc692d60424184d2b65dd65b745cfaa9d268f366c8ee682
+added,scripts/check_phase1_minimal_static.py,Wearable source-level static/validation checks,d38686616e826cf255655b32eba3cd55a87ec7acf8255ff57b8e40c754c42ce8
+added,scripts/check_phase1_static.py,Wearable source-level static/validation checks,6f05a2cd7035328e8a97e0fd28456cd0d1cefe916238874564d7397f6bcfd025
+added,wearables/__init__.py,Isolated ROOK/wearables integration module,01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
+added,wearables/admin.py,Isolated ROOK/wearables integration module,18a1002f57167666764ab2f7bcb569f69347e8adbdd0b55bd809faf586496947
+added,wearables/apps.py,Isolated ROOK/wearables integration module,abd835803d34f47c54d9f00ea37ee7b8fd19a68a852bfdd16057dd4f8384393b
+added,wearables/device_urls.py,Isolated ROOK/wearables integration module,b89e74266413d609bdb2df617e5ff7e38db569d2dee1a76f5aaeec2d9f5b45d6
+added,wearables/health_urls.py,Isolated ROOK/wearables integration module,6477d6ff434db00312e0ea54abf8d37ac2bae40e6f63b2c2f7ac09cf2417c683
+added,wearables/management/__init__.py,Isolated ROOK/wearables integration module,01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
+added,wearables/management/commands/__init__.py,"Health background jobs, freshness and operational status management",01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
+added,wearables/management/commands/enqueue_health_freshness_checks.py,"Health background jobs, freshness and operational status management",e3021add7ab42ee4a311a21b524d10af118a905dc0ed326e5e6ea2b294a0a3da
+added,wearables/management/commands/health_phase1_status.py,"Health background jobs, freshness and operational status management",401aea93325b082bf21e579b41afbcd165ebaecbad1488402d82c1b45d531ab9
+added,wearables/management/commands/process_health_jobs.py,"Health background jobs, freshness and operational status management",4e518307ba3142fea090089c9662d2258b9fefa4ed9c577a598584240d7fdddb
+added,wearables/management/commands/purge_rook_raw_payloads.py,Optional dry-run-only-by-default processed raw payload retention purge,cd35cc66050a0a00895815f2e1a79f1d5cfa8bc99c23e7a9ae4b701667bdde9e
+added,wearables/migrations/0001_initial.py,New additive wearable health schema migration,d931a809bff0b708e00353a399606f3250ebd6914a09b406b54de4895e4f1953
+added,wearables/migrations/__init__.py,New additive wearable health schema migration,e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+added,wearables/models.py,Isolated ROOK/wearables integration module,da0bc3690d700ceaeef951b6338f857a34b522059c73bc2cfeae31d08e2536bc
+added,wearables/serializers.py,Isolated ROOK/wearables integration module,84a2e051337d1229e26141a44946766eb73a79576a895bb4a6a97f626103e8dd
+added,wearables/services/__init__.py,Isolated ROOK/wearables integration module,01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
+added,wearables/services/analytics.py,"Six health domain cards, consistent graph windows, provider states, data revisions and unified timeline events",44b662fc2d607c9c44a32de571abfed825f4193728876ca0cb406abd8558fffa
+added,wearables/services/client.py,ROOK authorizer/revoke/recovery client and optional whitelisted processed-event API fallback,2679f49960fc7c635aec770dd71b3f95067b73a998a5b8ba2cf6cd7cb5d06844
+added,wearables/services/connections.py,Isolated ROOK/wearables integration module,2ab952242b7f302cb520193d82a79e2838cd79c2b407217481144468ec4d6884
+added,wearables/services/identity.py,Isolated ROOK/wearables integration module,e865fb37191d4cc6f2925c5a9c20b722664403e3520322e250351d104f8e88af
+added,wearables/services/ingestion.py,"Signed ROOK document ingestion, consent checks, version corrections, daily summary rebuild, bounded bulk inserts",32fa63f6e4a878eff240f5a5a3edfb88a8db0bd0718a2d032e0f11d4cbb00b14
+added,wearables/services/job_processor.py,"Durable retryable worker, event-recovery safeguards, stale DB connection refresh, profile-specific processing",11ba201b44a03049306b7bbd959946a0c3044551c2f886ff67e322cc187a40c8
+added,wearables/services/job_queue.py,Isolated ROOK/wearables integration module,a5570e137757beb80162060cbafce8121a08ae59eed31cb31fcafeb602432599
+added,wearables/services/metrics.py,Extract normalized metric values preserving individual measurement timestamps,6fee048681b2eb7c350f6629fcf0f2f7816d5422dd6ab5a59bb0c80d635527d6
+added,wearables/services/notifications.py,Isolated ROOK/wearables integration module,07613ca3df47898f72f5ac9c6330076562cac0a5b2826c298b3ddb46c8ffa1da
+added,wearables/services/privacy.py,Member/profile-specific consent withdrawal preserving historical observations,da15f6d205d9e41231559b71c5ed43ad73c56e21f9ff64fea5983686810b2f56
+added,wearables/services/provenance.py,Isolated ROOK/wearables integration module,3ea3ce948f14759302970c05b9e9d2d0f649fca2656ed0d6791ac71877380d0b
+added,wearables/services/signature.py,Isolated ROOK/wearables integration module,e4f36fe3f4687b6da31529bf52a586e4f0d825ce26efe23aff7fd6201fd84fa7
+added,wearables/tests/__init__.py,"Wearable API, analytics, ingestion, privacy and event regression tests",01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
+added,wearables/tests/test_analytics.py,"Wearable API, analytics, ingestion, privacy and event regression tests",52029434587f33777927709258d77388ea00ad4fbb0513206cf2adff8320baa3
+added,wearables/tests/test_client.py,"Wearable API, analytics, ingestion, privacy and event regression tests",9db9c3fbd54e5d969365e0c41bd5f88310b8f5bf88e8910b9e4ea2c031c5bc06
+added,wearables/tests/test_ingestion.py,"Wearable API, analytics, ingestion, privacy and event regression tests",83c6ce21e3128fb435d23f043cbc02ac951154494f6088566eb88c1cb37b3328
+added,wearables/tests/test_job_filter.py,"Wearable API, analytics, ingestion, privacy and event regression tests",2b5ac00664ff9eb2e7bdb97afc3edc9d00eb875f604605ea84216b5651fad591
+added,wearables/tests/test_metrics.py,"Wearable API, analytics, ingestion, privacy and event regression tests",022005993d49923b0107f6c9bf7b73d286e02130ceddbb627bfc714133693b65
+added,wearables/tests/test_notifications.py,"Wearable API, analytics, ingestion, privacy and event regression tests",23e5b273e51fe14b206659f0b75b3872842556db9cd6de887116f966824a68d1
+added,wearables/tests/test_phase1_regression.py,"Wearable API, analytics, ingestion, privacy and event regression tests",1b03b86ef659c3cb0fadff144af67f36c2ef7bc75f16bd4e443b01a938a32626
+added,wearables/tests/test_signature.py,"Wearable API, analytics, ingestion, privacy and event regression tests",c2a2f59713134ea3b7d1cf06adea3273806cd83c40e70a18d2aca54ffa97768b
+added,wearables/utils/__init__.py,Isolated ROOK/wearables integration module,01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
+added,wearables/utils/constants.py,Isolated ROOK/wearables integration module,cffe21d4c3e39491b73e12341b86c4a7c27c117263bc6450c8d35c03407c1452
+added,wearables/views.py,Isolated ROOK/wearables integration module,6598f8335c73cddb66da9b7216199598e6336a36c7bfc53fc91714032cd6f94b
+added,webhooks/rook/__init__.py,Signed ROOK data/notification webhook integration,01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
+added,webhooks/rook/urls.py,Signed ROOK data/notification webhook integration,7768a05485a6fe192987227abeaf142a2412a08792a48506612064d0a62fccb3
+added,webhooks/rook/views.py,Signed ROOK data/notification webhook integration,6092b3666a3ce8ad5748084937256006a8f683704d1af4015bb4ae2ef8543ca7
+modified,webhooks/urls.py,Register ROOK signed webhook data and notification routes,25a5f310a52252530087b638192d43c9c9889409a3f312a7ba57d32585bd7aa6

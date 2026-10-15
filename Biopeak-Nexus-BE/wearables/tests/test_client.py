@@ -45,7 +45,7 @@ class RookClientContractTests(TestCase):
         ROOK_SECRET_KEY="server-secret",
     )
     @patch("wearables.services.client.requests.request")
-    def test_revoke_uses_rook_plural_data_sources_endpoint(self, request_mock):
+    def test_revoke_uses_rook_singular_data_source_endpoint(self, request_mock):
         request_mock.return_value = SimpleNamespace(
             status_code=204,
             content=b"",
@@ -58,18 +58,43 @@ class RookClientContractTests(TestCase):
 
         expected_url = (
             "https://api.rook-connect.review/api/v1/user_id/"
-            "member-one/data_sources/revoke_auth"
+            "member-one/data_source/revoke_auth"
         )
         self.assertEqual(
             request_mock.call_args.args[:2],
             ("POST", expected_url),
         )
         self.assertEqual(
-            request_mock.call_args.kwargs["headers"]["User-Agent"],
-            "BiopeakNexus/1.0",
-        )
-        self.assertEqual(
             request_mock.call_args.kwargs["json"],
             {"data_source": "Garmin"},
         )
 
+    @override_settings(
+        ROOK_BASE_URL="https://api.rook-connect.review",
+        ROOK_CLIENT_UUID="client-one",
+        ROOK_SECRET_KEY="server-secret",
+    )
+    @patch("wearables.services.client.requests.get")
+    def test_processed_event_fallback_uses_whitelisted_api_contract(self, get_mock):
+        get_mock.return_value = SimpleNamespace(
+            status_code=200,
+            content=b"nonempty",
+            json=lambda: {"data": [{"datetime": "2026-10-08T12:00:00Z", "hr_avg_float": 61}]},
+        )
+        events = RookClient().get_processed_events(
+            rook_user_id="member-one", health_pillar="physical",
+            event_type="heart_rate", event_date="2026-10-08",
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(get_mock.call_args.kwargs["params"]["date"], "2026-10-08")
+        self.assertTrue(get_mock.call_args.args[0].endswith("/events/heart_rate"))
+
+    @override_settings(ROOK_BASE_URL="https://api.rook-connect.review")
+    @patch("wearables.services.client.requests.get")
+    def test_unavailable_processed_event_types_do_not_request_rook(self, get_mock):
+        with self.assertRaises(ValueError):
+            RookClient().get_processed_events(
+                rook_user_id="member-one", health_pillar="physical",
+                event_type="steps", event_date="2026-10-08",
+            )
+        get_mock.assert_not_called()

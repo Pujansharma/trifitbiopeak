@@ -4,41 +4,14 @@ import hmac
 from django.conf import settings
 
 
-def metadata_datetime_string(node) -> str:
-    """Locate the signed metadata timestamp in a ROOK health document.
-
-    The ROOK portal signs the literal ``metadata.datetime_string``; this
-    timestamp is often nested under sleep/physical/body summary objects.
-    """
-    if isinstance(node, dict):
-        metadata = node.get("metadata")
-        if isinstance(metadata, dict):
-            timestamp = metadata.get("datetime_string")
-            if isinstance(timestamp, str) and timestamp:
-                return timestamp
-        for value in node.values():
-            timestamp = metadata_datetime_string(value)
-            if timestamp:
-                return timestamp
-    elif isinstance(node, list):
-        for item in node:
-            timestamp = metadata_datetime_string(item)
-            if timestamp:
-                return timestamp
-    return ""
-
-
 def signature_message(payload: dict) -> str:
-    if not isinstance(payload, dict):
+    values = [
+        payload.get(field_name)
+        for field_name in ("client_uuid", "user_id", "datetime")
+    ]
+    if not all(isinstance(value, str) and value for value in values):
         return ""
-    client_uuid = payload.get("client_uuid")
-    user_id = payload.get("user_id")
-    # Retain the legacy root datetime fallback for existing notification
-    # payloads; actual health documents use metadata.datetime_string.
-    timestamp = metadata_datetime_string(payload) or payload.get("datetime")
-    if not all(isinstance(value, str) and value for value in (client_uuid, user_id, timestamp)):
-        return ""
-    return f"{client_uuid}{user_id}{timestamp}"
+    return "".join(values)
 
 
 def verify_rook_webhook_signature(

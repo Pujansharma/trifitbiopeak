@@ -13,7 +13,6 @@ post {
 headers {
   Accept: application/json
   Content-Type: application/json
-  X-Test-Login-Key: {{test_login_key}}
 }
 
 body:json {
@@ -55,8 +54,5 @@ settings {
 }
 
 docs {
-  RESTRICTED to eight synthetic accounts, development/staging ONLY.
-  Set test_login_key from DEV_/STG_TEST_PHONE_LOGIN_KEY (never commit its value).
-  Run seed_direct_login_test_users first, then this request stores customer JWT.
-  Normal mobile production login MUST use request-otp + login-otp instead.
+  Phone-only login without OTP. Looks up existing active User by phone. Create lead via leads/v2 first. Post-response stores JWT on env + collection as access_token.
 }

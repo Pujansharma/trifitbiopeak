@@ -104,8 +104,6 @@ class ServiceResultMode(models.TextChoices):
 class ResultRequestStatus(models.TextChoices):
     QUEUED = "queued", "Queued"
     RUNNING = "running", "Running"
-    SUBMITTED = "submitted", "Submitted"
-    PENDING = "pending", "Pending"
     COMPLETED = "completed", "Completed"
     PARTIALLY_FETCHED = "partially_fetched", "Partially Fetched"
     FAILED = "failed", "Failed"

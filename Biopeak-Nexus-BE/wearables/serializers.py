@@ -17,17 +17,24 @@ class DeviceConnectSerializer(BaseSerializer):
     data_source = serializers.ChoiceField(choices=WearableSource.choices)
     consent_accepted = serializers.BooleanField(write_only=True)
     consent_version = serializers.CharField(max_length=32, default="v1")
-    historical_days = serializers.IntegerField(
-        min_value=0,
-        max_value=180,
-        default=settings.ROOK_HISTORICAL_DAYS,
-    )
+    historical_days = serializers.IntegerField(min_value=0, max_value=29, required=False)
     redirect_url = serializers.URLField(required=False, allow_blank=False)
     timezone_name = serializers.CharField(max_length=64, required=False)
     preferred_units = serializers.ChoiceField(
         choices=PreferredUnits.choices,
         required=False,
     )
+
+    def validate(self, attrs):
+        source = attrs.get("data_source")
+        max_days = 29 if source in NATIVE_WEARABLE_SOURCES else 7
+        requested = attrs.get("historical_days", min(getattr(settings, "ROOK_HISTORICAL_DAYS", 7), max_days))
+        if requested > max_days:
+            raise serializers.ValidationError({
+                "historical_days": f"ROOK supports a maximum of {max_days} days for this connection type."
+            })
+        attrs["historical_days"] = requested
+        return attrs
 
     def validate_consent_accepted(self, value):
         if value is not True:
@@ -62,7 +69,7 @@ class NativeDeviceStatusSerializer(BaseSerializer):
     timezone_name = serializers.CharField(max_length=64, required=False)
     historical_days = serializers.IntegerField(
         min_value=0,
-        max_value=180,
+        max_value=29,
         required=False,
     )
 

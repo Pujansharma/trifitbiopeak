@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import NotFound
 
@@ -48,6 +49,16 @@ def get_or_create_rook_identity(
     if update_fields:
         update_fields.append("updated_at")
         identity.save(update_fields=update_fields)
+        from wearables.services.analytics import invalidate_health_dashboard
+        invalidate_health_dashboard(customer_profile)
+        if "timezone_name" in update_fields:
+            from wearables.services.job_queue import enqueue_health_job
+            from wearables.utils.constants import HealthJobType
+            transaction.on_commit(lambda: enqueue_health_job(
+                job_type=HealthJobType.REMAP_TIMEZONE,
+                idempotency_key=f"timezone:{customer_profile.pk}:{identity.timezone_name}:{identity.updated_at.isoformat()}",
+                customer_profile=customer_profile,
+            ))
     return identity
 
 

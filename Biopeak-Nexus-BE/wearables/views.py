@@ -25,13 +25,17 @@ from wearables.services.analytics import (
 from wearables.services.client import RookConfigurationError, RookServiceError
 from wearables.services.connections import (
     disconnect_connection,
+    record_connection_event,
     refresh_authorizing_connections,
     serialize_connection,
     start_connection,
     update_native_connection,
 )
 from wearables.services.identity import resolve_customer_profile
-from wearables.utils.constants import HEALTH_DOMAIN_ORDER, ConnectionMethod
+from wearables.services.privacy import revoke_profile_wearable_consent
+from wearables.services.job_queue import enqueue_health_job
+from wearables.utils.constants import (HEALTH_DOMAIN_ORDER, ConnectionMethod, ConnectionStatus,
+    HealthJobType, HistoricalImportStatus)
 
 
 class WearablesAPIView(BaseGenericAPIView):
@@ -152,6 +156,22 @@ class DeviceDisconnectView(WearablesAPIView):
             "connection": serialize_connection(connection) if connection else None,
         }
         return self.send_response("Wearable disconnected. History was retained.", data)
+
+
+class DeviceConsentRevokeView(WearablesAPIView):
+    """Explicit, profile-scoped consent withdrawal (no history destruction)."""
+    throttle_classes = (ScopedRateThrottle,)
+    throttle_scope = "wearable_connect"
+
+    @extend_schema(responses=OpenApiTypes.OBJECT)
+    def post(self, request, *args, **kwargs):
+        customer_profile = self.get_customer_profile()
+        result = revoke_profile_wearable_consent(
+            customer_profile=customer_profile,
+            actor_user=request.user,
+            correlation_id=self.correlation_id(),
+        )
+        return self.send_response("Wearable consent withdrawn.", result)
 
 
 class DeviceSDKConfigView(WearablesAPIView):
@@ -275,3 +295,47 @@ class HealthTimelineView(WearablesAPIView):
         )
         return self.send_response("Health timeline retrieved.", data)
 
+
+
+class DeviceRetrySyncView(WearablesAPIView):
+    """Retry a failed/delayed API import without rebuilding provider integrations."""
+    serializer_class = DeviceDisconnectSerializer
+    throttle_classes = (ScopedRateThrottle,)
+    throttle_scope = "wearable_connect"
+
+    @extend_schema(responses=OpenApiTypes.OBJECT)
+    def post(self, request, *args, **kwargs):
+        customer_profile = self.get_customer_profile()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        source = serializer.validated_data["data_source"]
+        connection = WearableConnection.objects.filter(
+            customer_profile=customer_profile, data_source=source
+        ).first()
+        if connection is None:
+            raise NotFound("Device connection was not found.")
+        if connection.status == ConnectionStatus.DISCONNECTED:
+            self.raise_bad_request("Reconnect this provider before retrying synchronization.")
+        if connection.connection_method == ConnectionMethod.SDK:
+            self.raise_bad_request("Re-run the ROOK native SDK sync on the member's device.")
+        connection.import_status = HistoricalImportStatus.RUNNING
+        connection.save(update_fields=["import_status", "updated_at"])
+        job = enqueue_health_job(
+            job_type=HealthJobType.RECOVERY_PULL,
+            idempotency_key=f"manual-recovery:{connection.pk}:{uuid.uuid4()}",
+            customer_profile=customer_profile,
+            connection=connection,
+        )
+        record_connection_event(
+            connection,
+            event_type="manual_sync_requested",
+            previous_status=connection.status,
+            actor_user=request.user,
+            correlation_id=self.correlation_id(),
+            detail="Member requested another ROOK API recovery attempt.",
+        )
+        return self.send_response(
+            "ROOK sync retry queued.",
+            {"jobId": str(job.pk), "queued": True, "connection": serialize_connection(connection)},
+            status=202,
+        )

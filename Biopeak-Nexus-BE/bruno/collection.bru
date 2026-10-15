@@ -24,8 +24,6 @@ vars:pre-request {
   diagnostics_idempotency_key:
   gcal_webhook_channel_id:
   gcal_webhook_resource_id:
-  app_download_src: lobby
-  app_download_campaign:
 }
 
 script:pre-request {
@@ -34,7 +32,6 @@ script:pre-request {
     url.includes('/webhooks/')
     || url.includes('/google-calendar/callback')
     || url.includes('/google-calendar/webhook')
-    || url.includes('/app/')
   ) {
     return;
   }
@@ -52,8 +49,6 @@ docs {
   Biopeak Nexus API — synced incrementally from Django.
   Auth: collection pre-request sets Authorization from env/collection access_token
   (skips empty runtime var — avoids 401 "Authorization header must contain two space-delimited values").
-  On isolated staging, run Auth → Login Phone Direct using Staging-Test env
-  and X-Test-Login-Key. For production, use real OTP login.
-  Webhooks + Google callback + Google
-  Calendar webhook + /app/ download redirect skip JWT.
+  Run Auth → Login Phone Direct first. Webhooks + Google callback + Google
+  Calendar webhook skip JWT.
 }

@@ -116,6 +116,8 @@ def process_rook_notification(payload: dict) -> dict:
         connection.last_error_code = ""
         connection.last_error_detail = ""
     connection.save()
+    from wearables.services.analytics import invalidate_health_dashboard
+    invalidate_health_dashboard(connection.customer_profile)
     record_connection_event(
         connection,
         event_type="rook_notification",

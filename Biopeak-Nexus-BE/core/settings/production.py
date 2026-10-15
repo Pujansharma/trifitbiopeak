@@ -103,13 +103,7 @@ LOGGING = {
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://[\w-]+\.biopeak\.com$",
 ]
-CORS_ALLOW_HEADERS = [
-    *default_headers,
-    "x-center-id",
-    "idempotency-key",
-    "x-customer-profile-id",
-    "x-correlation-id",
-]
+CORS_ALLOW_HEADERS = [*default_headers, "x-center-id", "idempotency-key", "x-customer-profile-id", "x-correlation-id"]
 
 # Other
 
@@ -147,6 +141,15 @@ WHATSAPP_API_VERSION = config("PRD_WHATSAPP_API_VERSION", "v23.0")
 WHATSAPP_WABA_ID = config("PRD_WHATSAPP_WABA_ID", None)
 WHATSAPP_APP_ID = config("PRD_WHATSAPP_APP_ID", None)
 WHATSAPP_TEMPLATE_LANGUAGE = config("PRD_WHATSAPP_TEMPLATE_LANGUAGE", "en")
+WHATSAPP_TEMPLATE_CONFIRMED = config(
+    "PRD_WHATSAPP_TEMPLATE_CONFIRMED", "appointment_confirmed"
+)
+WHATSAPP_TEMPLATE_CANCELLED = config(
+    "PRD_WHATSAPP_TEMPLATE_CANCELLED", "appointment_cancelled"
+)
+WHATSAPP_TEMPLATE_RESCHEDULED = config(
+    "PRD_WHATSAPP_TEMPLATE_RESCHEDULED", "appointment_rescheduled"
+)
 
 # Wearables / ROOK
 WEARABLES_ENABLED = config("PRD_WEARABLES_ENABLED", False, cast=bool)
@@ -156,6 +159,9 @@ WEARABLES_REQUIRE_PROFILE_FEATURE = config(
 TIMELINE_ENABLED = config("PRD_TIMELINE_ENABLED", False, cast=bool)
 RECOVERY_DOMAIN_ENABLED = config("PRD_RECOVERY_DOMAIN_ENABLED", True, cast=bool)
 BODY_DOMAIN_ENABLED = config("PRD_BODY_DOMAIN_ENABLED", True, cast=bool)
+ROOK_RECOVERY_INCLUDE_EVENTS = config("PRD_ROOK_RECOVERY_INCLUDE_EVENTS", False, cast=bool)
+ROOK_RECOVERY_EVENT_DAYS = config("PRD_ROOK_RECOVERY_EVENT_DAYS", 1, cast=int)
+ROOK_RECOVERY_MAX_EVENTS_PER_REQUEST = config("PRD_ROOK_RECOVERY_MAX_EVENTS_PER_REQUEST", 500, cast=int)
 ROOK_ENVIRONMENT = config("PRD_ROOK_ENVIRONMENT", "production")
 ROOK_BASE_URL = config("PRD_ROOK_BASE_URL", "https://api.rook-connect.com")
 ROOK_CLIENT_UUID = config("PRD_ROOK_CLIENT_UUID", "")

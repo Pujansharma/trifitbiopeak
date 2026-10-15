@@ -135,7 +135,8 @@ class ProgramServiceRedemptionHistory(BaseListAPIView):
             RedemptionHistory.objects.filter(
                 therapy_program_service=therapy_program_service
             )
-            .select_related("redeemed_by", "redeem_center", "appointment")
+            .select_related("redeemed_by", "redeem_center")
+            .prefetch_related()
             .order_by("-redeemed_date", "-redeemed_at")
         )
         return qs

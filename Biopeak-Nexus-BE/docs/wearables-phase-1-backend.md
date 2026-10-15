@@ -2,7 +2,7 @@
 
 ## Status
 
-Phase 1 is implemented as an additive Django/PostgreSQL module. The implementation uses only the new Biopeak API names. No `/wearable/*` compatibility aliases are registered.
+Phase 1 backend implementation exists as an additive Django/PostgreSQL module. Production readiness and live integration remain subject to the gates in [PHASE1_PRD_IMPLEMENTATION_STATUS.md](PHASE1_PRD_IMPLEMENTATION_STATUS.md). The implementation uses only the new Biopeak API names. No `/wearable/*` compatibility aliases are registered.
 
 This phase includes:
 
@@ -47,6 +47,7 @@ All member endpoints require a Biopeak customer JWT. Responses use Biopeak's `{d
 | `GET` | `/devices/` | Connections, authorization, permission, import, freshness, errors, and backend-provided actions |
 | `POST` | `/devices/connect/` | Record consent and initiate API or SDK authorization |
 | `POST` | `/devices/disconnect/` | Revoke one provider while retaining all history |
+| `POST` | `/devices/retry-sync/` | Request recovery for an API-based ROOK source |
 | `GET` | `/devices/sdk-config/` | Return profile-specific ROOK mobile SDK configuration after native connect consent |
 | `POST` | `/devices/native-status/` | Record SDK linking, OS permission state, capabilities, and timezone for an initiated native connection |
 
@@ -59,13 +60,13 @@ Example connection request:
   "data_source": "Garmin",
   "consent_accepted": true,
   "consent_version": "v1",
-  "historical_days": 29,
+  "historical_days": 7,
   "timezone_name": "Asia/Kolkata",
   "preferred_units": "metric"
 }
 ```
 
-Native sources are `Apple Health`, `Health Connect`, and `Samsung Health`. API sources are `Garmin`, `Fitbit`, `Oura`, `Polar`, `Withings`, `Whoop`, and `Dexcom`.
+Native sources are `Apple Health`, `Health Connect`, and `Samsung Health`. API sources are `Garmin`, `Fitbit`, `Oura`, `Polar`, `Withings`, `Whoop`, `Dexcom`, and `Strava`.
 
 ### Health
 
@@ -113,11 +114,11 @@ Signed ROOK v2 deliveries are accepted as one document per request. Unsigned arr
 | `HealthDomainSnapshot` | Versioned presentation snapshot for each domain |
 | `HealthProcessingJob` | Durable normalization, analytics, status, revocation, freshness, and recovery jobs |
 
-Historical observations are never deleted by disconnect. Raw-data retention must be set by the approved DPDP retention policy before a cleanup command is added.
+Historical observations are never deleted by disconnect. An opt-in dry-run-first raw payload purge command is included. Run it only after DPDP retention policy approval; it never removes canonical observations.
 
 ## Idempotency and Corrections
 
-Document identity is based on profile, ROOK data structure, observation datetime, and the ROOK document/event identifier when supplied.
+Document identity is based on profile, ROOK data structure and UTC observation datetime. ROOK document/event identifiers are not included in this correction key.
 
 - Exact payload replay: acknowledged and ignored.
 - Lower `document_version`: acknowledged and ignored.

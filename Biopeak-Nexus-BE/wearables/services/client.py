@@ -64,6 +64,16 @@ def validate_authorization_url(data_source: str, value: Any) -> str | None:
     return value
 
 
+# ROOK PRD section 5.2: steps events are webhook-only and intentionally excluded.
+ROOK_PROCESSED_EVENT_TYPES = {
+    "physical": ("activity", "heart_rate", "oxygenation", "stress"),
+    "body": (
+        "body_metrics", "heart_rate", "oxygenation", "nutrition", "mood",
+        "hydration", "blood_glucose", "blood_pressure", "temperature",
+    ),
+}
+
+
 class RookClient:
     def __init__(self):
         self.base_url = getattr(settings, "ROOK_BASE_URL", "").rstrip("/")
@@ -84,7 +94,6 @@ class RookClient:
         return {
             "Authorization": f"Basic {credentials}",
             "Accept": "application/json",
-            "User-Agent": "BiopeakNexus/1.0",
         }
 
     def request_json(
@@ -159,6 +168,44 @@ class RookClient:
             raise RookServiceError("ROOK returned invalid recovery documents.")
         return documents
 
+    def get_processed_events(
+        self,
+        *,
+        rook_user_id: str,
+        health_pillar: str,
+        event_type: str,
+        event_date: str,
+    ) -> list[dict]:
+        """Optional PRD §5.2 API fallback (requires live ROOK contract verification)."""
+        allowed = ROOK_PROCESSED_EVENT_TYPES.get(health_pillar, ())
+        if event_type not in allowed:
+            raise ValueError("Unsupported ROOK processed-event endpoint.")
+        url = f"{self.base_url}/v2/processed_data/{health_pillar}_health/events/{event_type}"
+        try:
+            response = requests.get(
+                url,
+                headers=self.authentication_headers(),
+                params={"user_id": rook_user_id, "date": event_date},
+                timeout=(self.connect_timeout, self.read_timeout),
+            )
+        except requests.RequestException as error:
+            raise RookServiceError("ROOK event recovery could not be reached.") from error
+        if response.status_code == 204 or not response.content:
+            return []
+        if response.status_code >= 400:
+            raise RookServiceError(f"ROOK event recovery failed with HTTP {response.status_code}.")
+        try:
+            payload = response.json()
+        except ValueError as error:
+            raise RookServiceError("ROOK returned invalid event recovery JSON.") from error
+        if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+            documents = payload["data"]
+        else:
+            documents = payload if isinstance(payload, list) else [payload]
+        if not all(isinstance(document, dict) for document in documents):
+            raise RookServiceError("ROOK returned invalid event documents.")
+        return documents
+
     def get_authorizer(
         self,
         *,
@@ -192,7 +239,7 @@ class RookClient:
     def revoke_source(self, *, rook_user_id: str, data_source: str) -> None:
         url = (
             f"{self.base_url}/api/v1/user_id/{rook_user_id}/"
-            "data_sources/revoke_auth"
+            "data_source/revoke_auth"
         )
         self.request_json("POST", url, json_body={"data_source": data_source})
 

@@ -33,7 +33,7 @@ urlpatterns = [
     # OTP Flow
     path("request-otp/", RequestOTPView.as_view(), name="request_otp"),
     path("login-otp/", LoginOTPView.as_view(), name="login_otp"),
-    # Restricted staging/dev synthetic test login; never enable in production.
+    # Temporary: remove in a future release
     path(
         "login-phone-direct/",
         DirectPhoneLoginView.as_view(),

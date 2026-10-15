@@ -2,6 +2,7 @@ import math
 import re
 from collections.abc import Generator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from wearables.utils.constants import HealthDomain
@@ -36,6 +37,7 @@ PRIVATE_FIELDS = {
 }
 
 TIMESTAMP_FIELDS = {
+    "timestamp", "timestamp_string", "measured_at", "observed_at",
     "datetime",
     "date",
     "datetime_string",
@@ -64,6 +66,46 @@ class ExtractedMetric:
     domain: str
     value: float | str | bool
     unit: str
+    observed_at: datetime | None = None
+
+
+# Prefer a record's own measurement instant. Document-level timestamps are inherited;
+# purely calendar-day fields are not fabricated into precise instants.
+MEASUREMENT_TIME_FIELDS = (
+    "datetime_string", "datetime", "date_time", "timestamp_string", "timestamp",
+    "measured_at", "observed_at", "start_datetime_string",
+    "start_date_time", "activity_start_datetime_string",
+    "sleep_start_datetime_string", "period_start_date_string",
+)
+
+
+def metric_timestamp_from_node(node: dict) -> datetime | None:
+    for field_name in MEASUREMENT_TIME_FIELDS:
+        value = node.get(field_name)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            # Some providers send Unix epoch milliseconds; others send seconds.
+            seconds = value / 1000.0 if value > 10**11 else value
+            try:
+                timestamp = datetime.fromtimestamp(seconds, UTC)
+            except (OverflowError, OSError, ValueError):
+                continue
+            if 2000 <= timestamp.year <= 2100:
+                return timestamp
+        if not isinstance(value, str):
+            continue
+        raw_value = value.strip()
+        if not raw_value or ("T" not in raw_value and " " not in raw_value):
+            continue
+        try:
+            timestamp = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=UTC)
+        return timestamp.astimezone(UTC)
+    return None
 
 
 def is_private_field(field_name: str) -> bool:
@@ -215,8 +257,10 @@ def extract_metric_values(
     *,
     data_structure: str,
     path: str = "",
+    observed_at: datetime | None = None,
 ) -> Generator[ExtractedMetric]:
     if isinstance(node, dict):
+        observed_at = metric_timestamp_from_node(node) or observed_at
         for key, value in node.items():
             if is_private_field(key) or key in TIMESTAMP_FIELDS:
                 continue
@@ -225,6 +269,7 @@ def extract_metric_values(
                 value,
                 data_structure=data_structure,
                 path=child_path,
+                observed_at=observed_at,
             )
         return
     if isinstance(node, list):
@@ -233,6 +278,7 @@ def extract_metric_values(
                 value,
                 data_structure=data_structure,
                 path=f"{path}[{index}]",
+                observed_at=observed_at,
             )
         return
     domain = health_domain_for(path, data_structure)
@@ -240,7 +286,7 @@ def extract_metric_values(
         return
     canonical_metric = metric_name(path)
     if isinstance(node, bool):
-        yield ExtractedMetric(path, canonical_metric, domain, node, "")
+        yield ExtractedMetric(path, canonical_metric, domain, node, "", observed_at)
         return
     if isinstance(node, (int, float)) and math.isfinite(node):
         numeric_value = canonical_numeric_value(path, canonical_metric, float(node))
@@ -250,10 +296,11 @@ def extract_metric_values(
             domain,
             numeric_value,
             metric_unit(path, canonical_metric),
+            observed_at,
         )
         return
     if isinstance(node, str) and terminal_field(path) in SELECTED_TEXT_FIELDS:
-        yield ExtractedMetric(path, canonical_metric, domain, node[:512], "")
+        yield ExtractedMetric(path, canonical_metric, domain, node[:512], "", observed_at)
 
 
 def structure_represents_workout(data_structure: str) -> bool:

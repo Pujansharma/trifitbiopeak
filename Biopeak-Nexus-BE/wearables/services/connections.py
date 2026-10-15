@@ -95,6 +95,9 @@ def save_connection_transition(
         detail=detail,
         payload=payload,
     )
+    # Device permission/status changes must never serve stale dashboard cards.
+    from wearables.services.analytics import invalidate_health_dashboard
+    invalidate_health_dashboard(connection.customer_profile)
     return connection
 
 
@@ -108,7 +111,10 @@ def get_or_create_connection(
     requested_days = (
         historical_days_requested
         if historical_days_requested is not None
-        else getattr(settings, "ROOK_HISTORICAL_DAYS", 29)
+        else min(
+            getattr(settings, "ROOK_HISTORICAL_DAYS", 29),
+            29 if data_source in NATIVE_WEARABLE_SOURCES else 7,
+        )
     )
     connection, created = WearableConnection.objects.get_or_create(
         customer_profile=customer_profile,

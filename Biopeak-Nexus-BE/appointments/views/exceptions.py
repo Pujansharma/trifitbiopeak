@@ -35,7 +35,6 @@ class AppointmentExceptionListView(AppointmentExceptionMixin, BaseListAPIView):
                 "appointment__care_team",
                 "appointment__room",
                 "appointment__equipment",
-                "appointment__center",
             )
             .prefetch_related(
                 "appointment__associate_links__associate",
@@ -65,14 +64,7 @@ class AppointmentExceptionAcknowledgeView(AppointmentExceptionMixin, BaseGeneric
             AppointmentException.objects.filter(
                 center=center,
                 status=ExceptionStatus.OPEN,
-            ).select_related(
-                "appointment__customer_profile",
-                "appointment__service",
-                "appointment__care_team",
-                "appointment__room",
-                "appointment__equipment",
-                "appointment__center",
-            ),
+            ).select_related("appointment"),
             "Exception not found.",
             pk=self.kwargs["pk"],
         )

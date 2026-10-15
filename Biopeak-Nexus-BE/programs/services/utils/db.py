@@ -4,10 +4,8 @@ from django.db import transaction
 from django.db.models import Count, F, OuterRef, Subquery, Value
 from django.db.models.functions import Coalesce
 from django.utils import timezone
-from rest_framework import serializers
 
 from accounts.centers.models import Center
-from appointments.utils.redemption import increment_therapy_sessions_used
 from programs.models import (
     RedemptionHistory,
     TherapyProgram,
@@ -61,11 +59,12 @@ def redeem_program_service(
         program_service__pk=program_service_id
     ).first()
     with transaction.atomic():
-        burned = increment_therapy_sessions_used(program_service_id, quantity)
-        if burned != 1:
-            raise serializers.ValidationError(
-                "No sessions remaining for this service."
-            )
+        TherapyProgramService.objects.filter(
+            program_service__pk=program_service_id
+        ).update(sessions_used=F("sessions_used") + quantity)
+        TherapyProgram.objects.filter(
+            program__program_services__pk=program_service_id
+        ).update(sessions_used=F("sessions_used") + quantity)
         RedemptionHistory.objects.create(
             therapy_program_service=therapy_program_service,
             redeem_center=center,

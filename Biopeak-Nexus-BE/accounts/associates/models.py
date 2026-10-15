@@ -1,7 +1,5 @@
 from django.contrib.postgres.fields import ArrayField
 from django.db import models
-from django.db.models import Q
-from django.db.models.functions import Lower
 from django.utils.translation import gettext_lazy as _
 
 from accounts.associates.utils.constants import (
@@ -71,14 +69,8 @@ class AssociateRole(BaseUUIDModel):
         constraints = [
             models.UniqueConstraint(
                 fields=["features", "is_system"],
-                condition=Q(is_system=True),
+                condition=models.Q(is_system=True),
                 name="uniq_system_role",
-            ),
-            models.UniqueConstraint(
-                "center",
-                Lower("name"),
-                condition=Q(center__isnull=False),
-                name="uniq_associate_role_center_name",
             ),
         ]
 

@@ -17,7 +17,7 @@ DATABASES = {
         "HOST": config("STG_DB_HOST"),
         "PORT": config("STG_DB_PORT"),
         "OPTIONS": {
-            "sslmode": config("STG_DB_SSLMODE", "prefer"),
+            "sslmode": "prefer",
         },
     }
 }
@@ -93,13 +93,7 @@ LOGGING = {
 # Django CORS Headers
 
 CORS_ALLOW_ALL_ORIGINS = True
-CORS_ALLOW_HEADERS = [
-    *default_headers,
-    "x-center-id",
-    "idempotency-key",
-    "x-customer-profile-id",
-    "x-correlation-id",
-]
+CORS_ALLOW_HEADERS = [*default_headers, "x-center-id", "idempotency-key", "x-customer-profile-id", "x-correlation-id"]
 
 # Other
 
@@ -137,10 +131,15 @@ WHATSAPP_API_VERSION = config("STG_WHATSAPP_API_VERSION", "v23.0")
 WHATSAPP_WABA_ID = config("STG_WHATSAPP_WABA_ID", None)
 WHATSAPP_APP_ID = config("STG_WHATSAPP_APP_ID", None)
 WHATSAPP_TEMPLATE_LANGUAGE = config("STG_WHATSAPP_TEMPLATE_LANGUAGE", "en")
-
-# Restricted synthetic phone-only login; never configure on production.
-TEST_PHONE_LOGIN_ENABLED = config("STG_TEST_PHONE_LOGIN_ENABLED", False, cast=bool)
-TEST_PHONE_LOGIN_KEY = config("STG_TEST_PHONE_LOGIN_KEY", "")
+WHATSAPP_TEMPLATE_CONFIRMED = config(
+    "STG_WHATSAPP_TEMPLATE_CONFIRMED", "appointment_confirmed"
+)
+WHATSAPP_TEMPLATE_CANCELLED = config(
+    "STG_WHATSAPP_TEMPLATE_CANCELLED", "appointment_cancelled"
+)
+WHATSAPP_TEMPLATE_RESCHEDULED = config(
+    "STG_WHATSAPP_TEMPLATE_RESCHEDULED", "appointment_rescheduled"
+)
 
 # Wearables / ROOK
 WEARABLES_ENABLED = config("STG_WEARABLES_ENABLED", False, cast=bool)
@@ -150,6 +149,9 @@ WEARABLES_REQUIRE_PROFILE_FEATURE = config(
 TIMELINE_ENABLED = config("STG_TIMELINE_ENABLED", False, cast=bool)
 RECOVERY_DOMAIN_ENABLED = config("STG_RECOVERY_DOMAIN_ENABLED", True, cast=bool)
 BODY_DOMAIN_ENABLED = config("STG_BODY_DOMAIN_ENABLED", True, cast=bool)
+ROOK_RECOVERY_INCLUDE_EVENTS = config("STG_ROOK_RECOVERY_INCLUDE_EVENTS", False, cast=bool)
+ROOK_RECOVERY_EVENT_DAYS = config("STG_ROOK_RECOVERY_EVENT_DAYS", 1, cast=int)
+ROOK_RECOVERY_MAX_EVENTS_PER_REQUEST = config("STG_ROOK_RECOVERY_MAX_EVENTS_PER_REQUEST", 500, cast=int)
 ROOK_ENVIRONMENT = config("STG_ROOK_ENVIRONMENT", "sandbox")
 ROOK_BASE_URL = config("STG_ROOK_BASE_URL", "https://api.rook-connect.review")
 ROOK_CLIENT_UUID = config("STG_ROOK_CLIENT_UUID", "")

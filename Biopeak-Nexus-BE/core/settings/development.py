@@ -60,13 +60,7 @@ MAILERS = {
 # Django CORS Headers
 
 CORS_ALLOW_ALL_ORIGINS = True
-CORS_ALLOW_HEADERS = [
-    *default_headers,
-    "x-center-id",
-    "idempotency-key",
-    "x-customer-profile-id",
-    "x-correlation-id",
-]
+CORS_ALLOW_HEADERS = [*default_headers, "x-center-id", "idempotency-key", "x-customer-profile-id", "x-correlation-id"]
 
 PASSWORD_BASE_URL = config("DEV_PASSWORD_BASE_URL", "")
 
@@ -103,10 +97,15 @@ WHATSAPP_API_VERSION = config("DEV_WHATSAPP_API_VERSION", "v23.0")
 WHATSAPP_WABA_ID = config("DEV_WHATSAPP_WABA_ID", None)
 WHATSAPP_APP_ID = config("DEV_WHATSAPP_APP_ID", None)
 WHATSAPP_TEMPLATE_LANGUAGE = config("DEV_WHATSAPP_TEMPLATE_LANGUAGE", "en")
-
-# Restricted synthetic phone-only login for isolated development tests.
-TEST_PHONE_LOGIN_ENABLED = config("DEV_TEST_PHONE_LOGIN_ENABLED", False, cast=bool)
-TEST_PHONE_LOGIN_KEY = config("DEV_TEST_PHONE_LOGIN_KEY", "")
+WHATSAPP_TEMPLATE_CONFIRMED = config(
+    "DEV_WHATSAPP_TEMPLATE_CONFIRMED", "appointment_confirmed"
+)
+WHATSAPP_TEMPLATE_CANCELLED = config(
+    "DEV_WHATSAPP_TEMPLATE_CANCELLED", "appointment_cancelled"
+)
+WHATSAPP_TEMPLATE_RESCHEDULED = config(
+    "DEV_WHATSAPP_TEMPLATE_RESCHEDULED", "appointment_rescheduled"
+)
 
 # Wearables / ROOK
 WEARABLES_ENABLED = config("DEV_WEARABLES_ENABLED", True, cast=bool)
@@ -116,6 +115,9 @@ WEARABLES_REQUIRE_PROFILE_FEATURE = config(
 TIMELINE_ENABLED = config("DEV_TIMELINE_ENABLED", True, cast=bool)
 RECOVERY_DOMAIN_ENABLED = config("DEV_RECOVERY_DOMAIN_ENABLED", True, cast=bool)
 BODY_DOMAIN_ENABLED = config("DEV_BODY_DOMAIN_ENABLED", True, cast=bool)
+ROOK_RECOVERY_INCLUDE_EVENTS = config("DEV_ROOK_RECOVERY_INCLUDE_EVENTS", False, cast=bool)
+ROOK_RECOVERY_EVENT_DAYS = config("DEV_ROOK_RECOVERY_EVENT_DAYS", 1, cast=int)
+ROOK_RECOVERY_MAX_EVENTS_PER_REQUEST = config("DEV_ROOK_RECOVERY_MAX_EVENTS_PER_REQUEST", 500, cast=int)
 ROOK_ENVIRONMENT = config("DEV_ROOK_ENVIRONMENT", "sandbox")
 ROOK_BASE_URL = config("DEV_ROOK_BASE_URL", "https://api.rook-connect.review")
 ROOK_CLIENT_UUID = config("DEV_ROOK_CLIENT_UUID", "")

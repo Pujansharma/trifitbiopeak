@@ -136,11 +136,9 @@ REST_FRAMEWORK = {
         "pre_consultation_get": "120/min",
         "pre_consultation_put": "30/min",
         "pre_consultation_post": "30/min",
-        "app_download": "60/min",
         "wearable_connect": "20/min",
         "wearable_status": "60/min",
         "health_read": "120/min",
-        "test_direct_phone_login": "20/min",
     },
 }
 
@@ -152,11 +150,6 @@ SPECTACULAR_SETTINGS = {
     "COMPONENT_SPLIT_REQUEST": True,
     "SCHEMA_PATH_PREFIX": r"/",
 }
-
-# Direct-login test bypass is OFF unless development/staging explicitly opts in.
-# Production never enables it (also enforced by the view's settings-module gate).
-TEST_PHONE_LOGIN_ENABLED = False
-TEST_PHONE_LOGIN_KEY = ""
 
 # Simple JWT
 # https://django-rest-framework-simplejwt.readthedocs.io/en/latest/settings.html
@@ -210,3 +203,18 @@ MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "storage" / "media"
 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+# Dashboard cache is short-lived and requires no additional package or external service.
+# The per-member cache revision is derived from database timestamps, so a document
+# correction or device state change cannot return another worker's stale card.
+CACHES = {
+    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"},
+    "health": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "health-dashboard",
+    },
+}
+HEALTH_DASHBOARD_CACHE_SECONDS = config(
+    "HEALTH_DASHBOARD_CACHE_SECONDS", default=60, cast=int
+)
+HEALTH_MIN_BASELINE_DAYS = config("HEALTH_MIN_BASELINE_DAYS", default=7, cast=int)

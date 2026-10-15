@@ -12,6 +12,7 @@ class WearableSource(models.TextChoices):
     WITHINGS = "Withings", "Withings"
     WHOOP = "Whoop", "Whoop"
     DEXCOM = "Dexcom", "Dexcom"
+    STRAVA = "Strava", "Strava"
 
 
 API_WEARABLE_SOURCES = {
@@ -22,6 +23,7 @@ API_WEARABLE_SOURCES = {
     WearableSource.WITHINGS,
     WearableSource.WHOOP,
     WearableSource.DEXCOM,
+    WearableSource.STRAVA,
 }
 
 NATIVE_WEARABLE_SOURCES = {
@@ -156,6 +158,7 @@ class HealthJobType(models.TextChoices):
     REVOKE_CONNECTION = "revoke_connection", "Revoke connection"
     RECOVERY_PULL = "recovery_pull", "ROOK recovery pull"
     FRESHNESS_CHECK = "freshness_check", "Freshness check"
+    REMAP_TIMEZONE = "remap_timezone", "Remap member local dates"
 
 
 class HealthJobStatus(models.TextChoices):
