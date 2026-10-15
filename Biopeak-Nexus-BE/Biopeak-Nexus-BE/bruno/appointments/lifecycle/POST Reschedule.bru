@@ -1,0 +1,109 @@
+meta {
+  name: POST Reschedule
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{baseURL}}/centers/{{center_id}}/appointments/{{appointment_id}}/reschedule/
+  body: json
+  auth: inherit
+}
+
+headers {
+  content-type: application/json
+}
+
+body:json {
+  {
+    "start": "2026-09-05T05:00:00Z",
+    "end": "2026-09-05T05:40:00Z",
+    "customer_profile_id": "{{customer_profile_id}}",
+    "service_id": "{{service_id}}",
+    "program_service_id": "{{program_service_id}}",
+    "modality": "in_person",
+    "room_id": "{{room_id}}",
+    "equipment_id": "{{equipment_id}}",
+    "doctor_id": "{{doctor_id}}",
+    "specialty_id": "{{specialty_id}}",
+    "care_team_id": "{{care_team_id}}",
+    "notes": "First visit"
+  }
+}
+
+script:pre-request {
+  let body = req.getBody();
+  if (typeof body === 'string') {
+    body = JSON.parse(body);
+  }
+  body = body || {};
+  const resourceKeys = ['doctor_id', 'care_team_id', 'room_id', 'equipment_id', 'program_service_id'];
+  for (const key of resourceKeys) {
+    if (!Object.prototype.hasOwnProperty.call(body, key)) {
+      continue;
+    }
+    const value = String(body[key] || '').trim();
+    if (value) {
+      body[key] = value;
+    } else {
+      delete body[key];
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'specialty_id')) {
+    const specialty = body.specialty_id;
+    if (Array.isArray(specialty)) {
+      const cleaned = specialty
+        .map((item) => String(item || '').trim())
+        .filter(Boolean);
+      if (cleaned.length) body.specialty_id = cleaned;
+      else delete body.specialty_id;
+    } else {
+      const value = String(specialty || '').trim();
+      if (value) body.specialty_id = value;
+      else delete body.specialty_id;
+    }
+  }
+  if (body.care_team_id) {
+    delete body.doctor_id;
+    delete body.specialty_id;
+  }
+  req.setBody(body);
+}
+
+settings {
+  encodeUrl: true
+  timeout: 30000
+}
+
+docs {
+  Allowed from confirmed or checked_in. Lands confirmed. Not from in_progress.
+  Auth: staff or customer JWT. Customer may only reschedule their own profile's appointments (else 404).
+  Customer JWT: same rolling window as book/slots — local date of start must be
+  tomorrow … today+7 (e.g. reschedule on 7 Oct → 8–14 Oct). Outside → 400
+  "Date must be between tomorrow and 7 days from today."
+  Same flattened contract as POST Book Appointment (full body, not PATCH).
+  Staff XOR + room/equipment rules. Empty resource UUIDs stripped in pre-request.
+  specialty_id = UUID | UUID[] (same as book). Each id stamps a distinct
+  live non-doctor role mapped to this service.
+  Cannot change customer_profile_id or service_id.
+  program_service_id: customer required and must match the appointment's existing
+  program_service_id (mismatch → 400). Does not re-check redeemability / open-apt,
+  but new start local date must be on/before package expires_at (same message as book).
+  Staff/admin must omit (present → 400). Therapy-linked staff reschedule still checks
+  expiry against the appointment's program. FK is never rewritten on reschedule.
+  Body lists every allowed key. Empty resource UUIDs stripped in pre-request.
+  If care_team_id is set, pre-request drops doctor_id/specialty_id (XOR).
+  People path: blank care_team_id in env.
+  Duplicate appointment code IntegrityError → 400 "Appointment code already exists." Overlap → 400 "Slot no longer available."
+  notes is optional free text; omit/null keeps the existing value, "" clears. Also appended
+  to a formatted Google event description (patient/service/date/time + clinic address for
+  in_person/both, or a "join via Google Meet" line with no address for virtual).
+  Google Calendar: mirrors to the one fixed shared account (GOOGLE_CALENDAR_ID), same as booking —
+  not tied to whichever associate is assigned. If connected, a Google Calendar outbox row is queued
+  after commit (not on the request path), so a rejected reschedule (e.g. an overlap) never queues
+  Google at all. The worker updates/creates the event later. Best-effort — if that Google call fails,
+  the failure is logged and the reschedule stays saved with the appointment's existing
+  google_event_id/google_meet_link left unchanged. Meet link on the reschedule response may still
+  be the previous value until the worker finishes. If the shared account isn't connected,
+  reschedule proceeds unsynced as normal.
+}
