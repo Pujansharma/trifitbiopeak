@@ -150,3 +150,17 @@ ROOK_OAUTH_TIMEOUT_MINUTES = config("DEV_ROOK_OAUTH_TIMEOUT_MINUTES", 15, cast=i
 
 ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS = config("DEV_ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS", "", cast=lambda value: [host.strip() for host in value.split(",") if host.strip()])
 TIMELINE_INCLUDE_LEGACY_RESULTS = config("DEV_TIMELINE_INCLUDE_LEGACY_RESULTS", True, cast=bool)
+
+
+
+
+
+
+ROOK_PROVISIONED_SOURCES = [
+    source.strip()
+    for source in config(
+        "DEV_ROOK_PROVISIONED_SOURCES",
+        default=""
+    ).split(",")
+    if source.strip()
+]
