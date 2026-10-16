@@ -7,6 +7,7 @@ from core.utils.serializers import BaseSerializer
 from wearables.utils.constants import (
     HEALTH_DOMAIN_ORDER,
     NATIVE_WEARABLE_SOURCES,
+    HistoricalImportStatus,
     PermissionStatus,
     PreferredUnits,
     WearableSource,
@@ -33,13 +34,36 @@ class DeviceConnectSerializer(BaseSerializer):
             raise serializers.ValidationError({
                 "data_source": "Strava authorization is not supported by the configured ROOK authorizer API."
             })
+        # ROOK supports up to 7 days for API providers (e.g. Garmin), or
+        # 29 days for native SDK sources. A valid client request for a longer
+        # window must never be interpreted as permission to fetch more data.
+        # Cap it to the supported window, and expose the adjustment in the
+        # connection response rather than silently claiming a 29-day import.
         max_days = 29 if source in NATIVE_WEARABLE_SOURCES else 7
-        requested = attrs.get("historical_days", min(getattr(settings, "ROOK_HISTORICAL_DAYS", 7), max_days))
-        if requested > max_days:
+        requested = attrs.get(
+            "historical_days",
+            min(getattr(settings, "ROOK_HISTORICAL_DAYS", 7), max_days),
+        )
+        self.requested_historical_days = requested
+        self.max_historical_days = max_days
+        # The PRD disables pre-existing ROOK imports by default in production.
+        # Operators must explicitly opt in after configuring ROOK's add-on.
+        from wearables.services.config import preexisting_import_enabled, provisioned_sources
+        enabled = preexisting_import_enabled()
+        self.history_disabled_by_policy = not enabled
+        attrs["historical_days"] = min(requested, max_days) if enabled else 0
+        configured_sources = provisioned_sources()
+        # The catalogue is intentionally fail-closed when the operator has
+        # not supplied ROOK_PROVISIONED_SOURCES. The connect endpoint must
+        # make the same decision rather than allowing an unprovisioned OAuth.
+        if configured_sources is None:
             raise serializers.ValidationError({
-                "historical_days": f"ROOK supports a maximum of {max_days} days for this connection type."
+                "data_source": "ROOK provider provisioning has not been configured."
             })
-        attrs["historical_days"] = requested
+        if source not in configured_sources:
+            raise serializers.ValidationError({
+                "data_source": "This provider is not provisioned for the ROOK developer account."
+            })
         return attrs
 
     def validate_redirect_url(self, value):
@@ -94,6 +118,9 @@ class NativeDeviceStatusSerializer(BaseSerializer):
         max_value=29,
         required=False,
     )
+    historical_import_status = serializers.ChoiceField(
+        choices=HistoricalImportStatus.choices, required=False,
+    )
 
     def validate_timezone_name(self, value):
         try:
@@ -104,7 +131,12 @@ class NativeDeviceStatusSerializer(BaseSerializer):
 
 
 class DomainQuerySerializer(BaseSerializer):
+    # `days` remains backward compatible. `window=lifetime` permits the
+    # complete retained timeline without an arbitrary 365-day restriction.
     days = serializers.IntegerField(min_value=1, max_value=365, default=90)
+    window = serializers.ChoiceField(
+        choices=("7d", "14d", "30d", "90d", "lifetime"), required=False,
+    )
 
 
 class TimelineQuerySerializer(BaseSerializer):

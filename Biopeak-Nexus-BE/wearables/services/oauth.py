@@ -91,6 +91,15 @@ def _cancel_pending_connection(connection, *, reason: str, prior_status: str = "
             event_type="oauth_reauthorization_cancelled", detail=reason,
         )
         return
+    if prior_status in (ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED):
+        from wearables.services.connections import save_connection_transition
+        save_connection_transition(
+            connection, status=prior_status,
+            authorization_status=(AuthorizationStatus.REVOKED if prior_status == ConnectionStatus.DISCONNECTED
+                                  else AuthorizationStatus.EXPIRED),
+            event_type="oauth_reconnection_cancelled", detail=reason,
+        )
+        return
     from wearables.services.connections import save_connection_transition
     save_connection_transition(
         connection,

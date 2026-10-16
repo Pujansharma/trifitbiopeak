@@ -1,4 +1,5 @@
 from django.test import TestCase
+from django.utils import timezone
 
 from accounts.customers.models import Customer, CustomerProfile
 from accounts.models import UserAccount
@@ -6,6 +7,9 @@ from accounts.users.models import User
 from accounts.utils.constants import UserType
 from wearables.models import HealthDailySummary, RookHealthDocument
 from wearables.services.identity import get_or_create_rook_identity
+from wearables.services.connections import get_or_create_connection
+from wearables.models import WearableConsent
+from wearables.utils.constants import ConsentStatus, ConnectionStatus, AuthorizationStatus, PermissionStatus
 from wearables.services.ingestion import ingest_rook_document, normalize_health_document
 
 
@@ -21,6 +25,18 @@ class RookIngestionTests(TestCase):
             is_main=True,
         )
         self.identity = get_or_create_rook_identity(self.customer_profile)
+        WearableConsent.objects.create(
+            customer_profile=self.customer_profile, granted_by=self.user,
+            status=ConsentStatus.GRANTED, version="v1", granted_at=timezone.now(),
+        )
+        connection = get_or_create_connection(
+            customer_profile=self.customer_profile, identity=self.identity,
+            data_source="Garmin", historical_days_requested=7,
+        )
+        connection.status = ConnectionStatus.ACTIVE
+        connection.authorization_status = AuthorizationStatus.AUTHORIZED
+        connection.permission_status = PermissionStatus.GRANTED
+        connection.save()
 
     def payload(self, *, version: int, steps: int) -> dict:
         return {

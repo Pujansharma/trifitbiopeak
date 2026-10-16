@@ -4,7 +4,6 @@ No writes, signals, changes to legacy models, or exposure of report documents.
 Chronology is based on stored record creation instants; report/sample dates are
 separate metadata because the original tables do not guarantee event times.
 """
-from collections import defaultdict
 from datetime import date, datetime, timedelta, time, timezone as dt_timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -70,6 +69,8 @@ def _wearable_entries(customer_profile, *, start_date, end_date, domain, maximum
                 "sources": obs.data_sources,
                 "sourceKey": obs.source_key,
                 "documentVersion": obs.document_version,
+                "sourceChange": obs.provenance.get("sourceChange"),
+                "clinicalReviewSuggested": obs.provenance.get("clinicalReviewSuggested", False),
             },
         }
         for obs in observations
@@ -140,24 +141,37 @@ def _clinical_entries(customer_profile, *, start_date, end_date, maximum, timezo
     return events
 
 
-def _page_gaps(entries: list[dict]) -> list[dict]:
-    by_domain = defaultdict(set)
-    for item in entries:
-        if item["sourceType"] == "wearable":
-            by_domain[item["domain"]].add(item["localDate"])
+def _timeline_gaps(*, customer_profile, start_date, end_date, domain) -> list[dict]:
+    """Compute missing *recorded* days for the whole filtered time range.
+
+    Gaps must not disappear when consecutive known days fall on two separate
+    pagination pages. This query returns distinct dates only, not health values.
+    """
+    observations = HealthObservation.objects.filter(
+        customer_profile=customer_profile, is_current=True,
+    )
+    if start_date:
+        observations = observations.filter(local_date__gte=start_date)
+    if end_date:
+        observations = observations.filter(local_date__lte=end_date)
+    if domain:
+        observations = observations.filter(domain=domain)
+    rows = observations.order_by("domain", "local_date").values_list(
+        "domain", "local_date",
+    ).distinct()
     gaps = []
-    for domain, days in by_domain.items():
-        ordered = sorted(days)
-        for earlier, later in zip(ordered, ordered[1:]):
-            missing = (later - earlier).days - 1
-            if missing > 0:
-                gaps.append({
-                    "domain": domain,
-                    "state": HealthCardState.HISTORICAL_GAP,
-                    "startDate": earlier + timedelta(days=1),
-                    "endDate": later - timedelta(days=1),
-                    "missingDays": missing,
-                })
+    previous = {}
+    for domain_name, local_date in rows.iterator():
+        earlier = previous.get(domain_name)
+        if earlier and (local_date - earlier).days > 1:
+            gaps.append({
+                "domain": domain_name,
+                "state": HealthCardState.HISTORICAL_GAP,
+                "startDate": earlier + timedelta(days=1),
+                "endDate": local_date - timedelta(days=1),
+                "missingDays": (local_date - earlier).days - 1,
+            })
+        previous[domain_name] = local_date
     return gaps
 
 
@@ -182,8 +196,11 @@ def timeline_payload(*, customer_profile, start_date: date | None, end_date: dat
     page = items[offset : offset + limit]
     return {
         "entries": page,
-        "gaps": _page_gaps(page),
-        "gapScope": "returned_page_only",
+        "gaps": _timeline_gaps(
+            customer_profile=customer_profile, start_date=start_date,
+            end_date=end_date, domain=domain,
+        ),
+        "gapScope": "filtered_timeline",
         "nextOffset": offset + limit if len(items) > offset + limit else None,
         "sourceTypes": ["wearable", "lab", "assessment"] if include_clinical and domain is None else ["wearable"],
         "chronologyBasis": "recorded_at",  # event/reference dates may be separately present

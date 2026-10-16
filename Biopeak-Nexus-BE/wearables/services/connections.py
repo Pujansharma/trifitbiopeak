@@ -20,6 +20,7 @@ from wearables.services.identity import (
     record_wearable_consent,
 )
 from wearables.services.job_queue import enqueue_health_job
+from wearables.services.lifecycle import valid_transition
 from wearables.utils.constants import (
     API_WEARABLE_SOURCES,
     NATIVE_WEARABLE_SOURCES,
@@ -74,6 +75,8 @@ def save_connection_transition(
     payload: dict | None = None,
 ) -> WearableConnection:
     previous_status = connection.status
+    if not valid_transition(previous_status, status):
+        raise ValueError(f"Invalid wearable connection transition: {previous_status} -> {status}")
     connection.status = status
     update_fields = ["status", "updated_at"]
     optional_values = {
@@ -170,6 +173,50 @@ def prepare_connection(
     )
 
 
+def authorization_confirmed(
+    connection: WearableConnection, *, was_reconnect: bool = False,
+    actor_user=None, correlation_id: str = "",
+) -> WearableConnection:
+    """Complete a verified ROOK authorization, then schedule bounded recovery.
+
+    Only a ROOK server-side authorizer check or trusted native SDK status may
+    call this helper. The callback URL/query params alone are never proof.
+    """
+    now = timezone.now()
+    connection.connected_at = connection.connected_at or now
+    connection.import_started_at = now
+    connection.disconnected_at = None
+    connection.last_error_code = ""
+    connection.last_error_detail = ""
+    connection.save(update_fields=[
+        "connected_at", "import_started_at", "disconnected_at", "last_error_code",
+        "last_error_detail", "updated_at",
+    ])
+    if was_reconnect:
+        save_connection_transition(
+            connection, status=ConnectionStatus.RECONNECTED,
+            authorization_status=AuthorizationStatus.AUTHORIZED,
+            event_type="provider_reconnected", actor_user=actor_user,
+            correlation_id=correlation_id,
+        )
+    save_connection_transition(
+        connection,
+        status=(ConnectionStatus.HISTORICAL_REIMPORT if was_reconnect else ConnectionStatus.IMPORTING),
+        authorization_status=AuthorizationStatus.AUTHORIZED,
+        import_status=HistoricalImportStatus.RUNNING,
+        event_type="historical_reimport_started" if was_reconnect else "authorization_confirmed",
+        actor_user=actor_user, correlation_id=correlation_id,
+    )
+    if connection.connection_method == ConnectionMethod.API:
+        enqueue_health_job(
+            job_type=HealthJobType.RECOVERY_PULL,
+            idempotency_key=f"authorization-recovery:{connection.pk}:{now.isoformat()}",
+            customer_profile=connection.customer_profile,
+            connection=connection,
+        )
+    return connection
+
+
 def start_connection(
     *,
     request,
@@ -187,17 +234,27 @@ def start_connection(
         timezone_name=validated_data.get("timezone_name"),
         preferred_units=validated_data.get("preferred_units"),
     )
-    now = timezone.now()
+    # Idempotent second link: never trigger pre-existing recovery twice merely
+    # because the member tapped the connect button again (PRD EC-043).
+    if (connection.status in {ConnectionStatus.ACTIVE, ConnectionStatus.IDLE,
+                              ConnectionStatus.PARTIAL, ConnectionStatus.IMPORTING,
+                              ConnectionStatus.HISTORICAL_REIMPORT}
+            and connection.authorization_status == AuthorizationStatus.AUTHORIZED):
+        return {"connection": connection, "authorization_method": connection.connection_method,
+                "authorization_url": None}
+    was_reconnect = connection.status in {
+        ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED,
+    }
+    if connection.last_error_code == "provider_account_closed":
+        raise ValueError("ROOK reports that this upstream account was closed. Connect a different provider.")
     connection.last_error_code = ""
     connection.last_error_detail = ""
-    connection.disconnected_at = None
-    connection.import_completed_at = None
+    # Keep a disconnected provider closed until ROOK/SDK actually authorizes.
+    # Otherwise a delayed webhook can race ahead of the authorization screen.
     connection.save(
         update_fields=[
             "last_error_code",
             "last_error_detail",
-            "disconnected_at",
-            "import_completed_at",
             "updated_at",
         ]
     )
@@ -212,6 +269,7 @@ def start_connection(
             event_type="connection_requested",
             correlation_id=correlation_id,
             detail="Native SDK authorization requested.",
+            payload={"reconnect": was_reconnect},
         )
         return {
             "connection": connection,
@@ -221,6 +279,13 @@ def start_connection(
 
     from wearables.services.oauth import callback_url_for_connection
     callback_url = callback_url_for_connection(connection, actor_user=request.user, correlation_id=correlation_id)
+    save_connection_transition(
+        connection, status=ConnectionStatus.CONNECTING,
+        authorization_status=AuthorizationStatus.PENDING,
+        import_status=HistoricalImportStatus.NOT_STARTED,
+        actor_user=request.user, event_type="connection_requested",
+        correlation_id=correlation_id,
+    )
     # Prefer a server-owned state-validated callback over arbitrary mobile redirects.
     client = RookClient()
     try:
@@ -235,44 +300,30 @@ def start_connection(
         connection.save(
             update_fields=["last_error_code", "last_error_detail", "updated_at"]
         )
-        save_connection_transition(
-            connection,
-            status=ConnectionStatus.PROVIDER_ERROR,
-            authorization_status=AuthorizationStatus.ERROR,
-            actor_user=request.user,
-            event_type="authorization_failed",
-            correlation_id=correlation_id,
-            detail=str(error),
-        )
+        if connection.status != ConnectionStatus.DISCONNECTED:
+            save_connection_transition(
+                connection,
+                status=ConnectionStatus.PROVIDER_ERROR,
+                authorization_status=AuthorizationStatus.ERROR,
+                actor_user=request.user,
+                event_type="authorization_failed",
+                correlation_id=correlation_id,
+                detail=str(error),
+            )
         raise
     authorized = result["authorized"]
-    connection.connected_at = connection.connected_at or (now if authorized else None)
-    connection.import_started_at = now if authorized else connection.import_started_at
-    connection.save(update_fields=["connected_at", "import_started_at", "updated_at"])
-    save_connection_transition(
-        connection,
-        status=(ConnectionStatus.IMPORTING if authorized else ConnectionStatus.AUTHORIZING),
-        authorization_status=(
-            AuthorizationStatus.AUTHORIZED if authorized else AuthorizationStatus.PENDING
-        ),
-        import_status=(
-            HistoricalImportStatus.RUNNING
-            if authorized
-            else HistoricalImportStatus.NOT_STARTED
-        ),
-        actor_user=request.user,
-        event_type="authorization_confirmed" if authorized else "authorization_started",
-        correlation_id=correlation_id,
-    )
     if authorized:
-        enqueue_health_job(
-            job_type=HealthJobType.RECOVERY_PULL,
-            idempotency_key=(
-                f"connection-recovery:{connection.pk}:"
-                f"{timezone.localdate().isoformat()}"
-            ),
-            customer_profile=customer_profile,
-            connection=connection,
+        authorization_confirmed(
+            connection, was_reconnect=was_reconnect,
+            actor_user=request.user, correlation_id=correlation_id,
+        )
+    else:
+        save_connection_transition(
+            connection, status=ConnectionStatus.AUTHORIZING,
+            authorization_status=AuthorizationStatus.PENDING,
+            import_status=HistoricalImportStatus.NOT_STARTED,
+            actor_user=request.user, event_type="authorization_started",
+            correlation_id=correlation_id,
         )
     return {
         "connection": connection,
@@ -282,6 +333,10 @@ def start_connection(
 
 
 def refresh_authorizing_connections(customer_profile: CustomerProfile) -> None:
+    # Expire before checking ROOK: a callback received after its deadline
+    # cannot revive an abandoned authorization attempt.
+    from wearables.services.oauth import expire_oauth_attempts
+    expire_oauth_attempts(customer_profile)
     connections = list(
         WearableConnection.objects.select_related("identity").filter(
             customer_profile=customer_profile,
@@ -294,34 +349,19 @@ def refresh_authorizing_connections(customer_profile: CustomerProfile) -> None:
     authorized_sources = RookClient().get_authorized_sources(
         rook_user_id=connections[0].identity.rook_user_id
     )
-    now = timezone.now()
     for connection in connections:
         if connection.data_source not in authorized_sources:
             continue
-        connection.connected_at = connection.connected_at or now
-        connection.import_started_at = connection.import_started_at or now
-        connection.save(
-            update_fields=["connected_at", "import_started_at", "updated_at"]
+        state_event = (
+            WearableConnectionEvent.objects.filter(
+                connection=connection, event_type__in=["oauth_state_pending", "oauth_state_verified"],
+            ).order_by("-created_at").first()
         )
-        save_connection_transition(
-            connection,
-            status=ConnectionStatus.IMPORTING,
-            authorization_status=AuthorizationStatus.AUTHORIZED,
-            import_status=HistoricalImportStatus.RUNNING,
-            event_type="authorization_confirmed",
-        )
-        enqueue_health_job(
-            job_type=HealthJobType.RECOVERY_PULL,
-            idempotency_key=(
-                f"authorization-recovery:{connection.pk}:"
-                f"{timezone.localdate().isoformat()}"
-            ),
-            customer_profile=customer_profile,
-            connection=connection,
-        )
-
-    from wearables.services.oauth import expire_oauth_attempts
-    expire_oauth_attempts(customer_profile)
+        initial_state = state_event.previous_status if state_event else ""
+        was_reconnect = initial_state in {
+            ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED,
+        }
+        authorization_confirmed(connection, was_reconnect=was_reconnect)
 
 
 def disconnect_connection(
@@ -331,13 +371,33 @@ def disconnect_connection(
     actor_user,
     correlation_id: str = "",
 ) -> tuple[WearableConnection | None, bool]:
-    connection = (
-        WearableConnection.objects.select_related("identity")
-        .filter(customer_profile=customer_profile, data_source=data_source)
-        .first()
-    )
-    if connection is None:
-        return None, False
+    # Lock in the same identity -> connection order used during webhook
+    # ingestion. The local authorization closes before any ROOK network call.
+    with transaction.atomic():
+        identity = RookMemberIdentity.objects.select_for_update().filter(
+            customer_profile=customer_profile,
+        ).first()
+        if identity is None:
+            return None, False
+        connection = (
+            WearableConnection.objects.select_for_update().select_related("identity")
+            .filter(customer_profile=customer_profile, data_source=data_source)
+            .first()
+        )
+        if connection is None:
+            return None, False
+        if connection.status == ConnectionStatus.DISCONNECTED:
+            return connection, connection.last_error_code == "revoke_pending"
+        connection.disconnected_at = timezone.now()
+        connection.save(update_fields=["disconnected_at", "updated_at"])
+        save_connection_transition(
+            connection, status=ConnectionStatus.DISCONNECTED,
+            authorization_status=AuthorizationStatus.REVOKED,
+            permission_status=PermissionStatus.UNKNOWN,
+            actor_user=actor_user, event_type="connection_revoked",
+            correlation_id=correlation_id,
+            detail="New ingestion stopped; previously recorded history retained.",
+        )
     revoke_pending = False
     if connection.data_source in API_WEARABLE_SOURCES:
         try:
@@ -347,30 +407,15 @@ def disconnect_connection(
             )
         except (RookConfigurationError, RookServiceError) as error:
             revoke_pending = True
+            # Never reopen the connection when upstream revocation fails.
             connection.last_error_code = "revoke_pending"
             connection.last_error_detail = str(error)[:512]
-            connection.save(
-                update_fields=["last_error_code", "last_error_detail", "updated_at"]
-            )
+            connection.save(update_fields=["last_error_code", "last_error_detail", "updated_at"])
             enqueue_health_job(
                 job_type=HealthJobType.REVOKE_CONNECTION,
-                idempotency_key=f"revoke:{connection.pk}:{timezone.now().timestamp()}",
-                customer_profile=customer_profile,
-                connection=connection,
+                idempotency_key=f"revoke:{connection.pk}:{connection.disconnected_at.isoformat()}",
+                customer_profile=customer_profile, connection=connection,
             )
-    connection.disconnected_at = timezone.now()
-    connection.save(update_fields=["disconnected_at", "updated_at"])
-    save_connection_transition(
-        connection,
-        status=ConnectionStatus.DISCONNECTED,
-        authorization_status=AuthorizationStatus.REVOKED,
-        permission_status=PermissionStatus.UNKNOWN,
-        actor_user=actor_user,
-        event_type="connection_revoked",
-        correlation_id=correlation_id,
-        detail="Historical health data retained.",
-        payload={"revoke_pending": revoke_pending},
-    )
     return connection, revoke_pending
 
 
@@ -388,6 +433,8 @@ def update_native_connection(
     ).first()
     if existing_connection is None:
         raise ValueError("Start the native wearable connection before reporting status.")
+    if existing_connection.status in {ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED}:
+        raise ValueError("Start a new native authorization before updating a disconnected source.")
     identity = get_or_create_rook_identity(
         customer_profile,
         timezone_name=validated_data.get("timezone_name"),
@@ -403,7 +450,8 @@ def update_native_connection(
     )
     permission_status = validated_data["permission_status"]
     sdk_linked = validated_data["sdk_linked"]
-    connection.capabilities = validated_data.get("capabilities", [])
+    if "capabilities" in validated_data:
+        connection.capabilities = validated_data["capabilities"]
     connection.last_error_code = ""
     connection.last_error_detail = ""
     connection.save(
@@ -421,20 +469,48 @@ def update_native_connection(
     if permission_status == PermissionStatus.DENIED:
         status = ConnectionStatus.PERMISSION_DENIED
         authorization_status = AuthorizationStatus.DENIED
-    elif sdk_linked and permission_status in {
-        PermissionStatus.GRANTED,
-        PermissionStatus.LIMITED,
-    }:
+    elif sdk_linked and permission_status in {PermissionStatus.GRANTED, PermissionStatus.LIMITED}:
+        previous_status = connection.status
+        was_already_imported = connection.import_status == HistoricalImportStatus.COMPLETED
         status = ConnectionStatus.IMPORTING
         authorization_status = AuthorizationStatus.AUTHORIZED
         import_status = HistoricalImportStatus.RUNNING
         now = timezone.now()
         connection.connected_at = connection.connected_at or now
         connection.import_started_at = connection.import_started_at or now
-        connection.save(
-            update_fields=["connected_at", "import_started_at", "updated_at"]
-        )
+        connection.disconnected_at = None
+        connection.save(update_fields=["connected_at", "import_started_at", "disconnected_at", "updated_at"])
+        reported_import_status = validated_data.get("historical_import_status")
+        if previous_status == ConnectionStatus.CONNECTING and existing_connection.connected_at is not None:
+            # Following device replacement, preserve the old timeline/baseline.
+            status = ConnectionStatus.RECONNECTED
+        elif previous_status == ConnectionStatus.HISTORICAL_REIMPORT:
+            status = ConnectionStatus.HISTORICAL_REIMPORT
+        if reported_import_status == HistoricalImportStatus.FAILED:
+            status = ConnectionStatus.PROVIDER_ERROR
+            import_status = HistoricalImportStatus.FAILED
+        elif reported_import_status == HistoricalImportStatus.PARTIAL:
+            status = ConnectionStatus.PARTIAL
+            import_status = HistoricalImportStatus.PARTIAL
+        elif reported_import_status == HistoricalImportStatus.COMPLETED or (
+            was_already_imported and reported_import_status is None
+        ):
+            # EC-013: later permission grants must not restart completed imports.
+            status = (ConnectionStatus.PARTIAL if permission_status == PermissionStatus.LIMITED
+                      else ConnectionStatus.ACTIVE)
+            import_status = HistoricalImportStatus.COMPLETED
+            connection.import_completed_at = timezone.now()
+            connection.save(update_fields=["import_completed_at", "updated_at"])
         event_type = "native_authorization_confirmed"
+    if status == ConnectionStatus.RECONNECTED:
+        save_connection_transition(
+            connection, status=ConnectionStatus.RECONNECTED,
+            authorization_status=AuthorizationStatus.AUTHORIZED,
+            permission_status=permission_status,
+            event_type="native_reconnected", actor_user=actor_user,
+            correlation_id=correlation_id,
+        )
+        status = ConnectionStatus.HISTORICAL_REIMPORT
     return save_connection_transition(
         connection,
         status=status,
@@ -460,6 +536,8 @@ def connection_experience_state(connection: WearableConnection) -> str:
 
 
 def connection_actions(connection: WearableConnection) -> list[dict]:
+    if connection.last_error_code == "provider_account_closed":
+        return [{"id": "connect_another_provider", "label": "Connect Another Provider"}]
     status = connection_experience_state(connection)
     action_map = {
         ConnectionStatus.PERMISSION_DENIED: [

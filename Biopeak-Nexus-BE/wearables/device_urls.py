@@ -2,6 +2,7 @@ from django.urls import path
 
 from wearables.views import (
     DeviceConnectView,
+    DeviceProviderCatalogueView,
     DeviceConsentRevokeView,
     DeviceDisconnectView,
     DeviceListView,
@@ -14,6 +15,7 @@ urlpatterns = [
     path("consent/revoke/", DeviceConsentRevokeView.as_view(), name="wearable-consent-revoke"),
     path("", DeviceListView.as_view(), name="wearable-device-list"),
     path("connect/", DeviceConnectView.as_view(), name="wearable-device-connect"),
+    path("providers/", DeviceProviderCatalogueView.as_view(), name="wearable-provider-catalogue"),
     path(
         "disconnect/",
         DeviceDisconnectView.as_view(),

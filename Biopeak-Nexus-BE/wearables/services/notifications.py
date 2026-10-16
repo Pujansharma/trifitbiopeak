@@ -1,9 +1,10 @@
 from django.db import transaction
 from django.utils import timezone
 
-from wearables.models import RookMemberIdentity, WearableConnection, RookWebhookReceipt
+from wearables.models import RookMemberIdentity, WearableConnection, RookWebhookReceipt, WearableConnectionEvent
 from wearables.services.connections import record_connection_event
 from wearables.services.job_queue import enqueue_health_job
+from wearables.services.lifecycle import valid_transition
 from wearables.services.provenance import canonical_source
 from wearables.utils.constants import (
     AuthorizationStatus,
@@ -43,6 +44,24 @@ def notification_data_source(payload: dict) -> str:
 
 
 def apply_notification_state(connection: WearableConnection, text: str) -> None:
+    # A revoked source cannot be reopened by an out-of-order success message.
+    # A new explicit device-connect action must first set authorizing state.
+    negative = any(token in text for token in (
+        "expired", "disconnect", "deauthor", "revoked", "denied",
+        "deleted", "closed", "invalid", "failed", "error",
+    ))
+    if connection.status == ConnectionStatus.DISCONNECTED and not negative:
+        return
+    if any(token in text for token in (
+        "account deleted", "account closed", "user deleted", "user closed",
+        "provider deleted", "provider account deleted",
+    )):
+        connection.status = ConnectionStatus.DISCONNECTED
+        connection.authorization_status = AuthorizationStatus.REVOKED
+        connection.disconnected_at = timezone.now()
+        connection.last_error_code = "provider_account_closed"
+        connection.last_error_detail = "This upstream account is closed. Connect another provider."
+        return
     if any(token in text for token in ("authorization expired", "token expired")):
         connection.status = ConnectionStatus.AUTHORIZATION_EXPIRED
         connection.authorization_status = AuthorizationStatus.EXPIRED
@@ -74,7 +93,10 @@ def apply_notification_state(connection: WearableConnection, text: str) -> None:
         connection.status = ConnectionStatus.PROVIDER_ERROR
         return
     if "import completed" in text or "historical completed" in text:
-        connection.status = ConnectionStatus.ACTIVE
+        connection.status = (
+            ConnectionStatus.PARTIAL if connection.permission_status == PermissionStatus.LIMITED
+            else ConnectionStatus.ACTIVE
+        )
         connection.authorization_status = AuthorizationStatus.AUTHORIZED
         connection.import_status = HistoricalImportStatus.COMPLETED
         connection.import_completed_at = timezone.now()
@@ -94,7 +116,7 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
     data_source = notification_data_source(payload)
     if not rook_user_id or not data_source:
         return {"accepted": True, "skipped": True, "reason": "missing_identity"}
-    identity = RookMemberIdentity.objects.filter(rook_user_id=rook_user_id).first()
+    identity = RookMemberIdentity.objects.select_for_update().filter(rook_user_id=rook_user_id).first()
     if identity is None:
         return {"accepted": True, "skipped": True, "reason": "unknown_user"}
     connection = (
@@ -125,12 +147,33 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
         return {"accepted": True, "duplicate": True, "connectionId": str(connection.pk)}
     previous_status = connection.status
     text = notification_text(payload)
-    apply_notification_state(connection, text)
+    if (connection.last_error_code == "provider_account_closed"
+            and not any(token in text for token in ("deleted", "closed"))):
+        return {"accepted": True, "skipped": True, "reason": "provider_account_closed"}
+    resumed = False
+    if (connection.status in {ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING}
+            and any(token in text for token in ("authorized", "connected", "linked"))
+            and not any(token in text for token in ("failed", "denied", "expired", "revoked"))):
+        pending_state = WearableConnectionEvent.objects.filter(
+            connection=connection,
+            event_type__in=["oauth_state_pending", "oauth_state_verified"],
+        ).order_by("-created_at").first()
+        if pending_state and pending_state.previous_status in {
+            ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED,
+        }:
+            from wearables.services.connections import authorization_confirmed
+            authorization_confirmed(connection, was_reconnect=True)
+            resumed = True
+    if not resumed:
+        apply_notification_state(connection, text)
+    if not valid_transition(previous_status, connection.status) and not resumed:
+        connection.status = previous_status
+        return {"accepted": True, "skipped": True, "reason": "invalid_state_transition"}
     connection.last_webhook_received_at = timezone.now()
     if connection.status == ConnectionStatus.PROVIDER_ERROR:
         connection.last_error_code = "rook_notification"
         connection.last_error_detail = str(payload.get("message") or text)[:512]
-    else:
+    elif connection.last_error_code != "provider_account_closed":
         connection.last_error_code = ""
         connection.last_error_detail = ""
     connection.save()
@@ -147,9 +190,10 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
         },
     )
     if (
-        connection.status == ConnectionStatus.IMPORTING
+        not resumed
+        and connection.status in {ConnectionStatus.IMPORTING, ConnectionStatus.HISTORICAL_REIMPORT}
         and connection.authorization_status == AuthorizationStatus.AUTHORIZED
-        and previous_status != ConnectionStatus.IMPORTING
+        and previous_status not in {ConnectionStatus.IMPORTING, ConnectionStatus.HISTORICAL_REIMPORT}
         and connection.connection_method == "api"
     ):
         enqueue_health_job(

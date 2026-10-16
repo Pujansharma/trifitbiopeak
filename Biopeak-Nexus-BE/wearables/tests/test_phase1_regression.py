@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from django.core.cache import caches
 from django.test import SimpleTestCase, TestCase, override_settings
+from django.utils import timezone
 
 from accounts.customers.models import Customer, CustomerProfile
 from accounts.models import UserAccount
@@ -16,6 +17,9 @@ from wearables.services.analytics import (
     member_today, trend_direction, trend_payload,
 )
 from wearables.services.identity import get_or_create_rook_identity
+from wearables.services.connections import get_or_create_connection
+from wearables.models import WearableConsent
+from wearables.utils.constants import ConsentStatus, ConnectionStatus, AuthorizationStatus, PermissionStatus
 from wearables.services.ingestion import (
     ingest_rook_document, normalize_health_document, remap_member_local_days,
 )
@@ -31,6 +35,18 @@ class PhaseOnePersistenceRegressionTests(TestCase):
             customer=customer, first_name="History", last_name="Test", is_main=True,
         )
         self.identity = get_or_create_rook_identity(self.profile, timezone_name="UTC")
+        WearableConsent.objects.create(
+            customer_profile=self.profile, granted_by=user,
+            status=ConsentStatus.GRANTED, version="v1", granted_at=timezone.now(),
+        )
+        connection = get_or_create_connection(
+            customer_profile=self.profile, identity=self.identity,
+            data_source="Garmin", historical_days_requested=7,
+        )
+        connection.status = ConnectionStatus.ACTIVE
+        connection.authorization_status = AuthorizationStatus.AUTHORIZED
+        connection.permission_status = PermissionStatus.GRANTED
+        connection.save()
 
     def payload(self, version, steps, moment="2026-10-08T10:00:00+00:00", event_id="abc"):
         return {
@@ -120,11 +136,12 @@ class PhaseOneAnalyticsRegressionTests(SimpleTestCase):
     def test_dashboard_cache_and_invalidation(self):
         profile = SimpleNamespace(pk="phase-one-cache-profile")
         caches["health"].clear()
-        with patch("wearables.services.analytics.refresh_profile_snapshots", return_value=[]) as refresh:
+        with patch("wearables.services.analytics.shared_health_cache_enabled", return_value=True), \
+             patch("wearables.services.analytics.refresh_profile_snapshots", return_value=[]) as refresh:
             dashboard_payload(profile)
             dashboard_payload(profile)
             self.assertEqual(refresh.call_count, 1)
-            invalidate_health_dashboard(profile)
+            invalidate_health_dashboard(profile, remove_snapshots=False)
             dashboard_payload(profile)
             self.assertEqual(refresh.call_count, 2)
 
@@ -133,3 +150,11 @@ class PhaseOneAnalyticsRegressionTests(SimpleTestCase):
         utc_time = datetime(2026, 10, 8, 23, 40, tzinfo=dt_timezone.utc)
         with patch("wearables.services.analytics.timezone.now", return_value=utc_time):
             self.assertEqual(member_today(profile), date(2026, 10, 9))
+
+    @override_settings(CACHES={
+        "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"},
+        "health": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache", "LOCATION": "test-worker-local"},
+    })
+    def test_local_memory_is_not_treated_as_shared_health_cache(self):
+        from wearables.services.analytics import shared_health_cache_enabled
+        self.assertFalse(shared_health_cache_enabled())

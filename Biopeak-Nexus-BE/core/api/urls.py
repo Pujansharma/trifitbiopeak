@@ -50,10 +50,10 @@ urlpatterns = [
     path("services/", include("programs.services.urls")),
     path("leads/", include("leads.urls")),
     path("google-calendar/", include("integrations.google_calendar.urls")),
-    path("api/v1/webhooks/", include("webhooks.urls")),
+    path("webhooks/", include("webhooks.urls")),
     path("pre-consultation/", include("pre_consultation.urls")),
     # Phase 1 wearable endpoints (additive; existing routes stay untouched).
     path("r/", include("wearables.callback_urls")),
-    path("api/v1/devices/", include("wearables.device_urls")),
-    path("api/v1/health/", include("wearables.health_urls")),
+    path("devices/", include("wearables.device_urls")),
+    path("health/", include("wearables.health_urls")),
 ]

@@ -9,6 +9,7 @@ from django.utils import timezone
 
 from wearables.models import (
     HealthProcessingJob, RookWebhookReceipt, WearableConnection,
+    WearableConnectionEvent,
 )
 from wearables.utils.constants import ConnectionStatus, DocumentStatus, HealthJobStatus
 
@@ -42,6 +43,12 @@ class Command(BaseCommand):
             Q(last_successful_sync__isnull=True)
             | Q(last_successful_sync__lt=now - timedelta(hours=getattr(settings, "ROOK_SYNC_DELAY_HOURS", 48)))
         ).count()
+        schema_events = WearableConnectionEvent.objects.filter(
+            event_type="unmapped_or_empty_rook_document", created_at__gte=since,
+        ).count()
+        closed_upstream_accounts = WearableConnection.objects.filter(
+            last_error_code="provider_account_closed",
+        ).count()
         alerts = []
         if stalled:
             alerts.append("historical_import_stalled")
@@ -51,6 +58,10 @@ class Command(BaseCommand):
             alerts.append("webhook_rejection_rate_above_0.5_percent")
         if job_counts.get(HealthJobStatus.FAILED, 0) > 0:
             alerts.append("health_processing_jobs_failed")
+        if schema_events >= 3:
+            alerts.append("rook_schema_or_empty_document_drift")
+        if closed_upstream_accounts:
+            alerts.append("rook_provider_accounts_closed")
         if not getattr(settings, "HEALTH_REDIS_URL", ""):
             alerts.append("shared_health_redis_not_configured")
         payload = {
@@ -62,6 +73,8 @@ class Command(BaseCommand):
             "jobCounts": job_counts,
             "importsStalledOverFourHours": stalled,
             "delayedConnections": sync_delayed,
+            "unmappedRookDocuments": schema_events,
+            "closedProviderAccounts": closed_upstream_accounts,
             "alerts": alerts,
         }
         self.stdout.write(json.dumps(payload, sort_keys=True))

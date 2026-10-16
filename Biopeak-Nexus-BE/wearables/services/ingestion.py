@@ -22,9 +22,11 @@ from wearables.services.connections import (
     record_connection_event,
 )
 from wearables.services.job_queue import enqueue_health_job
+from wearables.services.lifecycle import can_ingest_source, source_permission_for_domain
 from wearables.services.metrics import (
     ExtractedMetric,
     extract_metric_values,
+    is_v1_display_metric,
     structure_represents_workout,
 )
 from wearables.services.provenance import extract_provenance
@@ -158,7 +160,7 @@ def create_receipt(
     reason: str = "",
     document: RookHealthDocument | None = None,
 ) -> tuple[RookWebhookReceipt, bool]:
-    return RookWebhookReceipt.objects.get_or_create(
+    receipt, created = RookWebhookReceipt.objects.get_or_create(
         receipt_key=receipt_key,
         defaults={
             "rook_user_id": str(payload.get("user_id") or "")[:50],
@@ -170,30 +172,60 @@ def create_receipt(
             "received_at": timezone.now(),
         },
     )
+    # Rejected source/consent deliveries may be resubmitted after an explicit
+    # reauthorization. A past rejection must not become a permanent gap.
+    if not created and receipt.status == DocumentStatus.REJECTED and status == DocumentStatus.QUEUED:
+        receipt.document = document
+        receipt.signature_valid = signature_valid
+        receipt.status = status
+        receipt.reason = reason[:128]
+        receipt.received_at = timezone.now()
+        receipt.save(update_fields=["document", "signature_valid", "status", "reason", "received_at", "updated_at"])
+    return receipt, created
 
 
 def wearable_source_values() -> set[str]:
     return {choice.value for choice in WearableSource}
 
 
+def acceptable_source_connections(*, identity, provenance: dict) -> tuple[list, str]:
+    """Reject deliveries from unlinked, disconnected or unpermitted sources.
+
+    ROOK may return a provider-resolved document with multiple source labels.
+    To guarantee a revoked source cannot contribute, every identified source
+    must remain authorized. An unattributed ROOK document is only accepted
+    when one eligible connection exists (never guess between two providers).
+    Caller locks the identity row before applying this policy.
+    """
+    available = list(WearableConnection.objects.select_for_update().filter(
+        customer_profile=identity.customer_profile,
+    ))
+    sources = set(provenance["data_sources"]) - {"unspecified"}
+    if sources:
+        matches = [connection for connection in available if connection.data_source in sources]
+        if len(matches) != len(sources):
+            return [], "unlinked_source"
+        if not all(can_ingest_source(connection) for connection in matches):
+            return [], "inactive_or_unpermitted_source"
+        return matches, ""
+    matches = [connection for connection in available if can_ingest_source(connection)]
+    if len(matches) != 1:
+        return [], "ambiguous_or_unauthorized_source"
+    return matches, ""
+
+
 def promote_matching_connections(
-    *,
-    identity: RookMemberIdentity,
-    data_sources: list[str],
-    observed_at: datetime,
-    received_at: datetime,
+    *, identity: RookMemberIdentity,
+    connections: list[WearableConnection],
+    observed_at: datetime, received_at: datetime,
 ) -> None:
-    for data_source in data_sources:
-        if data_source not in wearable_source_values():
+    for connection in connections:
+        if not can_ingest_source(connection):
             continue
-        connection = get_or_create_connection(
-            customer_profile=identity.customer_profile,
-            identity=identity,
-            data_source=data_source,
-            historical_days_requested=None,
-        )
         previous_status = connection.status
         connection.last_webhook_received_at = received_at
+        connection.last_successful_sync = received_at
+        connection.connected_at = connection.connected_at or received_at
         connection.available_from = min(
             filter(None, [connection.available_from, observed_at]),
             default=observed_at,
@@ -202,34 +234,31 @@ def promote_matching_connections(
             filter(None, [connection.available_to, observed_at]),
             default=observed_at,
         )
-        if connection.status not in {
-            ConnectionStatus.DISCONNECTED,
-            ConnectionStatus.AUTHORIZATION_EXPIRED,
-        }:
-            connection.status = ConnectionStatus.ACTIVE
-            connection.authorization_status = AuthorizationStatus.AUTHORIZED
-            if connection.permission_status in {
-                PermissionStatus.UNKNOWN,
-                PermissionStatus.NOT_DETERMINED,
-            }:
-                connection.permission_status = PermissionStatus.GRANTED
-            # Receiving a live document proves sync, not that the entire
-            # historical import completed. ROOK import/recovery completion
-            # is reported separately; keep the progressive-import state.
-            connection.last_successful_sync = received_at
-            connection.connected_at = connection.connected_at or received_at
+        # Incoming live data must not falsely claim that historical import or
+        # a reconnect gap-fill has finished. Permission-limited sources remain
+        # partial; provider transport errors can recover on successful data.
+        if connection.status in {ConnectionStatus.IDLE, ConnectionStatus.PROVIDER_ERROR}:
+            if connection.import_status == HistoricalImportStatus.RUNNING:
+                connection.status = ConnectionStatus.IMPORTING
+            elif connection.import_status == HistoricalImportStatus.PARTIAL or connection.permission_status == PermissionStatus.LIMITED:
+                connection.status = ConnectionStatus.PARTIAL
+            else:
+                connection.status = ConnectionStatus.ACTIVE
+        if previous_status == ConnectionStatus.PROVIDER_ERROR:
+            connection.last_error_code = ""
+            connection.last_error_detail = ""
         connection.save()
         if previous_status != connection.status:
             record_connection_event(
-                connection,
-                event_type="webhook_data_received",
+                connection, event_type="webhook_data_received",
                 previous_status=previous_status,
-                detail="Connection promoted after verified ROOK data delivery.",
+                detail="Authorized source delivered a verified ROOK document.",
             )
 
 
 @transaction.atomic
-def ingest_rook_document(payload: dict, *, signature_valid: bool) -> dict:
+def ingest_rook_document(payload: dict, *, signature_valid: bool,
+                         enqueue_normalization: bool = True) -> dict:
     if not isinstance(payload, dict):
         raise TypeError("ROOK webhook document must be an object.")
     content_hash = json_digest(payload)
@@ -238,11 +267,18 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool) -> dict:
         receipt_key=receipt_key
     ).first()
     if existing_receipt is not None:
-        return {
-            "accepted": True,
-            "duplicate": True,
-            "reason": existing_receipt.reason or "exact_replay",
-        }
+        rejected_document = (
+            existing_receipt.document_id
+            and existing_receipt.document.status == DocumentStatus.REJECTED
+        )
+        if existing_receipt.status != DocumentStatus.REJECTED and not rejected_document:
+            return {
+                "accepted": True,
+                "duplicate": True,
+                "reason": existing_receipt.reason or "exact_replay",
+            }
+        # A rejected delivery is still subject to all current source and
+        # consent checks below; never blindly trust an old receipt.
 
     rook_user_id = payload.get("user_id")
     if not isinstance(rook_user_id, str) or not rook_user_id:
@@ -285,6 +321,20 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool) -> dict:
     data_structure = document_structure(payload)
     version = document_version(payload)
     provenance = extract_provenance(payload)
+    permitted_connections, rejection = acceptable_source_connections(
+        identity=identity, provenance=provenance,
+    )
+    if rejection:
+        create_receipt(
+            receipt_key=receipt_key, payload=payload,
+            signature_valid=signature_valid, status=DocumentStatus.REJECTED,
+            reason=rejection,
+        )
+        return {"accepted": True, "skipped": True, "reason": rejection}
+    if provenance["data_sources"] == ["unspecified"]:
+        # Attribution is unambiguous only for a single live connection.
+        provenance["data_sources"] = [permitted_connections[0].data_source]
+        provenance["source_label"] = permitted_connections[0].data_source
     document_identity = document_identity_digest(
         customer_profile_id=identity.customer_profile_id,
         data_structure=data_structure,
@@ -306,7 +356,8 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool) -> dict:
             document=document,
         )
         return {"accepted": True, "skipped": True, "reason": "lower_document_version"}
-    if document is not None and version == document.document_version:
+    if (document is not None and version == document.document_version
+            and document.status != DocumentStatus.REJECTED):
         reason = "exact_replay" if content_hash == document.content_hash else "same_version_conflict"
         create_receipt(
             receipt_key=receipt_key,
@@ -359,20 +410,22 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool) -> dict:
         document=document,
     )
     promote_matching_connections(
-        identity=identity,
-        data_sources=provenance["data_sources"],
-        observed_at=observed_at,
-        received_at=received_at,
+        identity=identity, connections=permitted_connections,
+        observed_at=observed_at, received_at=received_at,
     )
-    transaction.on_commit(
-        partial(
-            enqueue_health_job,
-            job_type=HealthJobType.NORMALIZE_DOCUMENT,
-            idempotency_key=f"normalize:{document.pk}:{version}",
-            customer_profile=identity.customer_profile,
-            document=document,
+    # Recovery runs inside a background worker and may normalize immediately
+    # before reporting import completion. Real webhooks still enqueue an
+    # independently retryable normalization job on transaction commit.
+    if enqueue_normalization:
+        transaction.on_commit(
+            partial(
+                enqueue_health_job,
+                job_type=HealthJobType.NORMALIZE_DOCUMENT,
+                idempotency_key=f"normalize:{document.pk}:{version}:{received_at.isoformat()}",
+                customer_profile=identity.customer_profile,
+                document=document,
+            )
         )
-    )
     return {
         "accepted": True,
         "queued": True,
@@ -410,6 +463,18 @@ def observation_from_metric(
         numeric_value = float(extracted_metric.value)
     else:
         text_value = str(extracted_metric.value)[:512]
+    provenance = {
+        "sourceLabel": document.source_label,
+        "deviceMetadata": document.device_metadata,
+        "sourceContexts": document.source_contexts,
+    }
+    # Only annotate; never diagnose or automatically interpret an extreme
+    # observation (PRD EC-100, clinical V1). The threshold comes from the
+    # explicit HR=220 example, not a universal clinical diagnosis rule.
+    if (extracted_metric.metric in {"average_heart_rate", "resting_heart_rate", "maximum_heart_rate"}
+            and isinstance(numeric_value, (int, float)) and numeric_value >= 220):
+        provenance["clinicalReviewSuggested"] = True
+        provenance["reviewReason"] = "extreme_reported_heart_rate"
     return HealthObservation(
         customer_profile=document.customer_profile,
         document=document,
@@ -426,11 +491,7 @@ def observation_from_metric(
         unit=extracted_metric.unit,
         source_key=document.source_key,
         data_sources=document.data_sources,
-        provenance={
-            "sourceLabel": document.source_label,
-            "deviceMetadata": document.device_metadata,
-            "sourceContexts": document.source_contexts,
-        },
+        provenance=provenance,
         document_version=document.document_version,
     )
 
@@ -551,14 +612,30 @@ def normalize_health_document(document_id) -> dict:
         .get(pk=document_id)
     )
     RookMemberIdentity.objects.select_for_update().get(pk=document.identity_id)
+    if document.status == DocumentStatus.PROCESSED:
+        return {"documentId": str(document.pk), "alreadyProcessed": True, "domains": []}
+    from wearables.services.consent import has_active_wearable_consent
+    if not has_active_wearable_consent(document.customer_profile):
+        document.status = DocumentStatus.REJECTED
+        document.failure_detail = "Member consent withdrawn before normalization."
+        document.save(update_fields=["status", "failure_detail", "updated_at"])
+        return {"skipped": True, "reason": "consent_revoked"}
+    accepted, rejection = acceptable_source_connections(
+        identity=document.identity,
+        provenance={"data_sources": document.data_sources},
+    )
+    if rejection:
+        document.status = DocumentStatus.REJECTED
+        document.failure_detail = f"Source inactive before normalization: {rejection}"
+        document.save(update_fields=["status", "failure_detail", "updated_at"])
+        return {"skipped": True, "reason": rejection}
     local_date = local_date_for_document(document)
     connection = matching_connection(document)
-    extracted_metrics = list(
-        extract_metric_values(
-            document.payload,
-            data_structure=document.data_structure,
-        )
-    )
+    extracted_metrics = [
+        item for item in extract_metric_values(
+            document.payload, data_structure=document.data_structure,
+        ) if any(source_permission_for_domain(c, item.domain) != "denied" for c in accepted)
+    ]
     observations = [
         observation_from_metric(
             document=document,
@@ -568,13 +645,24 @@ def normalize_health_document(document_id) -> dict:
         )
         for extracted_metric in extracted_metrics
     ]
-    if structure_represents_workout(document.data_structure):
+    if (structure_represents_workout(document.data_structure)
+            and any(source_permission_for_domain(c, HealthDomain.WORKOUTS) != "denied" for c in accepted)):
         observations.append(
             workout_count_observation(
                 document=document,
                 local_date=local_date,
                 connection=connection,
             )
+        )
+    if not observations and connection is not None:
+        # A new ROOK structure or a provider schema change must be visible to
+        # operators, not silently shown as a fabricated zero.
+        record_connection_event(
+            connection, event_type="unmapped_or_empty_rook_document",
+            previous_status=connection.status,
+            detail="No supported V1 measurements were extracted from the ROOK document.",
+            payload={"structure": document.data_structure[:128],
+                     "documentVersion": document.document_version},
         )
     previous = document.observations.filter(is_current=True)
     for observation in observations:
@@ -621,21 +709,28 @@ def normalize_health_document(document_id) -> dict:
         status=DocumentStatus.PROCESSED,
         updated_at=timezone.now(),
     )
-    transaction.on_commit(
-        partial(
-            enqueue_health_job,
-            job_type=HealthJobType.REFRESH_ANALYTICS,
-            idempotency_key=(
-                f"analytics:{document.customer_profile_id}:"
-                f"{local_date.isoformat()}:{document.document_version}"
-            ),
-            customer_profile=document.customer_profile,
-            payload={"local_date": local_date.isoformat(), "domains": sorted(affected_domains)},
+    # Every distinct document has its own analytics work item. A date+version
+    # key alone loses a second ROOK pillar delivered on the same day (A03).
+    from wearables.services.analytics import invalidate_health_dashboard
+    transaction.on_commit(partial(invalidate_health_dashboard, document.customer_profile))
+    if affected_domains:
+        transaction.on_commit(
+            partial(
+                enqueue_health_job,
+                job_type=HealthJobType.REFRESH_ANALYTICS,
+                idempotency_key=(
+                    f"analytics:{document.pk}:{document.document_version}:"
+                    f"{document.content_hash[:20]}"
+                ),
+                customer_profile=document.customer_profile,
+                document=document,
+                payload={"local_date": local_date.isoformat(), "domains": sorted(affected_domains)},
+            )
         )
-    )
     return {
         "documentId": str(document.pk),
         "observationCount": len(observations),
+        "v1MetricCount": sum(1 for observation in observations if is_v1_display_metric(observation.domain, observation.metric)),
         "domains": sorted(affected_domains),
         "localDate": local_date.isoformat(),
     }

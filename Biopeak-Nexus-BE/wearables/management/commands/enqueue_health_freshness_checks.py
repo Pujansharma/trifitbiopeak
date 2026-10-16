@@ -7,6 +7,9 @@ from wearables.services.job_processor import (
     connections_requiring_recovery_pull,
     profiles_requiring_freshness_check,
 )
+from wearables.services.oauth import expire_oauth_attempts
+from wearables.models import WearableConnection
+from wearables.utils.constants import ConnectionStatus
 from wearables.services.job_queue import enqueue_health_job
 from wearables.utils.constants import HealthJobType
 
@@ -18,9 +21,19 @@ class Command(BaseCommand):
         if not getattr(settings, "WEARABLES_ENABLED", True):
             self.stdout.write("Wearable integration is disabled; no jobs enqueued.")
             return
+        # Resolve abandoned OAuth attempts without relying on a user polling
+        # GET /devices/. This command must be scheduled by the deployment.
+        pending_profile_ids = WearableConnection.objects.filter(
+            status__in=(ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING),
+        ).values_list("customer_profile_id", flat=True).distinct()
+        expired_count = 0
+        for profile in CustomerProfile.objects.filter(pk__in=pending_profile_ids).iterator():
+            expired_count += expire_oauth_attempts(profile)
         profile_ids = list(profiles_requiring_freshness_check())
         profiles = CustomerProfile.objects.filter(pk__in=profile_ids)
-        date_key = timezone.localdate().isoformat()
+        # Re-check every scheduler hour; a daily idempotency key would suppress
+        # all later freshness and recovery checks even after new data arrives.
+        date_key = timezone.now().strftime("%Y-%m-%dT%H")
         count = 0
         for customer_profile in profiles.iterator():
             enqueue_health_job(
@@ -40,7 +53,8 @@ class Command(BaseCommand):
             recovery_count += 1
         self.stdout.write(
             self.style.SUCCESS(
-                f"Enqueued {count} freshness check(s) and "
+                f"Expired {expired_count} abandoned OAuth attempt(s); "
+                f"enqueued {count} freshness check(s) and "
                 f"{recovery_count} recovery pull(s)."
             )
         )

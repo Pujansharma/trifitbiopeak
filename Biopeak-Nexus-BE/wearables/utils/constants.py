@@ -178,7 +178,7 @@ class PreferredUnits(models.TextChoices):
     IMPERIAL = "imperial", "Imperial"
 
 
-ALGORITHM_VERSION = "wearables-v1.0"
+ALGORITHM_VERSION = "wearables-v1.1"
 
 HEADLINE_METRICS = {
     HealthDomain.SLEEP: ["sleep_duration_seconds"],

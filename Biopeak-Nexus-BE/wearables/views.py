@@ -39,7 +39,7 @@ from wearables.services.oauth import complete_oauth_callback, OAuthStateError
 from wearables.services.consent import has_active_wearable_consent, revoke_wearable_consent
 from wearables.services.job_queue import enqueue_health_job
 from wearables.utils.constants import (HEALTH_DOMAIN_ORDER, ConnectionMethod, ConnectionStatus,
-    HealthJobType, HistoricalImportStatus)
+    HealthJobType, HistoricalImportStatus, WearableSource, NATIVE_WEARABLE_SOURCES)
 
 
 class WearablesAPIView(BaseGenericAPIView):
@@ -83,6 +83,8 @@ class DeviceConnectView(WearablesAPIView):
                 validated_data=serializer.validated_data,
                 correlation_id=self.correlation_id(),
             )
+        except ValueError as error:
+            self.raise_bad_request(str(error))
         except RookConfigurationError as error:
             return self.send_response(str(error), status=503)
         except RookServiceError as error:
@@ -94,6 +96,27 @@ class DeviceConnectView(WearablesAPIView):
             "authorizationUrl": result["authorization_url"],
             "rookUserId": connection.identity.rook_user_id,
         }
+        requested_days = serializer.requested_historical_days
+        applied_days = serializer.validated_data["historical_days"]
+        history = {
+            "requestedDays": requested_days,
+            "appliedDays": applied_days,
+            "maxSupportedDays": serializer.max_historical_days,
+            "adjusted": requested_days != applied_days,
+        }
+        if serializer.history_disabled_by_policy:
+            history["notice"] = (
+                "Pre-existing data import is disabled for this deployment; "
+                "live sync begins now and history builds forward."
+            )
+        elif requested_days != applied_days:
+            history["notice"] = (
+                f"{serializer.validated_data['data_source']} supports at most "
+                f"{serializer.max_historical_days} days of pre-existing "
+                f"history through this ROOK connection. "
+                f"Requested {requested_days} days; using {applied_days} days."
+            )
+        data["historicalImport"] = history
         return self.send_response("Wearable connection initiated.", data, status=201)
 
 
@@ -160,6 +183,36 @@ class DeviceDisconnectView(WearablesAPIView):
             "connection": serialize_connection(connection) if connection else None,
         }
         return self.send_response("Wearable disconnected. History was retained.", data)
+
+
+class DeviceProviderCatalogueView(WearablesAPIView):
+    """Expose explicit provider provisioning, so mobile hides disabled choices."""
+    throttle_classes = (ScopedRateThrottle,)
+    throttle_scope = "wearable_status"
+
+    @extend_schema(responses=OpenApiTypes.OBJECT)
+    def get(self, request, *args, **kwargs):
+        self.get_customer_profile()
+        from wearables.services.config import provisioned_sources
+        provisioned = provisioned_sources()
+        providers = []
+        for source in WearableSource.values:
+            is_native = source in NATIVE_WEARABLE_SOURCES
+            # Strava's current ROOK authorizer route is unsupported here.
+            supported = source != WearableSource.STRAVA
+            enabled = supported and (provisioned is not None and source in provisioned)
+            providers.append({
+                "name": source,
+                "connectionMethod": "sdk" if is_native else "api",
+                "provisioned": (enabled if provisioned is not None else None),
+                "selectable": enabled,
+                "reason": ("Provisioning not configured" if provisioned is None
+                           else "Unavailable" if not enabled else None),
+            })
+        return self.send_response(
+            "ROOK provider availability retrieved.",
+            {"providers": providers, "provisioningConfigured": provisioned is not None},
+        )
 
 
 class DeviceSDKConfigView(WearablesAPIView):
@@ -258,6 +311,7 @@ class HealthDomainView(WearablesAPIView):
                 customer_profile=customer_profile,
                 domain=domain,
                 days=serializer.validated_data["days"],
+                window=serializer.validated_data.get("window"),
             ),
         )
 
@@ -306,8 +360,10 @@ class DeviceRetrySyncView(WearablesAPIView):
         ).first()
         if connection is None:
             raise NotFound("Device connection was not found.")
-        if connection.status == ConnectionStatus.DISCONNECTED:
-            self.raise_bad_request("Reconnect this provider before retrying synchronization.")
+        if connection.status in {ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED}:
+            self.raise_bad_request("Reconnect and reauthorize this provider before retrying synchronization.")
+        if connection.last_error_code == "provider_account_closed":
+            self.raise_bad_request("This provider account is closed. Connect a different provider.")
         if connection.connection_method == ConnectionMethod.SDK:
             self.raise_bad_request("Re-run the ROOK native SDK sync on the member's device.")
         connection.import_status = HistoricalImportStatus.RUNNING

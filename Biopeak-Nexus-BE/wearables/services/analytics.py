@@ -1,6 +1,6 @@
 from collections import defaultdict
 from datetime import date, timedelta
-from statistics import mean
+from statistics import mean, pstdev
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
@@ -13,6 +13,8 @@ from wearables.models import (
     HealthObservation,
     WearableConnection,
 )
+from wearables.services.lifecycle import can_ingest_source, source_permission_for_domain
+from wearables.services.metrics import is_v1_display_metric
 from wearables.utils.constants import (
     ALGORITHM_VERSION,
     DOMAIN_DEFAULT_UNITS,
@@ -52,8 +54,21 @@ def health_cache():
     return caches["health"]
 
 
-def invalidate_health_dashboard(customer_profile) -> None:
+def shared_health_cache_enabled() -> bool:
+    """Do not serve cross-worker stale health data from local-memory caches."""
+    from django.core.cache.backends.locmem import LocMemCache
+    return not isinstance(health_cache(), LocMemCache)
+
+
+def invalidate_health_dashboard(customer_profile, *, remove_snapshots: bool = True) -> None:
+    """Invalidate both shared cache and DB-backed snapshots across workers.
+
+    Database snapshots are the read-through cache when deployments use Django's
+    default per-process LocMemCache. They must never outlive a data correction.
+    """
     health_cache().delete(health_cache_key(customer_profile))
+    if remove_snapshots:
+        HealthDomainSnapshot.objects.filter(customer_profile=customer_profile).delete()
 
 def domain_enabled(domain: str) -> bool:
     settings_map = {
@@ -123,7 +138,7 @@ def display_value(
 ) -> tuple[float, str]:
     """Convert server-side for all V1 display metrics, never in the mobile app."""
     imperial = preferred_units == PreferredUnits.IMPERIAL
-    if metric == "sleep_duration_seconds":
+    if metric in {"sleep_duration_seconds", "deep_sleep_duration_seconds", "rem_sleep_duration_seconds", "light_sleep_duration_seconds"}:
         return round(value / 3600.0, 2), "hours"
     if metric in {"weight_kg", "muscle_mass_kg"}:
         return (round(value * 2.2046226218, 2), "lb") if imperial else (round(value, 2), "kg")
@@ -138,7 +153,9 @@ def display_value(
         "readiness_score": "score", "stress_level": "score",
         "body_fat_percentage": "%", "body_water_percentage": "%",
         "bmi": "kg/m²", "workout_count": "sessions",
-        "workout_calories_kcal": "kcal",
+        "workout_calories_kcal": "kcal", "activity_calories_kcal": "kcal",
+        "floors_climbed": "floors", "active_minutes": "minutes",
+        "sleep_efficiency_percentage": "%", "sleep_score": "score",
     }
     return round(value, 2), units.get(metric, "")
 
@@ -169,61 +186,69 @@ def graph_values(
     return points
 
 
-def coverage_details(summaries: list[HealthDailySummary]) -> dict:
-    if not summaries:
-        return {
-            "observationDays": 0,
-            "expectedDays": 0,
-            "missingDays": 0,
-            "ratio": 0.0,
-        }
-    first_date = summaries[0].local_date
-    last_date = summaries[-1].local_date
-    expected_days = min((last_date - first_date).days + 1, 30)
-    observation_days = len({summary.local_date for summary in summaries[-30:]})
-    missing_days = max(expected_days - observation_days, 0)
-    ratio = observation_days / expected_days if expected_days else 0.0
+def coverage_details(summaries: list[HealthDailySummary], *, today: date | None = None) -> dict:
+    """Calendar-day completeness; missing recent days cannot be replaced by old ones."""
+    today = today or timezone.now().date()
+    dated = {item.local_date for item in summaries if isinstance(getattr(item, "local_date", None), date)
+             and item.local_date <= today}
+    if not dated:
+        return {"observationDays": 0, "expectedDays": 0, "missingDays": 0, "ratio": 0.0}
+    first = min(dated)
+    expected_days = min((today - first).days + 1, 30)
+    cutoff = today - timedelta(days=expected_days - 1)
+    observed = len({day for day in dated if cutoff <= day <= today})
     return {
-        "observationDays": observation_days,
-        "expectedDays": expected_days,
-        "missingDays": missing_days,
-        "ratio": round(ratio, 3),
+        "observationDays": observed, "expectedDays": expected_days,
+        "missingDays": max(expected_days - observed, 0),
+        "ratio": round(observed / expected_days, 3) if expected_days else 0.0,
     }
 
 
-def confidence_level(coverage: dict, summaries: list[HealthDailySummary]) -> str:
-    observation_count = len(summaries)
-    ratio = coverage["ratio"]
-    if observation_count >= 21 and ratio >= 0.85:
-        return ConfidenceLevel.HIGH
-    if observation_count >= 7 and ratio >= 0.6:
-        return ConfidenceLevel.MEDIUM
-    if observation_count:
+def confidence_level(coverage: dict, summaries: list[HealthDailySummary],
+                     *, today: date | None = None, connections=None) -> str:
+    """Gate confidence on completeness, freshness, and synchronization health."""
+    if not summaries:
+        return ConfidenceLevel.UNKNOWN
+    today = today or timezone.now().date()
+    dated = [item.local_date for item in summaries if isinstance(getattr(item, "local_date", None), date)]
+    if not dated or (today - max(dated)).days > 7:
         return ConfidenceLevel.LOW
-    return ConfidenceLevel.UNKNOWN
+    if connections:
+        active = [c for c in connections if can_ingest_source(c)]
+        if active and all(
+            (c.last_successful_sync or c.connected_at) is not None
+            and (timezone.now() - (c.last_successful_sync or c.connected_at))
+                > timedelta(hours=getattr(settings, "ROOK_SYNC_DELAY_HOURS", 48))
+            for c in active
+        ):
+            return ConfidenceLevel.LOW
+    count = coverage["observationDays"]
+    ratio = coverage["ratio"]
+    if count >= 21 and ratio >= 0.85:
+        return ConfidenceLevel.HIGH
+    if count >= 7 and ratio >= 0.6:
+        return ConfidenceLevel.MEDIUM
+    return ConfidenceLevel.LOW
 
 
 def history_window_availability(
-    summaries: list[HealthDailySummary],
+    summaries: list[HealthDailySummary], *, today: date | None = None,
 ) -> dict[str, dict]:
-    observation_days = len(summaries)
-    return {
-        "7d": {
-            "available": observation_days >= 7,
-            "requiredObservationDays": 7,
-            "observationDays": min(observation_days, 7),
-        },
-        "30d": {
-            "available": observation_days >= 21,
-            "requiredObservationDays": 21,
-            "observationDays": min(observation_days, 30),
-        },
-        "90d": {
-            "available": observation_days >= 60,
-            "requiredObservationDays": 60,
-            "observationDays": min(observation_days, 90),
-        },
-    }
+    """Eligibility is anchored to *today*, not the newest stored observation."""
+    today = today or timezone.now().date()
+    dates = {item.local_date for item in summaries
+             if isinstance(getattr(item, "local_date", None), date)
+             and item.local_date <= today}
+    result = {}
+    for window_days, required in ((7, 7), (30, 21), (90, 60)):
+        cutoff = today - timedelta(days=window_days - 1)
+        observation_days = len({day for day in dates if cutoff <= day <= today})
+        result[f"{window_days}d"] = {
+            "available": observation_days >= required,
+            "requiredObservationDays": required,
+            "observationDays": observation_days,
+        }
+    return result
 
 
 def trend_direction(
@@ -263,6 +288,7 @@ def trend_payload(
     metric: str,
     confidence: str,
     preferred_units: str,
+    today: date | None = None,
 ) -> dict:
     # Compare calendar windows, not "last N readings"; otherwise missing days
     # shift old measurements into a newer week and fabricate a trajectory.
@@ -278,10 +304,10 @@ def trend_payload(
             "baseline": {"available": False}, "change": {"available": False},
             "interpretationSuppressed": True,
         }
-    latest_day = max(local_date for local_date, _ in dated_summaries)
-    current_start = latest_day - timedelta(days=6)
+    today = today or timezone.now().date()
+    current_start = today - timedelta(days=6)
     baseline_start = current_start - timedelta(days=28)
-    current_values = [value for day, value in dated_summaries if day >= current_start]
+    current_values = [value for day, value in dated_summaries if current_start <= day <= today]
     baseline_values = [
         value for day, value in dated_summaries
         if baseline_start <= day < current_start
@@ -348,89 +374,88 @@ def freshness_payload(summaries: list[HealthDailySummary], *, today: date | None
     return {"label": label, "lastMeasurementAt": last_time}
 
 
-def connection_priority_state(connections: list[WearableConnection]) -> str | None:
+def connection_priority_state(connections: list[WearableConnection], domain: str | None = None) -> str | None:
+    """Resolve a domain against all sources without hiding one healthy source.
+
+    A failed Garmin connection does not turn a working Oura Sleep card into
+    Provider Error. `capabilities` are granted scopes, not provider hardware
+    capabilities; unknown capability must mean Waiting, not Unsupported.
+    """
     if not connections:
         return None
-    if all(
-        connection.status == ConnectionStatus.DISCONNECTED
-        for connection in connections
-    ):
-        return HealthCardState.DISCONNECTED
-    if any(
-        connection.status == ConnectionStatus.AUTHORIZATION_EXPIRED
-        for connection in connections
-    ):
-        return HealthCardState.AUTHORIZATION_EXPIRED
-    if any(
-        connection.status == ConnectionStatus.PROVIDER_ERROR
-        for connection in connections
-    ):
+    active = [c for c in connections if can_ingest_source(c)
+              and (domain is None or source_permission_for_domain(c, domain) != "denied")]
+    if not active:
+        if domain is not None and any(
+            c.status != ConnectionStatus.DISCONNECTED
+            and c.status != ConnectionStatus.AUTHORIZATION_EXPIRED
+            and source_permission_for_domain(c, domain) == "denied"
+            for c in connections
+        ):
+            return HealthCardState.PERMISSION_REQUIRED
+        if all(c.status == ConnectionStatus.DISCONNECTED for c in connections):
+            return HealthCardState.DISCONNECTED
+        if any(c.status == ConnectionStatus.AUTHORIZATION_EXPIRED for c in connections):
+            return HealthCardState.AUTHORIZATION_EXPIRED
+        if any(c.status == ConnectionStatus.PROVIDER_ERROR for c in connections):
+            return HealthCardState.PROVIDER_ERROR
+        if any(c.status == ConnectionStatus.DISCONNECTED for c in connections):
+            return HealthCardState.DISCONNECTED
+        if any(c.permission_status == PermissionStatus.DENIED for c in connections):
+            return HealthCardState.PERMISSION_REQUIRED
+        return None
+    if all(c.status == ConnectionStatus.PROVIDER_ERROR for c in active):
         return HealthCardState.PROVIDER_ERROR
-    if any(
-        connection.import_status == HistoricalImportStatus.FAILED
-        for connection in connections
-    ):
+    usable = [c for c in active if c.status != ConnectionStatus.PROVIDER_ERROR]
+    if any(c.import_status == HistoricalImportStatus.FAILED for c in usable):
         return HealthCardState.HISTORICAL_IMPORT_FAILED
-    if any(
-        connection.import_status == HistoricalImportStatus.PARTIAL
-        for connection in connections
-    ):
+    if any(c.import_status == HistoricalImportStatus.PARTIAL for c in usable):
         return HealthCardState.HISTORICAL_IMPORT_PARTIAL
-    if any(
-        connection.permission_status == PermissionStatus.DENIED
-        for connection in connections
-    ):
-        return HealthCardState.PERMISSION_REQUIRED
-    if any(
-        connection.import_status == HistoricalImportStatus.RUNNING
-        for connection in connections
-    ):
+    if any(c.import_status == HistoricalImportStatus.RUNNING for c in usable):
         return HealthCardState.HISTORICAL_IMPORT_RUNNING
-    active_connections = [
-        connection
-        for connection in connections
-        if connection.status in {
-            ConnectionStatus.ACTIVE,
-            ConnectionStatus.IDLE,
-            ConnectionStatus.PARTIAL,
-        }
-    ]
-    delay_hours = getattr(settings, "ROOK_SYNC_DELAY_HOURS", 48)
-    delayed_before = timezone.now() - timedelta(hours=delay_hours)
-    if active_connections and all(
-        (connection.last_successful_sync < delayed_before)
-        if connection.last_successful_sync is not None
-        else (connection.connected_at is not None and connection.connected_at < delayed_before)
-        for connection in active_connections
+    delayed_before = timezone.now() - timedelta(hours=getattr(settings, "ROOK_SYNC_DELAY_HOURS", 48))
+    if usable and all(
+        (c.last_successful_sync or c.connected_at) is not None
+        and (c.last_successful_sync or c.connected_at) < delayed_before
+        for c in usable
     ):
         return HealthCardState.SYNC_DELAYED
     return None
 
 
-def capabilities_support_domain(
-    connections: list[WearableConnection],
-    domain: str,
-) -> bool | None:
-    capability_lists = [
-        {str(capability).lower() for capability in connection.capabilities}
-        for connection in connections
-        if connection.capabilities
-    ]
-    if not capability_lists:
+# Only certified-negative V1 cases are hard-coded. ROOK certifies provider
+# pillars, not per-metric availability, so an unknown capability remains Waiting
+# for Data, rather than inventing Unsupported (PRD section 5.3.1).
+CERTAINLY_UNSUPPORTED_DOMAINS = {
+    "Oura": frozenset({HealthDomain.BODY}),
+    "Whoop": frozenset({HealthDomain.BODY}),
+    "Dexcom": frozenset({
+        HealthDomain.SLEEP, HealthDomain.ACTIVITY, HealthDomain.HEART,
+        HealthDomain.RECOVERY, HealthDomain.WORKOUTS,
+    }),
+}
+
+
+def capabilities_support_domain(connections: list[WearableConnection], domain: str) -> bool | None:
+    active = [c for c in connections if can_ingest_source(c) and
+              source_permission_for_domain(c, domain) != "denied"]
+    if not active:
         return None
-    return any(domain in capabilities for capabilities in capability_lists)
+    if all(domain in CERTAINLY_UNSUPPORTED_DOMAINS.get(str(c.data_source), ()) for c in active):
+        return False
+    # A native SDK's granted scopes are not vendor-wide source capabilities.
+    # In all uncertain cases wait for a runtime payload to arrive.
+    return None
 
 
 def card_state(
-    *,
-    domain: str,
-    summaries: list[HealthDailySummary],
-    connections: list[WearableConnection],
-    coverage: dict,
+    *, domain: str, summaries: list[HealthDailySummary],
+    connections: list[WearableConnection], coverage: dict,
+    trend: dict | None = None,
 ) -> str:
     if not domain_enabled(domain):
         return HealthCardState.UNSUPPORTED
-    connection_state = connection_priority_state(connections)
+    connection_state = connection_priority_state(connections, domain)
     if connection_state in {
         HealthCardState.DISCONNECTED,
         HealthCardState.AUTHORIZATION_EXPIRED,
@@ -438,15 +463,12 @@ def card_state(
         HealthCardState.PERMISSION_REQUIRED,
     }:
         return connection_state
-    capability_support = capabilities_support_domain(connections, domain)
     if not summaries:
-        if capability_support is False:
-            return HealthCardState.UNSUPPORTED
         if connection_state is not None:
             return connection_state
-        if connections:
-            return HealthCardState.WAITING_FOR_DATA
-        return HealthCardState.NO_DATA
+        if capabilities_support_domain(connections, domain) is False:
+            return HealthCardState.UNSUPPORTED
+        return HealthCardState.WAITING_FOR_DATA if connections else HealthCardState.NO_DATA
     if connection_state in {
         HealthCardState.HISTORICAL_IMPORT_RUNNING,
         HealthCardState.HISTORICAL_IMPORT_PARTIAL,
@@ -454,11 +476,12 @@ def card_state(
         HealthCardState.SYNC_DELAYED,
     }:
         return connection_state
-    gap_threshold = getattr(settings, "HEALTH_HISTORICAL_GAP_DAYS", 7)
-    if coverage["missingDays"] >= gap_threshold:
+    if coverage["missingDays"] >= getattr(settings, "HEALTH_HISTORICAL_GAP_DAYS", 7):
         return HealthCardState.HISTORICAL_GAP
-    minimum_observations = getattr(settings, "HEALTH_TREND_MINIMUM_OBSERVATIONS", 7)
-    if len(summaries) >= minimum_observations:
+    # A count of seven current daily summaries does not prove that the prior
+    # 28-day comparison baseline exists (EC-064). The trend payload is
+    # authoritative; never mark a card Trend-Available without a baseline.
+    if trend and trend.get("baseline", {}).get("available") and trend.get("change", {}).get("available"):
         return HealthCardState.TREND_AVAILABLE
     return HealthCardState.CURRENT_VALUE_ONLY
 
@@ -582,8 +605,9 @@ def build_domain_card(
         customer_profile=customer_profile,
         domain=domain,
     )
-    coverage = coverage_details(summaries)
-    confidence = confidence_level(coverage, summaries)
+    today = member_today(customer_profile)
+    coverage = coverage_details(summaries, today=today)
+    confidence = confidence_level(coverage, summaries, today=today, connections=connections)
     # A device-methodology change can mimic a physiological trend. Show values,
     # but suppress interpretation until the new source stabilizes (PRD §8.3).
     if metric and HealthObservation.objects.filter(
@@ -592,13 +616,6 @@ def build_domain_card(
         provenance__has_key="sourceChange",
     ).exists():
         confidence = ConfidenceLevel.LOW
-    today = member_today(customer_profile)
-    state = card_state(
-        domain=domain,
-        summaries=summaries,
-        connections=connections,
-        coverage=coverage,
-    )
     graph = (
         graph_values(
             summaries=summaries,
@@ -614,6 +631,7 @@ def build_domain_card(
             metric=metric,
             confidence=confidence,
             preferred_units=preferred_units,
+            today=today,
         )
         if metric
         else {
@@ -625,6 +643,18 @@ def build_domain_card(
             "interpretationSuppressed": True,
         }
     )
+    state = card_state(
+        domain=domain, summaries=summaries, connections=connections,
+        coverage=coverage, trend=trend,
+    )
+    messages = list(state_messages(state))
+    if confidence == ConfidenceLevel.LOW and coverage["expectedDays"] >= 7:
+        messages.append(
+            "Data coverage is low. Check that your wearable is syncing; "
+            "trend interpretation is withheld until history is reliable."
+        )
+    if connections and all(c.historical_days_requested == 0 for c in connections):
+        messages.append("Historical import is disabled; your history builds from today.")
     data_source_lists = HealthObservation.objects.filter(
         customer_profile=customer_profile,
         domain=domain,
@@ -657,10 +687,10 @@ def build_domain_card(
             "unit": graph[-1]["unit"] if graph else DOMAIN_DEFAULT_UNITS[domain],
             "completeness": coverage,
             "confidence": confidence,
-            "windowAvailability": history_window_availability(summaries),
+            "windowAvailability": history_window_availability(summaries, today=today),
         },
         "actions": state_actions(state),
-        "messages": state_messages(state),
+        "messages": messages,
         "metadata": {
             "algorithmVersion": ALGORITHM_VERSION,
             "freshness": freshness_payload(summaries, today=today),
@@ -704,79 +734,134 @@ def refresh_profile_snapshots(customer_profile, domains=None) -> list[dict]:
                 "generated_at": generated_at,
             },
         )
-    invalidate_health_dashboard(customer_profile)
+    invalidate_health_dashboard(customer_profile, remove_snapshots=False)
     return cards
 
 
 def dashboard_payload(customer_profile) -> dict:
     key = health_cache_key(customer_profile)
-    cached = health_cache().get(key)
-    if cached is not None:
-        return cached
-    cards = refresh_profile_snapshots(customer_profile)
+    if shared_health_cache_enabled():
+        cached = health_cache().get(key)
+        if cached is not None:
+            return cached
+    if shared_health_cache_enabled():
+        # Shared Redis/Memcached is the authoritative fast read when available.
+        cards = refresh_profile_snapshots(customer_profile)
+    else:
+        # With LocMemCache use the *database* snapshot table as a cross-worker
+        # read-through cache (instead of recomputing and writing six snapshots
+        # on every GET). All connection/correction paths invalidate it.
+        snapshot_ttl = max(1, int(getattr(settings, "HEALTH_DASHBOARD_CACHE_SECONDS", 60)))
+        earliest = timezone.now() - timedelta(seconds=snapshot_ttl)
+        snapshots = list(HealthDomainSnapshot.objects.filter(customer_profile=customer_profile))
+        by_domain = {row.domain: row for row in snapshots}
+        if all(domain in by_domain and by_domain[domain].algorithm_version == ALGORITHM_VERSION
+               and by_domain[domain].generated_at >= earliest for domain in HEALTH_DOMAIN_ORDER):
+            cards = [by_domain[domain].card for domain in HEALTH_DOMAIN_ORDER]
+        else:
+            cards = refresh_profile_snapshots(customer_profile)
     result = {
         "cards": cards,
         "domainOrder": list(HEALTH_DOMAIN_ORDER),
         "algorithmVersion": ALGORITHM_VERSION,
         "generatedAt": timezone.now(),
     }
-    health_cache().set(key, result, timeout=getattr(settings, "HEALTH_DASHBOARD_CACHE_SECONDS", 60))
+    if shared_health_cache_enabled():
+        health_cache().set(key, result, timeout=getattr(settings, "HEALTH_DASHBOARD_CACHE_SECONDS", 60))
     return result
 
 
-def domain_metrics_payload(
-    *,
-    customer_profile,
-    domain: str,
-    days: int,
-) -> list[dict]:
-    cutoff = member_today(customer_profile) - timedelta(days=days - 1)
+def rolling_averages(summaries: list[HealthDailySummary], *, metric: str,
+                     preferred_units: str, today: date) -> dict:
+    dated = [(item.local_date, summary_numeric_value(item)) for item in one_summary_per_day(summaries)]
+    dated = [(day, value) for day, value in dated if value is not None and day <= today]
+    result = {}
+    for label, length, minimum in (("7d", 7, 7), ("14d", 14, 7),
+                                   ("30d", 30, 21), ("90d", 90, 60),
+                                   ("lifetime", None, 1)):
+        low = today - timedelta(days=length - 1) if length else None
+        values = [value for day, value in dated if low is None or day >= low]
+        entry = {"available": len(values) >= minimum, "observationDays": len(values),
+                 "requiredObservationDays": minimum}
+        if entry["available"]:
+            entry["value"], entry["unit"] = display_value(
+                value=mean(values), metric=metric, preferred_units=preferred_units,
+            )
+            entry["standardDeviation"] = round(pstdev(values), 3)
+        result[label] = entry
+    return result
+
+
+def domain_metrics_payload(*, customer_profile, domain: str, days: int | None) -> list[dict]:
+    today = member_today(customer_profile)
     summaries = HealthDailySummary.objects.filter(
-        customer_profile=customer_profile,
-        domain=domain,
-        local_date__gte=cutoff,
+        customer_profile=customer_profile, domain=domain, local_date__lte=today,
     ).order_by("metric", "local_date", "last_observed_at")
     grouped: dict[str, list[HealthDailySummary]] = defaultdict(list)
     for summary in summaries.iterator():
-        grouped[summary.metric].append(summary)
+        if is_v1_display_metric(domain, summary.metric):
+            grouped[summary.metric].append(summary)
     identity = getattr(customer_profile, "rook_identity", None)
     preferred_units = identity.preferred_units if identity else PreferredUnits.METRIC
+    cutoff = today - timedelta(days=days - 1) if days else None
     return [
         {
             "metric": metric,
             "points": graph_values(
-                summaries=one_summary_per_day(metric_summaries),
-                metric=metric,
-                preferred_units=preferred_units,
+                summaries=one_summary_per_day([
+                    item for item in metric_summaries if cutoff is None or item.local_date >= cutoff
+                ]), metric=metric, preferred_units=preferred_units,
             ),
+            "rollingAverages": rolling_averages(
+                metric_summaries, metric=metric, preferred_units=preferred_units, today=today,
+            ),
+            "chartType": "stacked" if metric in {
+                "deep_sleep_duration_seconds", "rem_sleep_duration_seconds", "light_sleep_duration_seconds"
+            } else "bars" if domain in (HealthDomain.ACTIVITY, HealthDomain.WORKOUTS) else "line",
         }
         for metric, metric_summaries in sorted(grouped.items())
     ]
 
 
-def domain_payload(*, customer_profile, domain: str, days: int) -> dict:
+def sleep_session_payload(*, customer_profile, days: int | None) -> list[dict]:
+    today = member_today(customer_profile)
+    observations = HealthObservation.objects.filter(
+        customer_profile=customer_profile, domain=HealthDomain.SLEEP,
+        metric__in=("sleep_start_time", "sleep_end_time"), is_current=True,
+        local_date__lte=today,
+    ).order_by("local_date", "document_id")
+    if days:
+        observations = observations.filter(local_date__gte=today - timedelta(days=days - 1))
+    by_document = {}
+    for obs in observations.iterator():
+        row = by_document.setdefault(str(obs.document_id), {"date": obs.local_date})
+        if obs.text_value:
+            row["startTime" if obs.metric == "sleep_start_time" else "endTime"] = obs.text_value
+    return [row for row in by_document.values() if "startTime" in row or "endTime" in row]
+
+
+def domain_payload(*, customer_profile, domain: str, days: int | None,
+                   window: str | None = None) -> dict:
+    if window:
+        days = {"7d": 7, "14d": 14, "30d": 30, "90d": 90, "lifetime": None}[window]
     connections = list(
-        WearableConnection.objects.filter(customer_profile=customer_profile).order_by(
-            "data_source"
-        )
+        WearableConnection.objects.filter(customer_profile=customer_profile).order_by("data_source")
     )
     identity = getattr(customer_profile, "rook_identity", None)
     preferred_units = identity.preferred_units if identity else PreferredUnits.METRIC
-    return {
+    result = {
         "domain": domain,
         "card": build_domain_card(
-            customer_profile=customer_profile,
-            domain=domain,
-            connections=connections,
+            customer_profile=customer_profile, domain=domain, connections=connections,
             preferred_units=preferred_units,
         ),
-        "metrics": domain_metrics_payload(
-            customer_profile=customer_profile,
-            domain=domain,
-            days=days,
-        ),
+        "metrics": domain_metrics_payload(customer_profile=customer_profile, domain=domain, days=days),
         "historyWindowDays": days,
+        "historyWindow": window or (f"{days}d" if days else "lifetime"),
     }
+    if domain == HealthDomain.SLEEP:
+        result["sleepSessions"] = sleep_session_payload(customer_profile=customer_profile, days=days)
+    return result
 
 
 def observation_value(observation: HealthObservation) -> dict:

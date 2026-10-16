@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest import TestCase
 
@@ -15,9 +15,10 @@ class AnalyticsAvailabilityTests(TestCase):
         self.assertIsNone(connection_priority_state([]))
 
     def test_history_windows_use_prd_observation_thresholds(self):
-        summaries = [object()] * 60
+        today = date(2026, 10, 16)
+        summaries = [SimpleNamespace(local_date=today - timedelta(days=i)) for i in range(60)]
 
-        availability = history_window_availability(summaries)
+        availability = history_window_availability(summaries, today=today)
 
         self.assertTrue(availability["7d"]["available"])
         self.assertTrue(availability["30d"]["available"])
