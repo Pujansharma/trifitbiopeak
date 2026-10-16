@@ -12,6 +12,7 @@ from accounts.users.models import User
 from accounts.users.serializers import BaseUserSerializer
 from accounts.utils.constants import UserType
 from accounts.utils.db import get_user_account_type
+from appointments.utils.redemption import OPEN_APPOINTMENT_STATUSES
 from core.utils.serializers import BaseModelSerializer, BaseSerializer
 from products.serializers import BaseProductSerializer
 from programs.composites.models import CompositeTemplate, CompositeTemplateService
@@ -46,6 +47,27 @@ from programs.utils.db import (
     update_program_sessions_count,
 )
 from programs.utils.helper import generate_program_unique_id
+
+
+class CustomerProgramSummarySerializer(BaseSerializer):
+    id = serializers.UUIDField(read_only=True)
+    first_name = serializers.CharField(read_only=True)
+    last_name = serializers.CharField(read_only=True, allow_null=True)
+    programs_count = serializers.IntegerField(read_only=True)
+    programs_active = serializers.IntegerField(read_only=True)
+    programs_inactive = serializers.IntegerField(read_only=True)
+    programs_expired = serializers.IntegerField(read_only=True)
+    services_count = serializers.IntegerField(read_only=True)
+    services_active = serializers.IntegerField(read_only=True)
+    services_inactive = serializers.IntegerField(read_only=True)
+    results_count = serializers.IntegerField(read_only=True)
+    documents_count = serializers.IntegerField(read_only=True)
+    reports_count = serializers.IntegerField(read_only=True)
+    raw_data_count = serializers.IntegerField(read_only=True)
+    fetch_count = serializers.IntegerField(read_only=True)
+    fetch_results_count = serializers.IntegerField(read_only=True)
+    fetch_documents_count = serializers.IntegerField(read_only=True)
+    fetch_pending_count = serializers.IntegerField(read_only=True)
 
 
 class CustomerTherapyProgramSerializer(BaseModelSerializer):
@@ -125,7 +147,7 @@ class CustomerTherapyProgramSerializer(BaseModelSerializer):
             "created_by",
         ]
 
-    def get_services(self, instance: TherapyProgram):
+    def get_services(self, instance):
         program_services = getattr(instance.program, "service_preview", [])
         return BaseProgramServiceSerializer(
             program_services,
@@ -133,7 +155,7 @@ class CustomerTherapyProgramSerializer(BaseModelSerializer):
             context=self.context,
         ).data
 
-    def get_redeemable_centers(self, instance: TherapyProgram):
+    def get_redeemable_centers(self, instance):
         redeemable_centers = instance.program.redeemable_centers.all()[:3]
         return BaseCenterSerializer(
             redeemable_centers,
@@ -310,6 +332,91 @@ class CustomerTherapyProgramSerializer(BaseModelSerializer):
             )
 
         return therapy_program
+
+
+class CustomerProgramServiceSerializer(BaseModelSerializer):
+    centers = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = Service
+        fields = ["id", "name", "centers"]
+
+    def get_centers(self, instance):
+        # View prefetches center_assignments scoped to active + redeemable centers.
+        assignments = list(instance.center_assignments.all()[:3])
+        if not assignments:
+            return None
+        centers = [assignment.center for assignment in assignments]
+        return MinimumCenterSerializer(centers, many=True, context=self.context).data
+
+
+class CustomerTherapyActiveAppointmentSerializer(BaseSerializer):
+    id = serializers.UUIDField(source="pk", read_only=True)
+    code = serializers.CharField(read_only=True)
+    status = serializers.CharField(read_only=True)
+    modality = serializers.CharField(read_only=True)
+    start = serializers.DateTimeField(source="start_datetime", read_only=True)
+    end = serializers.DateTimeField(source="end_datetime", read_only=True)
+    center = MinimumCenterSerializer(read_only=True)
+    room = serializers.SerializerMethodField(read_only=True)
+    notes = serializers.CharField(read_only=True, allow_null=True)
+
+    def get_room(self, instance):
+        room = instance.room
+        if room is None:
+            return None
+        return {"id": room.pk, "name": room.name}
+
+
+class CustomerTherapyProgramServiceSerializer(BaseModelSerializer):
+    id = serializers.UUIDField(source="program_service.pk", read_only=True)
+    service = CustomerProgramServiceSerializer(
+        source="program_service.service", read_only=True
+    )
+    created_date = serializers.DateField(
+        source="program_service.created_date", read_only=True
+    )
+    is_active = serializers.BooleanField(
+        source="program_service.is_active", read_only=True
+    )
+    cancelled_at = serializers.DateTimeField(
+        source="program_service.cancelled_at", read_only=True
+    )
+    cancelled_date = serializers.DateField(
+        source="program_service.cancelled_date", read_only=True
+    )
+    active_appointment = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = TherapyProgramService
+        fields = [
+            "id",
+            "service",
+            "sessions_count",
+            "sessions_used",
+            "redeem_code",
+            "created_date",
+            "created_at",
+            "is_active",
+            "cancelled_at",
+            "cancelled_date",
+            "active_appointment",
+        ]
+
+    def get_active_appointment(self, instance):
+        open_appointments = getattr(instance.program_service, "open_appointments", None)
+        if open_appointments is None:
+            open_appointments = list(
+                instance.program_service.appointments.filter(
+                    status__in=OPEN_APPOINTMENT_STATUSES,
+                ).select_related("center", "room")[:1]
+            )
+        if not open_appointments:
+            return None
+        return CustomerTherapyActiveAppointmentSerializer(
+            open_appointments[0],
+            context=self.context,
+        ).data
 
 
 class CustomerCompositeProgramCenterSerializer(BaseSerializer):
@@ -774,7 +881,7 @@ class CustomerCompositeProgramSerializer(BaseModelSerializer):
             )
         return composite_program
 
-    def get_services(self, instance: CompositeProgram):
+    def get_services(self, instance):
         program_services = getattr(instance.program, "service_preview", None)
         if not program_services:
             return None
@@ -799,7 +906,16 @@ class BaseCompositeProgramSerializer(BaseModelSerializer):
         read_only_fields = fields
 
 
+class CustomerResultProgramSerializer(BaseModelSerializer):
+    program_type_code = serializers.CharField(source="program_type", read_only=True)
+
+    class Meta:
+        model = Program
+        fields = ["id", "uid", "program_type", "program_type_code"]
+
+
 class CustomerServiceDocumentProgramServiceSerializer(BaseModelSerializer):
+    program = CustomerResultProgramSerializer(read_only=True)
     service = BaseServiceSerializer(read_only=True)
     composite_program = BaseCompositeProgramSerializer(
         source="program.composite_program",
@@ -819,6 +935,7 @@ class CustomerServiceDocumentProgramServiceSerializer(BaseModelSerializer):
         fields = [
             "id",
             "service",
+            "program",
             "composite_program",
             "composite_template",
         ]
@@ -864,6 +981,9 @@ class CustomerServiceDocumentSerializer(
         read_only=True,
     )
     result = CustomerResultSerializer(read_only=True)
+    report_component_code = serializers.CharField(
+        source="report_component", read_only=True, allow_null=True,
+    )
 
     class Meta:
         model = ServiceDocument
@@ -875,9 +995,43 @@ class CustomerServiceDocumentSerializer(
             "content_type",
             "document_category",
             "document_category_code",
+            "report_component",
+            "report_component_code",
             "module_category",
             "module_category_code",
             "is_active",
             "created_at",
             "updated_at",
         ]
+
+
+class CustomerMetsightsResultSerializer(CustomerResultSerializer):
+    analysis_data = serializers.JSONField(
+        source="data.analysis_data", read_only=True, allow_null=True, default=None,
+    )
+    trends_data = serializers.JSONField(
+        source="data.trends_data", read_only=True, allow_null=True, default=None,
+    )
+
+    class Meta:
+        model = ServiceResult
+        fields = [
+            "id",
+            "program_service",
+            "product",
+            "provider_name",
+            "product_name",
+            "result_mode",
+            "result_mode_code",
+            "document_type",
+            "document_type_code",
+            "documents_count",
+            "sample_collection_date",
+            "report_generation_date",
+            "analysis_data",
+            "trends_data",
+        ]
+
+
+class CustomerDocumentExportSerializer(BaseSerializer):
+    email = serializers.EmailField(write_only=True)

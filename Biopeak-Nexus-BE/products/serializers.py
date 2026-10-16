@@ -3,10 +3,17 @@ from rest_framework import serializers
 
 from accounts.users.serializers import BaseUserSerializer
 from core.utils.serializers import BaseModelSerializer, BaseSerializer
-from products.models import Product, Provider, ProviderAPI
+from products.models import (
+    DocumentCategory,
+    DocumentCategoryAssignment,
+    Product,
+    Provider,
+    ProviderAPI,
+)
 from products.utils.constants import PROVIDER_PRODUCT_CALLBACK_MAP, FetchProfileFieldChoices
 from products.utils.db import update_provider_products_count
 from products.utils.helper import generate_product_code, generate_provider_code
+from programs.services.utils.constants import ServiceDocumentType, ServiceDocumentCategory
 
 
 class ProductIDSerializer(BaseSerializer):
@@ -115,6 +122,19 @@ class ProviderSerializer(BaseModelSerializer):
         required=False,
         allow_empty=True,
     )
+    booking_fields = serializers.ListField(
+        child=serializers.CharField(), required=False, allow_empty=True,
+    )
+    booking_profile_fields = serializers.MultipleChoiceField(
+        choices=list(FetchProfileFieldChoices.values),
+        required=False, allow_empty=True,
+    )
+    confirm_order_fields = serializers.ListField(
+        child=serializers.CharField(max_length=50), required=False, allow_empty=True,
+    )
+    confirm_order_file_fields = serializers.ListField(
+        child=serializers.CharField(max_length=50), required=False, allow_empty=True,
+    )
 
     class Meta:
         model = Provider
@@ -133,6 +153,10 @@ class ProviderSerializer(BaseModelSerializer):
             "required_fields",
             "fetch_fields",
             "fetch_profile_fields",
+            "booking_fields",
+            "booking_profile_fields",
+            "confirm_order_fields",
+            "confirm_order_file_fields",
             "has_api",
             "is_active",
             "is_api_enabled",
@@ -152,14 +176,10 @@ class ProviderSerializer(BaseModelSerializer):
         return BaseProductSerializer(qs, many=True, context=self.context).data
 
     def validate(self, attrs):
-        _required_fields = attrs.pop("required_fields") or []
-        _fetch_fields = attrs.pop("fetch_fields") or []
-
-        required_fields = list(filter(None, _required_fields))
-        fetch_fields = list(filter(None, _fetch_fields))
-
-        attrs["required_fields"] = required_fields
-        attrs["fetch_fields"] = fetch_fields
+        if "required_fields" in attrs:
+            attrs["required_fields"] = list(filter(None, attrs["required_fields"] or []))
+        if "fetch_fields" in attrs:
+            attrs["fetch_fields"] = list(filter(None, attrs["fetch_fields"] or []))
         return attrs
 
     def create(self, validated_data: dict) -> Provider:
@@ -168,7 +188,7 @@ class ProviderSerializer(BaseModelSerializer):
 
     def update(self, instance: Provider, validated_data: dict) -> Provider:
         validated_data.pop("code", None)
-        required_fields = validated_data.get("required_fields") or []
+        required_fields = validated_data.get("required_fields", instance.required_fields) or []
         if instance.is_api_enabled:
             api_instance = getattr(instance, "api", None)
             _data: dict = getattr(api_instance, "data", {}) or {}
@@ -274,6 +294,10 @@ class AssessmentServiceProviderSerializer(BaseModelSerializer):
             "is_api_enabled",
             "fetch_fields",
             "fetch_profile_fields",
+            "booking_fields",
+            "booking_profile_fields",
+            "confirm_order_fields",
+            "confirm_order_file_fields",
         ]
 
     def get_fetch_fields(self, instance):
@@ -281,3 +305,152 @@ class AssessmentServiceProviderSerializer(BaseModelSerializer):
 
     def get_fetch_profile_fields(self, instance):
         return instance.fetch_profile_fields or []
+
+class DocumentCategoryAssignmentEntrySerializer(BaseSerializer):
+    document_type = serializers.ChoiceField(choices=ServiceDocumentType.choices)
+    document_categories = serializers.ListField(
+        child=serializers.ChoiceField(choices=ServiceDocumentCategory.choices),
+        allow_empty=False,
+    )
+
+    @classmethod
+    def validate_document_categories(cls, value):
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError(
+                "document_categories must not contain duplicate values."
+            )
+        if len(value) > 2:
+            raise serializers.ValidationError(
+                "document_categories may contain at most 2 values."
+            )
+        return value
+
+
+class DocumentCategoryAssignmentKeySerializer(BaseSerializer):
+    document_type = serializers.ChoiceField(choices=ServiceDocumentType.choices)
+
+
+class DocumentCategoryAssignmentSerializer(BaseModelSerializer):
+    document_type_code = serializers.CharField(
+        source="document_type",
+        read_only=True,
+    )
+
+    class Meta:
+        model = DocumentCategoryAssignment
+        fields = [
+            "id",
+            "document_type",
+            "document_type_code",
+            "document_categories",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class DocumentCategorySerializer(BaseModelSerializer):
+    created_by = BaseUserSerializer(read_only=True)
+    add = DocumentCategoryAssignmentEntrySerializer(many=True, required=False, write_only=True)
+
+    class Meta:
+        model = DocumentCategory
+        fields = [
+            "id",
+            "name",
+            "description",
+            "add",
+            "is_active",
+            "created_at",
+            "updated_at",
+            "created_by",
+        ]
+
+    @staticmethod
+    def validate_add(value):
+        document_types = [entry["document_type"] for entry in value]
+        if len(document_types) != len(set(document_types)):
+            raise serializers.ValidationError(
+                "Duplicate document_type entries are not allowed."
+            )
+        return value
+
+    def create(self, validated_data: dict) -> DocumentCategory:
+        add_entries = validated_data.pop("add", [])
+        with transaction.atomic():
+            category = super().create(validated_data)
+            if add_entries:
+                DocumentCategoryAssignment.objects.bulk_create(
+                    [
+                        DocumentCategoryAssignment(category=category, **entry)
+                        for entry in add_entries
+                    ]
+                )
+        return category
+
+
+class DocumentCategoryDetailSerializer(BaseModelSerializer):
+    created_by = BaseUserSerializer(read_only=True)
+    assignments = DocumentCategoryAssignmentSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = DocumentCategory
+        fields = [
+            "id",
+            "name",
+            "description",
+            "assignments",
+            "is_active",
+            "created_at",
+            "updated_at",
+            "created_by",
+        ]
+
+
+class DocumentCategoryAssignmentLinkSerializer(BaseSerializer):
+    add = DocumentCategoryAssignmentEntrySerializer(many=True, required=False, write_only=True)
+    remove = DocumentCategoryAssignmentKeySerializer(
+        many=True, required=False, write_only=True
+    )
+
+    def validate(self, attrs: dict) -> dict:
+        add_entries = attrs.get("add", [])
+        remove_entries = attrs.get("remove", [])
+        if not add_entries and not remove_entries:
+            raise serializers.ValidationError(
+                "At least one of 'add' or 'remove' must be provided."
+            )
+
+        add_document_types = [entry["document_type"] for entry in add_entries]
+        if len(add_document_types) != len(set(add_document_types)):
+            raise serializers.ValidationError(
+                {"add": "Duplicate document_type entries are not allowed."}
+            )
+        return attrs
+
+    def create(self, validated_data: dict) -> int:
+        category = validated_data.pop("category")
+        add_entries = validated_data.get("add", [])
+        remove_entries = validated_data.get("remove", [])
+
+        with transaction.atomic():
+            if remove_entries:
+                remove_document_types = [
+                    entry["document_type"] for entry in remove_entries
+                ]
+                DocumentCategoryAssignment.objects.filter(
+                    category=category, document_type__in=remove_document_types
+                ).delete()
+
+            if add_entries:
+                DocumentCategoryAssignment.objects.bulk_create(
+                    [
+                        DocumentCategoryAssignment(category=category, **entry)
+                        for entry in add_entries
+                    ],
+                    update_conflicts=True,
+                    unique_fields=["category", "document_type"],
+                    update_fields=["document_categories"],
+                )
+
+        return 1

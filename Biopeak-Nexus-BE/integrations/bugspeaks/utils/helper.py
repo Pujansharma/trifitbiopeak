@@ -159,7 +159,7 @@ def normalize_bugspeaks_webhook_payload(payload: dict, project_status: str) -> d
     """Return normalized metadata sections from a Bugspeaks webhook payload."""
     normalized = {}
     provider_details = {}
-    bugspeaks_id = payload.get("Bugspeaks_ID")
+    bugspeaks_id = payload.get("Bugspeaks_ID") or payload.get("bugspeaks_id")
     reseller_name = payload.get("Reseller_Name")
     if bugspeaks_id:
         provider_details["bugspeaks_id"] = bugspeaks_id
@@ -168,14 +168,16 @@ def normalize_bugspeaks_webhook_payload(payload: dict, project_status: str) -> d
 
     kit_status = {}
     assigned_date = payload.get("Client_Kit_Assigned_Date")
-    dispatch_courier_partner = payload.get("Courier_Partner")
-    dispatch_tracking_id = payload.get("Tracking_ID")
-    dispatch_date = payload.get("Dispatch_Date")
-    delivered_date = payload.get("Delivered_Date")
-    delivered_tracking_id = payload.get("Delivered_Tracking_ID")
-    delivered_courier_partner = payload.get("Delivered_Courier_Partner")
-    pickup_requested_date = payload.get("Pickup_Requested_Date")
-    pickup_initiated_date = payload.get("Pickup_Initiated_Date")
+    dispatch_courier_partner = payload.get("Dispatch_Courier_Partner")
+    dispatch_tracking_id = payload.get("Kit_Dispatch_Tracking_ID")
+    dispatch_date = payload.get("Kit_Dispatch_Date")
+    delivered_date = payload.get("Kit_Delivered_Date")
+    delivered_tracking_id = payload.get("Kit_Delivered_Tracking_ID")
+    delivered_courier_partner = payload.get("Kit_Delivered_Courier_Partner")
+    pickup_requested_date = payload.get("Client_Request_Initiate_Pickup_Date")
+    pickup_initiated_date = payload.get("Sample_Pickup_Initiated_Date_1")
+    pickup_initiated_tracking_id = payload.get("Sample_Pickup_Initiated_Tracking_ID_1")
+    pickup_initiated_courier_partner = payload.get("Pickup_Courier_Partner_1")
     sample_pickup_date = payload.get("Sample_Pickup_Date")
     sample_received_date = payload.get("Sample_Received_Date")
     sample_pickup_tracking_id = payload.get("Sample_Pickup_Tracking_ID")
@@ -199,6 +201,10 @@ def normalize_bugspeaks_webhook_payload(payload: dict, project_status: str) -> d
         kit_status["pickup_requested_date"] = pickup_requested_date
     if pickup_initiated_date:
         kit_status["pickup_initiated_date"] = pickup_initiated_date
+    if pickup_initiated_tracking_id:
+        kit_status["pickup_initiated_tracking_id"] = pickup_initiated_tracking_id
+    if pickup_initiated_courier_partner:
+        kit_status["pickup_initiated_courier_partner"] = pickup_initiated_courier_partner
     if sample_pickup_date:
         kit_status["sample_pickup_date"] = sample_pickup_date
     if sample_received_date:
@@ -233,6 +239,12 @@ def normalize_bugspeaks_webhook_payload(payload: dict, project_status: str) -> d
         report_status["report_validation_date"] = report_validation_date
     if project_completed_timestamp:
         report_status["project_completed_timestamp"] = project_completed_timestamp
+    report_download_url = payload.get("Report_Download_URL")
+    additional_report_url = payload.get("Additional_Report_URL")
+    if report_download_url:
+        report_status["report_download_url"] = report_download_url
+    if additional_report_url:
+        report_status["additional_report_url"] = additional_report_url
 
     if provider_details:
         normalized["provider_details"] = provider_details

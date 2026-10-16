@@ -413,18 +413,15 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool,
         identity=identity, connections=permitted_connections,
         observed_at=observed_at, received_at=received_at,
     )
-    # Recovery runs inside a background worker and may normalize immediately
-    # before reporting import completion. Real webhooks still enqueue an
-    # independently retryable normalization job on transaction commit.
+    # Durable DB outbox: create the normalization job in the SAME transaction
+    # as the accepted document. If either write fails, both roll back and ROOK
+    # can safely retry the webhook; no acknowledged document is left unqueued.
     if enqueue_normalization:
-        transaction.on_commit(
-            partial(
-                enqueue_health_job,
-                job_type=HealthJobType.NORMALIZE_DOCUMENT,
-                idempotency_key=f"normalize:{document.pk}:{version}:{received_at.isoformat()}",
-                customer_profile=identity.customer_profile,
-                document=document,
-            )
+        enqueue_health_job(
+            job_type=HealthJobType.NORMALIZE_DOCUMENT,
+            idempotency_key=f"normalize:{document.pk}:{version}:{received_at.isoformat()}",
+            customer_profile=identity.customer_profile,
+            document=document,
         )
     return {
         "accepted": True,
@@ -712,21 +709,22 @@ def normalize_health_document(document_id) -> dict:
     # Every distinct document has its own analytics work item. A date+version
     # key alone loses a second ROOK pillar delivered on the same day (A03).
     from wearables.services.analytics import invalidate_health_dashboard
-    transaction.on_commit(partial(invalidate_health_dashboard, document.customer_profile))
     if affected_domains:
-        transaction.on_commit(
-            partial(
-                enqueue_health_job,
-                job_type=HealthJobType.REFRESH_ANALYTICS,
-                idempotency_key=(
-                    f"analytics:{document.pk}:{document.document_version}:"
-                    f"{document.content_hash[:20]}"
-                ),
-                customer_profile=document.customer_profile,
-                document=document,
-                payload={"local_date": local_date.isoformat(), "domains": sorted(affected_domains)},
-            )
+        # Store the refresh work item atomically with the processed document.
+        # A post-commit scheduling error must not strand completed ingestion.
+        enqueue_health_job(
+            job_type=HealthJobType.REFRESH_ANALYTICS,
+            idempotency_key=(
+                f"analytics:{document.pk}:{document.document_version}:"
+                f"{document.content_hash[:20]}"
+            ),
+            customer_profile=document.customer_profile,
+            document=document,
+            payload={"local_date": local_date.isoformat(), "domains": sorted(affected_domains)},
         )
+    # Cache evictions are best-effort AFTER commit; the DB snapshot TTL bounds
+    # any transient cache error, while the scheduled refresh remains durable.
+    transaction.on_commit(partial(invalidate_health_dashboard, document.customer_profile), robust=True)
     return {
         "documentId": str(document.pk),
         "observationCount": len(observations),

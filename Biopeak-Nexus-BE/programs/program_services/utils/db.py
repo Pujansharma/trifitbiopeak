@@ -1,11 +1,13 @@
 from functools import partial
 from uuid import UUID
 
+from django.core.files.base import ContentFile
 from django.core.files.storage import Storage
 from django.db import transaction
 from django.db.models import Count, OuterRef, Subquery, Value
 from django.db.models.functions import Coalesce
 
+from programs.program_services.utils.helper import generate_file_hash
 from programs.composites.utils.db import (
     update_composite_program_document_counts,
     update_composite_program_results_count,
@@ -14,9 +16,61 @@ from programs.models import ProgramService
 from programs.services.models import ResultRequest, ServiceDocument, ServiceResult
 from programs.services.utils.constants import (
     ResultRequestStatus,
+    ResultType,
     ServiceDocumentCategory,
-    ServiceResultMode,
 )
+
+
+def save_order_artifact(
+    result_request: ResultRequest, document_type: str, content: bytes, extension: str,
+    content_type: str, category: str, defaults: dict | None = None,
+) -> ServiceDocument:
+    result = save_result_request_result(result_request, document_type, defaults=defaults)
+    file_hash = generate_file_hash(content)
+    document = get_or_create_order_document(result, result_request, file_hash, content, extension, content_type, category)
+    update_result_documents_count(result.pk)
+    return document
+
+
+def get_or_create_order_document(
+    result: ServiceResult, result_request: ResultRequest, file_hash: str,
+    content: bytes, extension: str, content_type: str, category: str,
+) -> ServiceDocument:
+    document = ServiceDocument.objects.filter(
+        result=result, file_hash=file_hash, document_category=category,
+    ).first()
+    filename = f"{result_request.pk}_{file_hash[:12]}{extension}"
+    if not document:
+        return ServiceDocument.objects.create(
+            result=result, file=ContentFile(content, name=filename), filename=filename,
+            content_type=content_type, file_hash=file_hash, document_category=category,
+        )
+    document.filename = filename
+    document.content_type = content_type
+    document.save(update_fields=["filename", "content_type", "updated_at"])
+    return document
+
+
+def save_result_request_result(
+    result_request: ResultRequest,
+    document_type: str,
+    defaults: dict | None = None,
+) -> ServiceResult:
+
+    service_result, _ = ServiceResult.objects.update_or_create(
+        result_request=result_request,
+        document_type=document_type,
+        defaults={
+            **(defaults or {}),
+            "program_service": result_request.program_service,
+            "product": result_request.product,
+            "provider_name": result_request.product.provider.name,
+            "product_name": result_request.product.name,
+            "result_mode": result_request.request_type,
+            "created_by": result_request.created_by,
+        },
+    )
+    return service_result
 
 
 def update_result_documents_count(result_id: UUID):
@@ -125,11 +179,11 @@ def update_program_service_document_counts(
 def _get_program_service_fetch_count_update_values():
     fetch_count_subquery = _get_program_service_result_requests_count_subquery()
     fetch_results_count_subquery = _get_program_service_results_count_subquery(
-        ServiceResultMode.FETCH
+        ResultType.FETCH
     )
     fetch_documents_count_subquery = (
         _get_program_service_documents_count_subquery(
-            result_mode=ServiceResultMode.FETCH,
+            result_mode=ResultType.FETCH,
         )
     )
     fetch_pending_count_subquery = (

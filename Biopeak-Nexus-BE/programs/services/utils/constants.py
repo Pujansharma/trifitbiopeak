@@ -7,6 +7,13 @@ class ServiceCategory(models.TextChoices):
     ASSESSMENT = "assessment", "Assessment"
 
 
+class ServiceReportComponent(models.TextChoices):
+    METSIGHTS_HEALTH_RISK_LANDSCAPE = "metsights-health-risk-landscape", "MetSights Health Risk Landscape"
+    METSIGHTS_LIFESTYLE_BLUEPRINT = "metsights-lifestyle-blueprint", "MetSights Lifestyle Blueprint"
+    METSIGHTS_SUPPLEMENT_BLUEPRINT = "metsights-supplement-blueprint", "MetSights Supplement Blueprint"
+    METSIGHTS_CONSOLIDATED = "metsights-consolidated", "MetSights Consolidated Report"
+
+
 class ServiceDocumentType(models.TextChoices):
     OTHER = "other", "Other"
     BLOOD = "blood", "Blood diagnostics Report"
@@ -96,14 +103,22 @@ class ServiceDocumentCategory(models.TextChoices):
     RAW = "raw", "Raw data file"
 
 
-class ServiceResultMode(models.TextChoices):
+class ResultType(models.TextChoices):
     UPLOAD = "upload", "Upload"
     FETCH = "fetch", "Fetch"
+    ORDER = "order", "Order"
+
+
+class RequestResultType(models.TextChoices):
+    FETCH = ResultType.FETCH
+    ORDER = ResultType.ORDER
 
 
 class ResultRequestStatus(models.TextChoices):
     QUEUED = "queued", "Queued"
     RUNNING = "running", "Running"
+    SUBMITTED = "submitted", "Submitted"
+    PENDING = "pending", "Pending"
     COMPLETED = "completed", "Completed"
     PARTIALLY_FETCHED = "partially_fetched", "Partially Fetched"
     FAILED = "failed", "Failed"

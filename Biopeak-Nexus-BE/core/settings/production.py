@@ -52,11 +52,11 @@ DEFAULT_FROM_EMAIL = config("PRD_DEFAULT_FROM_EMAIL")
 # https://docs.djangoproject.com/en/latest/howto/mailers-migration/#migrating-settings
 MAILERS = {
     "default": {
-        "BACKEND":"django.core.mail.backends.smtp.EmailBackend",
+        "BACKEND": "django.core.mail.backends.smtp.EmailBackend",
         "OPTIONS": {
             "host": config("PRD_EMAIL_HOST"),
             "use_tls": True,
-            "username":  config("PRD_EMAIL_HOST_USER"),
+            "username": config("PRD_EMAIL_HOST_USER"),
             "password": config("PRD_EMAIL_HOST_PASSWORD"),
         },
     },
@@ -116,6 +116,12 @@ APP_CERT = config("APP_CERT", None)
 # Metsights
 METSIGHTS_API_KEY = config('PRD_METSIGHTS_API_KEY', None)
 
+# ASK-AI
+ASK_AI_API_KEY = config('PRD_ASK_AI_API_KEY', None)
+
+# SMS
+SMS_API_KEY = config("PRD_SMS_API_KEY", None)
+
 # Orange Labs
 ORANGE_LABS_API_BASE_URL = config("PRD_ORANGE_LABS_API_BASE_URL", None)
 ORANGE_LABS_API_KEY = config("PRD_ORANGE_LABS_API_KEY", None)
@@ -141,54 +147,43 @@ WHATSAPP_API_VERSION = config("PRD_WHATSAPP_API_VERSION", "v23.0")
 WHATSAPP_WABA_ID = config("PRD_WHATSAPP_WABA_ID", None)
 WHATSAPP_APP_ID = config("PRD_WHATSAPP_APP_ID", None)
 WHATSAPP_TEMPLATE_LANGUAGE = config("PRD_WHATSAPP_TEMPLATE_LANGUAGE", "en")
-WHATSAPP_TEMPLATE_CONFIRMED = config(
-    "PRD_WHATSAPP_TEMPLATE_CONFIRMED", "appointment_confirmed"
-)
-WHATSAPP_TEMPLATE_CANCELLED = config(
-    "PRD_WHATSAPP_TEMPLATE_CANCELLED", "appointment_cancelled"
-)
-WHATSAPP_TEMPLATE_RESCHEDULED = config(
-    "PRD_WHATSAPP_TEMPLATE_RESCHEDULED", "appointment_rescheduled"
-)
 
-
-# Wearables / ROOK (Phase 1 additive configuration)
-WEARABLES_ENABLED = config("PRD_WEARABLES_ENABLED", False, cast=bool)
+# ROOK / Wearables Phase 1 — additive. All keys remain external to source control.
+WEARABLES_ENABLED = config("PRD_WEARABLES_ENABLED", default=False, cast=bool)
 WEARABLES_REQUIRE_PROFILE_FEATURE = config(
-    "PRD_WEARABLES_REQUIRE_PROFILE_FEATURE", True, cast=bool
+    "PRD_WEARABLES_REQUIRE_PROFILE_FEATURE", default=True, cast=bool
 )
-TIMELINE_ENABLED = config("PRD_TIMELINE_ENABLED", False, cast=bool)
-RECOVERY_DOMAIN_ENABLED = config("PRD_RECOVERY_DOMAIN_ENABLED", True, cast=bool)
-BODY_DOMAIN_ENABLED = config("PRD_BODY_DOMAIN_ENABLED", True, cast=bool)
-ROOK_ENVIRONMENT = config("PRD_ROOK_ENVIRONMENT", "production")
-ROOK_BASE_URL = config("PRD_ROOK_BASE_URL", "https://api.rook-connect.com")
-ROOK_CLIENT_UUID = config("PRD_ROOK_CLIENT_UUID", "")
-ROOK_SECRET_KEY = config("PRD_ROOK_SECRET_KEY", "")
-ROOK_WEBHOOK_HASH_KEY = config("PRD_ROOK_WEBHOOK_HASH_KEY", "")
-ROOK_SDK_CLIENT_UUID = config("PRD_ROOK_SDK_CLIENT_UUID", "")
-ROOK_SDK_SECRET = config("PRD_ROOK_SDK_SECRET", "")
-ROOK_HISTORICAL_DAYS = config("PRD_ROOK_HISTORICAL_DAYS", 29, cast=int)
-ROOK_SYNC_DELAY_HOURS = config("PRD_ROOK_SYNC_DELAY_HOURS", 48, cast=int)
-ROOK_CONNECT_TIMEOUT_SECONDS = config(
-    "PRD_ROOK_CONNECT_TIMEOUT_SECONDS", 5, cast=int
+TIMELINE_ENABLED = config("PRD_TIMELINE_ENABLED", default=False, cast=bool)
+RECOVERY_DOMAIN_ENABLED = config("PRD_RECOVERY_DOMAIN_ENABLED", default=True, cast=bool)
+BODY_DOMAIN_ENABLED = config("PRD_BODY_DOMAIN_ENABLED", default=True, cast=bool)
+ROOK_ENVIRONMENT = config("PRD_ROOK_ENVIRONMENT", default="production")
+ROOK_BASE_URL = config("PRD_ROOK_BASE_URL", default="https://api.rook-connect.com")
+ROOK_CLIENT_UUID = config("PRD_ROOK_CLIENT_UUID", default="")
+ROOK_SECRET_KEY = config("PRD_ROOK_SECRET_KEY", default="")
+ROOK_WEBHOOK_HASH_KEY = config("PRD_ROOK_WEBHOOK_HASH_KEY", default="")
+ROOK_SDK_CLIENT_UUID = config("PRD_ROOK_SDK_CLIENT_UUID", default="")
+ROOK_SDK_SECRET = config("PRD_ROOK_SDK_SECRET", default="")
+ROOK_HISTORICAL_DAYS = config("PRD_ROOK_HISTORICAL_DAYS", default=7, cast=int)
+ROOK_PREEXISTING_ENABLED = config(
+    "PRD_ROOK_PREEXISTING_ENABLED", default=False, cast=bool
 )
-ROOK_READ_TIMEOUT_SECONDS = config("PRD_ROOK_READ_TIMEOUT_SECONDS", 12, cast=int)
+# None means 'not configured'. An empty string/list means no provider approved.
+# Specify exact API names (case-sensitive), e.g. Garmin,Fitbit,Oura.
+ROOK_PROVISIONED_SOURCES = config("PRD_ROOK_PROVISIONED_SOURCES", default=None)
+ROOK_SYNC_DELAY_HOURS = config("PRD_ROOK_SYNC_DELAY_HOURS", default=48, cast=int)
+ROOK_CONNECT_TIMEOUT_SECONDS = config("PRD_ROOK_CONNECT_TIMEOUT_SECONDS", default=5, cast=int)
+ROOK_READ_TIMEOUT_SECONDS = config("PRD_ROOK_READ_TIMEOUT_SECONDS", default=12, cast=int)
 ROOK_ALLOW_UNSIGNED_WEBHOOKS = False
 ROOK_AUTHORIZATION_ALLOWED_HOSTS = config(
-    "PRD_ROOK_AUTHORIZATION_ALLOWED_HOSTS",
-    "",
-    cast=lambda value: [host.strip() for host in value.split(",") if host.strip()],
+    "PRD_ROOK_AUTHORIZATION_ALLOWED_HOSTS", default="",
+    cast=lambda v: [host.strip() for host in v.split(",") if host.strip()],
 )
-HEALTH_TREND_MINIMUM_OBSERVATIONS = config(
-    "PRD_HEALTH_TREND_MINIMUM_OBSERVATIONS", 7, cast=int
+ROOK_CALLBACK_URL = config("PRD_ROOK_CALLBACK_URL", default="")
+ROOK_OAUTH_TIMEOUT_MINUTES = config("PRD_ROOK_OAUTH_TIMEOUT_MINUTES", default=15, cast=int)
+ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS = config(
+    "PRD_ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS", default="",
+    cast=lambda v: [host.strip() for host in v.split(",") if host.strip()],
 )
-HEALTH_HISTORICAL_GAP_DAYS = config(
-    "PRD_HEALTH_HISTORICAL_GAP_DAYS", 7, cast=int
-)
-
-# Optional ROOK callback: short HTTPS origin + /r; final URL plus nonce <= 50 characters.
-ROOK_CALLBACK_URL = config("PRD_ROOK_CALLBACK_URL", "")
-ROOK_OAUTH_TIMEOUT_MINUTES = config("PRD_ROOK_OAUTH_TIMEOUT_MINUTES", 15, cast=int)
-
-ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS = config("PRD_ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS", "", cast=lambda value: [host.strip() for host in value.split(",") if host.strip()])
-TIMELINE_INCLUDE_LEGACY_RESULTS = config("PRD_TIMELINE_INCLUDE_LEGACY_RESULTS", True, cast=bool)
+HEALTH_TREND_MINIMUM_OBSERVATIONS = config("PRD_HEALTH_TREND_MINIMUM_OBSERVATIONS", default=7, cast=int)
+HEALTH_HISTORICAL_GAP_DAYS = config("PRD_HEALTH_HISTORICAL_GAP_DAYS", default=7, cast=int)
+TIMELINE_INCLUDE_LEGACY_RESULTS = config("PRD_TIMELINE_INCLUDE_LEGACY_RESULTS", default=True, cast=bool)

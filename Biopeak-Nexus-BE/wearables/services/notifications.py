@@ -1,4 +1,5 @@
 from django.db import transaction
+from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 
 from wearables.models import RookMemberIdentity, WearableConnection, RookWebhookReceipt, WearableConnectionEvent
@@ -43,14 +44,56 @@ def notification_data_source(payload: dict) -> str:
     )
 
 
+def notification_action_datetime(payload: dict):
+    """Signed ROOK event timestamp, used only when timezone-qualified.
+
+    Missing or ambiguous timestamps cannot safely establish event order.
+    """
+    value = payload.get("action_datetime")
+    if not isinstance(value, str):
+        return None
+    parsed = parse_datetime(value)
+    if parsed is None or timezone.is_naive(parsed):
+        return None
+    return parsed
+
+
+def stale_rook_notification(*, connection, action_datetime, text: str) -> bool:
+    if action_datetime is None:
+        return False
+    # A late revoke/expiry from the *old* authorization must not override a
+    # confirmed new authorization. We only compare signed, timezone-aware ROOK
+    # action times; receipt arrival time cannot establish source event order.
+    is_negative = any(word in text for word in (
+        "expired", "disconnect", "deauthor", "revoked", "deleted", "closed",
+        "denied", "failed", "error", "unauthor", "invalid", "rejected",
+    ))
+    if (is_negative and connection.authorization_status == AuthorizationStatus.AUTHORIZED
+            and connection.import_started_at and action_datetime < connection.import_started_at):
+        return True
+    prior_notifications = WearableConnectionEvent.objects.filter(
+        connection=connection, event_type="rook_notification",
+    ).order_by("-created_at")[:20]
+    for event in prior_notifications:
+        previous = notification_action_datetime({
+            "action_datetime": event.payload.get("actionDatetime"),
+        })
+        if previous is not None and action_datetime < previous:
+            return True
+    return False
+
+
 def apply_notification_state(connection: WearableConnection, text: str) -> None:
     # A revoked source cannot be reopened by an out-of-order success message.
     # A new explicit device-connect action must first set authorizing state.
     negative = any(token in text for token in (
         "expired", "disconnect", "deauthor", "revoked", "denied",
         "deleted", "closed", "invalid", "failed", "error",
+        "unauthor", "rejected",
     ))
-    if connection.status == ConnectionStatus.DISCONNECTED and not negative:
+    # A delayed positive provider event cannot restore a locally expired or
+    # revoked grant. Only a fresh authenticated connect attempt may do so.
+    if connection.status in {ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED} and not negative:
         return
     if any(token in text for token in (
         "account deleted", "account closed", "user deleted", "user closed",
@@ -61,6 +104,14 @@ def apply_notification_state(connection: WearableConnection, text: str) -> None:
         connection.disconnected_at = timezone.now()
         connection.last_error_code = "provider_account_closed"
         connection.last_error_detail = "This upstream account is closed. Connect another provider."
+        return
+    # "unauthorized" includes the substring "authorized". Check this before
+    # matching positive grants so an invalid ROOK token cannot reopen sync.
+    if any(token in text for token in (
+        "unauthorized", "not authorized", "invalid token", "invalid authorization",
+    )):
+        connection.status = ConnectionStatus.AUTHORIZATION_EXPIRED
+        connection.authorization_status = AuthorizationStatus.EXPIRED
         return
     if any(token in text for token in ("authorization expired", "token expired")):
         connection.status = ConnectionStatus.AUTHORIZATION_EXPIRED
@@ -93,16 +144,29 @@ def apply_notification_state(connection: WearableConnection, text: str) -> None:
         connection.status = ConnectionStatus.PROVIDER_ERROR
         return
     if "import completed" in text or "historical completed" in text:
-        connection.status = (
-            ConnectionStatus.PARTIAL if connection.permission_status == PermissionStatus.LIMITED
-            else ConnectionStatus.ACTIVE
-        )
+        # ROOK extraction completion is not proof that Biopeak persisted and
+        # normalized the documents. A recovery worker must reconcile the local
+        # canonical store before making the member-facing import complete.
+        if connection.import_status == HistoricalImportStatus.COMPLETED:
+            return
+        connection.status = ConnectionStatus.IMPORTING
         connection.authorization_status = AuthorizationStatus.AUTHORIZED
-        connection.import_status = HistoricalImportStatus.COMPLETED
-        connection.import_completed_at = timezone.now()
+        connection.import_status = HistoricalImportStatus.RUNNING
+        connection.import_started_at = connection.import_started_at or timezone.now()
         connection.connected_at = connection.connected_at or timezone.now()
         return
     if any(token in text for token in ("connected", "authorized", "authorization completed", "linked")):
+        # Generic notifications may be duplicated or delayed. A healthy and
+        # already-authorized connection must not re-enter Historical Import.
+        if connection.authorization_status == AuthorizationStatus.AUTHORIZED:
+            if connection.status in {ConnectionStatus.ACTIVE, ConnectionStatus.IDLE,
+                                     ConnectionStatus.PARTIAL, ConnectionStatus.IMPORTING,
+                                     ConnectionStatus.HISTORICAL_REIMPORT,
+                                     ConnectionStatus.RECONNECTED}:
+                return
+            if connection.status == ConnectionStatus.PROVIDER_ERROR and connection.import_status == HistoricalImportStatus.COMPLETED:
+                connection.status = ConnectionStatus.ACTIVE if connection.last_successful_sync else ConnectionStatus.IDLE
+                return
         connection.status = ConnectionStatus.IMPORTING
         connection.authorization_status = AuthorizationStatus.AUTHORIZED
         connection.import_status = HistoricalImportStatus.RUNNING
@@ -147,13 +211,22 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
         return {"accepted": True, "duplicate": True, "connectionId": str(connection.pk)}
     previous_status = connection.status
     text = notification_text(payload)
+    event_datetime = notification_action_datetime(payload)
+    if stale_rook_notification(
+        connection=connection, action_datetime=event_datetime, text=text,
+    ):
+        receipt.reason = "out_of_order_notification"
+        receipt.save(update_fields=["reason", "updated_at"])
+        return {"accepted": True, "skipped": True, "reason": "out_of_order_notification"}
     if (connection.last_error_code == "provider_account_closed"
             and not any(token in text for token in ("deleted", "closed"))):
         return {"accepted": True, "skipped": True, "reason": "provider_account_closed"}
     resumed = False
     if (connection.status in {ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING}
             and any(token in text for token in ("authorized", "connected", "linked"))
-            and not any(token in text for token in ("failed", "denied", "expired", "revoked"))):
+            and not any(token in text for token in (
+                "failed", "denied", "expired", "revoked", "unauthor", "invalid", "rejected",
+            ))):
         pending_state = WearableConnectionEvent.objects.filter(
             connection=connection,
             event_type__in=["oauth_state_pending", "oauth_state_verified"],
@@ -187,8 +260,21 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
         payload={
             "source": data_source,
             "action": str(payload.get("action") or "")[:128],
+            "actionDatetime": event_datetime.isoformat() if event_datetime else None,
         },
     )
+    # Even if ROOK reports its own import complete, preserve our RUNNING state
+    # until a Biopeak worker has normalized the corresponding documents.
+    upstream_import_complete = any(token in text for token in ("import completed", "historical completed"))
+    if (upstream_import_complete and connection.connection_method == "api"
+            and connection.authorization_status == AuthorizationStatus.AUTHORIZED
+            and connection.import_status == HistoricalImportStatus.RUNNING):
+        enqueue_health_job(
+            job_type=HealthJobType.RECOVERY_PULL,
+            idempotency_key=f"notification-import-verification:{connection.pk}:{receipt.pk}",
+            customer_profile=connection.customer_profile,
+            connection=connection,
+        )
     if (
         not resumed
         and connection.status in {ConnectionStatus.IMPORTING, ConnectionStatus.HISTORICAL_REIMPORT}

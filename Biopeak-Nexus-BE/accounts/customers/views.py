@@ -1,6 +1,5 @@
-from django.db.models import Exists, OuterRef, Q, F, Subquery, Value
+from django.db.models import Exists, OuterRef, Prefetch, Q, F, QuerySet, Subquery, Value
 from django.db.models.functions import Coalesce, Concat
-from django.db.models.query import Prefetch
 from rest_framework.exceptions import NotFound
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -29,7 +28,6 @@ from accounts.customers.serializers import (
     CustomerAssociateAssignmentSerializer,
     CustomerCenterAssignmentSerializer,
     CustomerProfileSerializer,
-    CenterCustomerProfileDetailSerializer,
     CustomerAssociateSerializer,
     CustomerProfileFeatureSerializer, MinimalCustomerAssignedCenterSerializer,
     CustomerProfileAddressSerializer,
@@ -37,14 +35,15 @@ from accounts.customers.serializers import (
     build_customer_lead_profile_fallback,
     get_main_customer_profile_for_user,
 )
+from accounts.customers.utils.helper import initialize_customer_chat_session
 from accounts.organizations.utils.db import (
     decrement_organization_clients_count,
 )
 from accounts.utils.constants import UserType
 from accounts.utils.db import get_user_account_type
 from accounts.utils.permissions import IsAdminUser, IsAssociateUser, IsCustomerUser
-from core.utils.exceptions import get_object_or_404
-from core.utils.permissions import ReadOnly
+from core.utils.exceptions import ServiceUnavailable, get_object_or_404
+from core.utils.permissions import ReadOnly, ReadUpdateOnly
 from core.utils.views.main import (
     BaseListAPIView,
     BaseRetrieveAPIView,
@@ -53,9 +52,13 @@ from core.utils.views.main import (
     BaseCreateAPIView,
     BaseListCreateAPIView, BaseGenericAPIView,
 )
+from external.permissions import ExternalAPIKeyPermission
+from integrations.metsights.serializers import CustomerMetsightsProfileSerializer
+from integrations.metsights.utils.db import create_metsights_profile_for_customer_profile
 from leads.models import Lead
+from products.models import DocumentCategory, DocumentCategoryAssignment
 from programs.services.models import ServiceDocument
-from programs.services.utils.constants import get_module_category_document_types
+from programs.services.utils.constants import ServiceReportComponent, get_module_category_document_types
 
 
 class CustomerProfileMeta(BaseGenericAPIView):
@@ -66,49 +69,100 @@ class CustomerProfileMeta(BaseGenericAPIView):
             qs, detail="Invalid Customer profile", pk=self.request.user.pk
         )
 
-    def get_customer_profile(self):
+    def get_queryset(self) -> QuerySet[CustomerProfile]:
+        account_type = get_user_account_type(self.request.user)
         filter_kwargs = {}
-        if get_user_account_type(self.request.user) == UserType.CUSTOMER:
-            filter_kwargs["customer"] = self.request.user.customer
-        customer_profiles = CustomerProfile.objects.filter(**filter_kwargs)
+        if account_type == UserType.CUSTOMER:
+            filter_kwargs["customer__user"] = self.request.user
+        return CustomerProfile.objects.filter(**filter_kwargs)
+
+    def get_customer_profile(self) -> CustomerProfile:
         return get_object_or_404(
-            customer_profiles,
+            CustomerProfileMeta.get_queryset(self),
             "Customer profile with this ID not found.",
             pk=self.kwargs["pk"],
         )
 
 
-class CustomerProfileDocumentsListView(BaseListAPIView, CustomerProfileMeta):
-    serializer_class = CustomerServiceDocumentSerializer
-    permission_classes = [IsAdminUser | IsAssociateUser | IsCustomerUser]
+class CustomerDocumentsViewMeta(CustomerProfileMeta):
+    def get_collection_date_filters(self):
+        valid_year = None
+        valid_month = None
+        year = self.request.query_params.get("year", "")
+        month = self.request.query_params.get("month", "")
+        year = year.lstrip("0")
+        month = month.lstrip("0")
+        year_is_decimal = year.isdecimal()
+        month_is_decimal = month.isdecimal()
+        if year_is_decimal and len(year) <= 4:
+            valid_year = int(year)
+        if valid_year is not None and not 1 <= valid_year <= 9999:
+            valid_year = None
+        if valid_year and month_is_decimal and len(month) <= 2:
+            valid_month = int(month)
+        if valid_month is not None and not 1 <= valid_month <= 12:
+            valid_month = None
+
+        filters = {}
+        if valid_year is not None:
+            filters["year"] = valid_year
+        if valid_month is not None:
+            filters["month"] = valid_month
+        return filters
+
+    @staticmethod
+    def _get_document_category_conditions(document_category_id):
+        conditions = Q(pk__in=[])
+        document_category = DocumentCategory.objects.filter(
+            pk__iexact=document_category_id
+        ).first()
+        if not document_category:
+            return conditions
+        assignments = DocumentCategoryAssignment.objects.filter(
+            category=document_category
+        ).values_list("document_type", "document_categories")
+        for document_type, document_categories in assignments:
+            conditions |= Q(
+                result__document_type=document_type,
+                document_category__in=document_categories,
+            )
+        return conditions
 
     def get_queryset(self):
+        filters = self.get_collection_date_filters()
         search = Q()
+        document_category_conditions = Q()
         customer_profile = self.get_customer_profile()
-        filter_kwargs = {
-            "result__program_service__program__customer_profile": customer_profile,
-        }
-        search_query = self.request.query_params.get("search", "").strip()
-        active_query = self.request.query_params.get("active")
+        filter_kwargs = {}
+        for parameter in ("month", "year"):
+            if parameter in filters:
+                filter_kwargs[f"result__sample_collection_date__{parameter}"] = filters[parameter]
+        report_component = self.request.query_params.get("report_component")
+        if report_component in ServiceReportComponent.values:
+            filter_kwargs["report_component"] = report_component
+        search_query = self.request.query_params.get("search", "")
+        search_query = search_query.strip()
         document_type = self.request.query_params.get("document_type")
         document_category = self.request.query_params.get("document_category")
+        document_category_id = self.request.query_params.get("document_category_id")
         module_category = self.request.query_params.get("module_category")
         date_from = self.request.query_params.get("date_from")
         date_to = self.request.query_params.get("date_to")
 
         if search_query:
-            search |= Q(filename__icontains=search_query)
             search |= Q(result__provider_name__icontains=search_query)
             search |= Q(result__product_name__icontains=search_query)
             search |= Q(
                 result__program_service__service__name__icontains=search_query
             )
-        if active_query in ["0", "1"]:
-            filter_kwargs["is_active"] = bool(int(active_query))
         if document_type:
             filter_kwargs["result__document_type"] = document_type
         if document_category:
             filter_kwargs["document_category"] = document_category
+        if document_category_id is not None:
+            document_category_conditions = self._get_document_category_conditions(
+                document_category_id
+            )
         if module_category:
             filter_kwargs["result__document_type__in"] = (
                 get_module_category_document_types(module_category)
@@ -117,8 +171,6 @@ class CustomerProfileDocumentsListView(BaseListAPIView, CustomerProfileMeta):
             filter_kwargs["result__sample_collection_date__gte"] = date_from
         if date_to:
             filter_kwargs["result__sample_collection_date__lte"] = date_to
-        if date_from and date_to and date_from > date_to:
-            self.raise_bad_request("Date to must be on or after date from.")
 
         return (
             ServiceDocument.objects.select_related(
@@ -130,19 +182,32 @@ class CustomerProfileDocumentsListView(BaseListAPIView, CustomerProfileMeta):
                 "result__program_service__program__composite_program__composite_template",
                 "result__program_service__service",
             )
-            .filter(search, **filter_kwargs)
+            .filter(
+                search,
+                document_category_conditions,
+                is_active=True,
+                result__program_service__program__customer_profile=customer_profile,
+                **filter_kwargs,
+            )
             .order_by("-created_at")
         )
 
 
-class CustomerAccountProfileView(BaseRetrieveUpdateAPIView, CustomerProfileMeta):
-    """Views for customers to update their profiles"""
+class CustomerProfileDocumentsListView(BaseListAPIView, CustomerDocumentsViewMeta):
+    serializer_class = CustomerServiceDocumentSerializer
+    permission_classes = [IsAdminUser | IsAssociateUser | IsCustomerUser | (ExternalAPIKeyPermission & ReadOnly)]
+
+
+class CustomerAccountView(BaseRetrieveAPIView, CustomerProfileMeta):
+    """Read-only customer account identity and contact details."""
 
     permission_classes = [IsCustomerUser]
     serializer_class = CustomerAccountSerializer
 
     def get_object(self):
-        return self.get_customer_for_user()
+        customer = self.get_customer_for_user()
+        user = customer.user
+        return user
 
 
 class CustomerLeadProfileView(BaseRetrieveAPIView):
@@ -180,57 +245,102 @@ class CustomerProfilesListView(BaseListAPIView):
 
     def get_queryset(self):
         filter_kwargs = {}
+        customer = get_object_or_404(
+            Customer.objects.select_related("user"),
+            detail="Invalid Customer profile",
+            pk=self.request.user.pk,
+        )
         active_query = self.request.query_params.get("active", None)
 
-        if active_query is not None:
+        if active_query in {"0", "1"}:
             filter_kwargs["is_active"] = bool(int(active_query))
 
-        return CustomerProfile.objects.select_related("customer__user").filter(
-            customer=self.get_customer_for_user(), **filter_kwargs
-        )
-
-
-class CustomerProfileDetailView(BaseRetrieveUpdateDestroyAPIView):
-    """Retrieve/update/delete a customer profile. Accessible by admins and associates."""
-
-    serializer_class = CenterCustomerProfileDetailSerializer
-    permission_classes = [IsAdminUser | IsAssociateUser]
-
-    def get_queryset(self):
-        filter_kwargs = {}
-
-        if get_user_account_type(self.request.user) == UserType.ASSOCIATE:
-            associate = getattr(self.request.user, "associate", None)
-            filter_kwargs["center__associate_assignments__associate"] = associate
-
-        return CustomerCenterAssignment.objects.select_related(
-            "customer_profile__customer__user",
+        return CustomerProfile.objects.select_related(
+            "customer__user", "created_by"
         ).prefetch_related(
             Prefetch(
-                "customer_profile__center_assignments",
+                "center_assignments",
                 queryset=CustomerCenterAssignment.objects.filter(
                     is_primary=True
                 ).select_related("center"),
                 to_attr="primary_center_assignments",
-            ),
-        ).filter(**filter_kwargs)
+            )
+        ).filter(
+            customer=customer,
+            **filter_kwargs
+        ).order_by('-is_main', '-created_by')
 
-    def get_object(self):
-        qs = self.get_queryset()
-        header_center_id = self.request.headers.get("x-center-id", None)
-        query_center_id = self.request.query_params.get("center_id", None)
-        center_id = header_center_id or query_center_id or None
+
+class CustomerProfileAccessViewMeta(BaseGenericAPIView):
+    """Share profile ownership and staff center filtering for profile routes."""
+
+    def get_queryset(self):
+        filter_kwargs = {}
+        account_type = get_user_account_type(self.request.user)
+        if account_type == UserType.CUSTOMER:
+            filter_kwargs["customer"] = self.request.user.customer
+        if account_type in {UserType.ADMIN, UserType.ASSOCIATE}:
+            header_center_identifier = self.request.headers.get("x-center-id")
+            query_center_identifier = self.request.query_params.get("center_id")
+            center_identifier = header_center_identifier or query_center_identifier
+            filter_kwargs["center_assignments__center__pk"] = center_identifier
+        if account_type == UserType.ASSOCIATE:
+            filter_kwargs["center_assignments__center__associate_assignments__associate"] = self.request.user.associate
+        return CustomerProfile.objects.select_related(
+            "customer__user", "created_by"
+        ).prefetch_related(
+            Prefetch(
+                "center_assignments",
+                queryset=CustomerCenterAssignment.objects.filter(
+                    is_primary=True
+                ).select_related("center"),
+                to_attr="primary_center_assignments",
+            )
+        ).filter(**filter_kwargs).distinct()
+
+    def get_customer_profile(self):
         return get_object_or_404(
-            qs,
-            center_id=center_id,
-            customer_profile__id=self.kwargs["pk"],
+            CustomerProfileAccessViewMeta.get_queryset(self),
+            "Customer profile not found.", pk=self.kwargs["pk"],
         )
 
-    def perform_destroy(self, instance: CustomerCenterAssignment):
-        if instance.customer_profile.is_converted:
-            decrement_customer_count(instance.center.pk)
+
+class CustomerProfileDetailView(BaseRetrieveUpdateDestroyAPIView, CustomerProfileAccessViewMeta):
+    """Read/update an owned profile; staff may also delete its center assignment."""
+
+    serializer_class = CustomerProfileSerializer
+    permission_classes = [
+        IsAdminUser | IsAssociateUser | (IsCustomerUser & ReadUpdateOnly)
+        | (ExternalAPIKeyPermission & ReadOnly),
+    ]
+
+    def get_object(self):
+        return self.get_customer_profile()
+
+    def perform_destroy(self, instance):
+        header_center_identifier = self.request.headers.get("x-center-id")
+        query_center_identifier = self.request.query_params.get("center_id")
+        center_identifier = header_center_identifier or query_center_identifier
+        assignment = get_object_or_404(
+            CustomerCenterAssignment.objects.select_related("center").filter(customer_profile=instance),
+            "Customer center assignment not found.",
+            center__pk=center_identifier,
+        )
+        if instance.is_converted:
+            decrement_customer_count(assignment.center.pk)
             decrement_organization_clients_count()
-        super().perform_destroy(instance)
+        super().perform_destroy(assignment)
+
+
+class CustomerMetsightsProfileView(BaseRetrieveAPIView, CustomerProfileAccessViewMeta):
+    serializer_class = CustomerMetsightsProfileSerializer
+    permission_classes = [IsAdminUser | IsAssociateUser | IsCustomerUser | (ExternalAPIKeyPermission & ReadOnly)]
+
+    def get_object(self):
+        mapping = create_metsights_profile_for_customer_profile(self.get_customer_profile())
+        if not mapping:
+            raise ServiceUnavailable("MetSights profile mapping is unavailable.")
+        return mapping
 
 
 class CustomerAvailableAssociateView(BaseListAPIView):
@@ -257,7 +367,8 @@ class CustomerAvailableAssociateView(BaseListAPIView):
         customer_profile = self.get_customer_profile()
         center_id = self.request.query_params.get("center_id", None)
         role_id = self.request.query_params.get("role_id", None)
-        search_params = self.request.query_params.get("search", "").strip()
+        search_params = self.request.query_params.get("search", "")
+        search_params = search_params.strip()
 
         if search_params:
             search |= Q(associate__user__email__istartswith=search_params)
@@ -327,19 +438,18 @@ class CustomerLinkAssociateView(BaseCreateAPIView):
         )
 
 
-class CustomerAssociateListView(BaseListAPIView):
+class CustomerAssociateListView(BaseListAPIView, CustomerProfileMeta):
     """List associates linked to a customer profile at a center."""
 
     serializer_class = CustomerAssociateSerializer
-    permission_classes = [IsAdminUser | IsAssociateUser]
+    permission_classes = [IsAdminUser | IsAssociateUser | IsCustomerUser | (ExternalAPIKeyPermission & ReadOnly)]
 
     def get_queryset(self):
         filter_kwargs = {}
         search = Q()
         user = self.request.user
-        center_ids = set(
-            filter(None, self.request.query_params.getlist("center_id", []))
-        )
+        center_identifiers = self.request.query_params.getlist("center_id", [])
+        center_ids = {identifier for identifier in center_identifiers if identifier}
         header_center_id = getattr(self.request, "center_id", None)
         role_id = self.request.query_params.get("role_id", None)
 
@@ -359,7 +469,8 @@ class CustomerAssociateListView(BaseListAPIView):
                 )
             )
 
-        search_param = self.request.query_params.get("search", "").strip()
+        search_param = self.request.query_params.get("search", "")
+        search_param = search_param.strip()
         if search_param:
             search |= Q(associate__user__email__istartswith=search_param)
             search |= Q(full_name__istartswith=search_param)
@@ -383,7 +494,7 @@ class CustomerAssociateListView(BaseListAPIView):
             .filter(
                 search,
                 role_filter,
-                customer_profile_id=self.kwargs["pk"],
+                customer_profile=self.get_customer_profile(),
                 **filter_kwargs,
             )
             .select_related("associate__user")
@@ -412,7 +523,8 @@ class CustomerAvailableCenterView(BaseListAPIView):
     def get_queryset(self):
         filter_kwargs = {}
         search = Q()
-        search_params = self.request.query_params.get("search", "").strip()
+        search_params = self.request.query_params.get("search", "")
+        search_params = search_params.strip()
         active_param = self.request.query_params.get("active", None)
         if active_param and active_param in ["0", "1"]:
             filter_kwargs["is_active"] = bool(int(active_param))
@@ -465,7 +577,8 @@ class CustomerCenterListView(BaseListAPIView):
         search = Q()
         user = self.request.user
 
-        search_params = self.request.query_params.get("search", "").strip()
+        search_params = self.request.query_params.get("search", "")
+        search_params = search_params.strip()
         if search_params:
             search |= Q(center__name__istartswith=search_params)
             search |= Q(center__name__icontains=search_params)
@@ -531,3 +644,22 @@ class CustomerProfileFeatureView(BaseRetrieveUpdateAPIView):
             customer_profile=self.get_customer_profile()
         )
         return instance
+
+
+class CustomerCopilotChatView(CustomerProfileMeta):
+    permission_classes = [IsCustomerUser]
+
+    def get(self, request, *args, **kwargs):
+        customer_profile = self.get_customer_profile()
+        profile_feature, _ = CustomerProfileFeature.objects.get_or_create(
+            customer_profile=customer_profile,
+            defaults={"is_copilot_chat_enabled": False},
+        )
+        if not profile_feature.is_copilot_chat_enabled:
+            self.raise_permission_denied("Copilot chat is not enabled for this profile.")
+        chat_session, token = initialize_customer_chat_session(customer_profile)
+        return self.send_response("Chat session initialized.", data={
+            "id": str(chat_session.pk),
+            "session_id": chat_session.session_id,
+            "token": token,
+        })

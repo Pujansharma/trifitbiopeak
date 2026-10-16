@@ -69,8 +69,13 @@ ADMIN_CERT = config("ADMIN_CERT", None)
 APP_CERT = config("APP_CERT", None)
 
 # Metsights
-METSIGHTS_BASE_URL = config('DEV_METSIGHTS_BASE_URL', None)
 METSIGHTS_API_KEY = config('DEV_METSIGHTS_API_KEY', None)
+
+# ASK-AI
+ASK_AI_API_KEY = config('DEV_ASK_AI_API_KEY', None)
+
+# SMS
+SMS_API_KEY = config("DEV_SMS_API_KEY", None)
 
 # Orange Labs
 ORANGE_LABS_API_BASE_URL = config("DEV_ORANGE_LABS_API_BASE_URL", None)
@@ -89,78 +94,51 @@ COMMUNICATION_OUTBOX_WAKE_QUEUE_URL = config(
 )
 AWS_REGION = config("AWS_REGION", default=None)
 # WhatsApp Cloud API (communications)
-WHATSAPP_ACCESS_TOKEN = config("DEV_WHATSAPP_ACCESS_TOKEN", None)
-WHATSAPP_PHONE_NUMBER_ID = config("DEV_WHATSAPP_PHONE_NUMBER_ID", None)
+WHATSAPP_ACCESS_TOKEN = config("WHATSAPP_ACCESS_TOKEN", None)
+WHATSAPP_PHONE_NUMBER_ID = config("WHATSAPP_PHONE_NUMBER_ID", None)
 WHATSAPP_APP_SECRET = config("DEV_WHATSAPP_APP_SECRET", None)
 WHATSAPP_WEBHOOK_VERIFY_TOKEN = config("DEV_WHATSAPP_WEBHOOK_VERIFY_TOKEN", None)
 WHATSAPP_API_VERSION = config("DEV_WHATSAPP_API_VERSION", "v23.0")
 WHATSAPP_WABA_ID = config("DEV_WHATSAPP_WABA_ID", None)
 WHATSAPP_APP_ID = config("DEV_WHATSAPP_APP_ID", None)
 WHATSAPP_TEMPLATE_LANGUAGE = config("DEV_WHATSAPP_TEMPLATE_LANGUAGE", "en")
-WHATSAPP_TEMPLATE_CONFIRMED = config(
-    "DEV_WHATSAPP_TEMPLATE_CONFIRMED", "appointment_confirmed"
-)
-WHATSAPP_TEMPLATE_CANCELLED = config(
-    "DEV_WHATSAPP_TEMPLATE_CANCELLED", "appointment_cancelled"
-)
-WHATSAPP_TEMPLATE_RESCHEDULED = config(
-    "DEV_WHATSAPP_TEMPLATE_RESCHEDULED", "appointment_rescheduled"
-)
 
-
-# Wearables / ROOK (Phase 1 additive configuration)
-WEARABLES_ENABLED = config("DEV_WEARABLES_ENABLED", True, cast=bool)
+# ROOK / Wearables Phase 1 — additive. All keys remain external to source control.
+WEARABLES_ENABLED = config("DEV_WEARABLES_ENABLED", default=True, cast=bool)
 WEARABLES_REQUIRE_PROFILE_FEATURE = config(
-    "DEV_WEARABLES_REQUIRE_PROFILE_FEATURE", False, cast=bool
+    "DEV_WEARABLES_REQUIRE_PROFILE_FEATURE", default=False, cast=bool
 )
-TIMELINE_ENABLED = config("DEV_TIMELINE_ENABLED", True, cast=bool)
-RECOVERY_DOMAIN_ENABLED = config("DEV_RECOVERY_DOMAIN_ENABLED", True, cast=bool)
-BODY_DOMAIN_ENABLED = config("DEV_BODY_DOMAIN_ENABLED", True, cast=bool)
-ROOK_ENVIRONMENT = config("DEV_ROOK_ENVIRONMENT", "sandbox")
-ROOK_BASE_URL = config("DEV_ROOK_BASE_URL", "https://api.rook-connect.review")
-ROOK_CLIENT_UUID = config("DEV_ROOK_CLIENT_UUID", "")
-ROOK_SECRET_KEY = config("DEV_ROOK_SECRET_KEY", "")
-ROOK_WEBHOOK_HASH_KEY = config("DEV_ROOK_WEBHOOK_HASH_KEY", "")
-ROOK_SDK_CLIENT_UUID = config("DEV_ROOK_SDK_CLIENT_UUID", "")
-ROOK_SDK_SECRET = config("DEV_ROOK_SDK_SECRET", "")
-ROOK_HISTORICAL_DAYS = config("DEV_ROOK_HISTORICAL_DAYS", 29, cast=int)
-ROOK_SYNC_DELAY_HOURS = config("DEV_ROOK_SYNC_DELAY_HOURS", 48, cast=int)
-ROOK_CONNECT_TIMEOUT_SECONDS = config(
-    "DEV_ROOK_CONNECT_TIMEOUT_SECONDS", 5, cast=int
+TIMELINE_ENABLED = config("DEV_TIMELINE_ENABLED", default=True, cast=bool)
+RECOVERY_DOMAIN_ENABLED = config("DEV_RECOVERY_DOMAIN_ENABLED", default=True, cast=bool)
+BODY_DOMAIN_ENABLED = config("DEV_BODY_DOMAIN_ENABLED", default=True, cast=bool)
+ROOK_ENVIRONMENT = config("DEV_ROOK_ENVIRONMENT", default="sandbox")
+ROOK_BASE_URL = config("DEV_ROOK_BASE_URL", default="https://api.rook-connect.review")
+ROOK_CLIENT_UUID = config("DEV_ROOK_CLIENT_UUID", default="")
+ROOK_SECRET_KEY = config("DEV_ROOK_SECRET_KEY", default="")
+ROOK_WEBHOOK_HASH_KEY = config("DEV_ROOK_WEBHOOK_HASH_KEY", default="")
+ROOK_SDK_CLIENT_UUID = config("DEV_ROOK_SDK_CLIENT_UUID", default="")
+ROOK_SDK_SECRET = config("DEV_ROOK_SDK_SECRET", default="")
+ROOK_HISTORICAL_DAYS = config("DEV_ROOK_HISTORICAL_DAYS", default=7, cast=int)
+ROOK_PREEXISTING_ENABLED = config(
+    "DEV_ROOK_PREEXISTING_ENABLED", default=True, cast=bool
 )
-ROOK_READ_TIMEOUT_SECONDS = config("DEV_ROOK_READ_TIMEOUT_SECONDS", 12, cast=int)
-ROOK_ALLOW_UNSIGNED_WEBHOOKS = config(
-    "DEV_ROOK_ALLOW_UNSIGNED_WEBHOOKS", False, cast=bool
-)
+# None means 'not configured'. An empty string/list means no provider approved.
+# Specify exact API names (case-sensitive), e.g. Garmin,Fitbit,Oura.
+ROOK_PROVISIONED_SOURCES = config("DEV_ROOK_PROVISIONED_SOURCES", default=None)
+ROOK_SYNC_DELAY_HOURS = config("DEV_ROOK_SYNC_DELAY_HOURS", default=48, cast=int)
+ROOK_CONNECT_TIMEOUT_SECONDS = config("DEV_ROOK_CONNECT_TIMEOUT_SECONDS", default=5, cast=int)
+ROOK_READ_TIMEOUT_SECONDS = config("DEV_ROOK_READ_TIMEOUT_SECONDS", default=12, cast=int)
+ROOK_ALLOW_UNSIGNED_WEBHOOKS = config("DEV_ROOK_ALLOW_UNSIGNED_WEBHOOKS", default=False, cast=bool)
 ROOK_AUTHORIZATION_ALLOWED_HOSTS = config(
-    "DEV_ROOK_AUTHORIZATION_ALLOWED_HOSTS",
-    "",
-    cast=lambda value: [host.strip() for host in value.split(",") if host.strip()],
+    "DEV_ROOK_AUTHORIZATION_ALLOWED_HOSTS", default="",
+    cast=lambda v: [host.strip() for host in v.split(",") if host.strip()],
 )
-HEALTH_TREND_MINIMUM_OBSERVATIONS = config(
-    "DEV_HEALTH_TREND_MINIMUM_OBSERVATIONS", 7, cast=int
+ROOK_CALLBACK_URL = config("DEV_ROOK_CALLBACK_URL", default="")
+ROOK_OAUTH_TIMEOUT_MINUTES = config("DEV_ROOK_OAUTH_TIMEOUT_MINUTES", default=15, cast=int)
+ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS = config(
+    "DEV_ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS", default="",
+    cast=lambda v: [host.strip() for host in v.split(",") if host.strip()],
 )
-HEALTH_HISTORICAL_GAP_DAYS = config(
-    "DEV_HEALTH_HISTORICAL_GAP_DAYS", 7, cast=int
-)
-
-# Optional ROOK callback: short HTTPS origin + /r; final URL plus nonce <= 50 characters.
-ROOK_CALLBACK_URL = config("DEV_ROOK_CALLBACK_URL", "")
-ROOK_OAUTH_TIMEOUT_MINUTES = config("DEV_ROOK_OAUTH_TIMEOUT_MINUTES", 15, cast=int)
-
-ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS = config("DEV_ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS", "", cast=lambda value: [host.strip() for host in value.split(",") if host.strip()])
-TIMELINE_INCLUDE_LEGACY_RESULTS = config("DEV_TIMELINE_INCLUDE_LEGACY_RESULTS", True, cast=bool)
-
-
-
-
-
-
-ROOK_PROVISIONED_SOURCES = [
-    source.strip()
-    for source in config(
-        "DEV_ROOK_PROVISIONED_SOURCES",
-        default=""
-    ).split(",")
-    if source.strip()
-]
+HEALTH_TREND_MINIMUM_OBSERVATIONS = config("DEV_HEALTH_TREND_MINIMUM_OBSERVATIONS", default=7, cast=int)
+HEALTH_HISTORICAL_GAP_DAYS = config("DEV_HEALTH_HISTORICAL_GAP_DAYS", default=7, cast=int)
+TIMELINE_INCLUDE_LEGACY_RESULTS = config("DEV_TIMELINE_INCLUDE_LEGACY_RESULTS", default=True, cast=bool)

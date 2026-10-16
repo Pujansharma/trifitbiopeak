@@ -21,6 +21,7 @@ from wearables.services.identity import (
 )
 from wearables.services.job_queue import enqueue_health_job
 from wearables.services.lifecycle import valid_transition
+from wearables.services.oauth import callback_url_for_connection, retire_oauth_callback_state
 from wearables.utils.constants import (
     API_WEARABLE_SOURCES,
     NATIVE_WEARABLE_SOURCES,
@@ -217,6 +218,29 @@ def authorization_confirmed(
     return connection
 
 
+def connection_attempt_origin(connection: WearableConnection) -> str:
+    """Return the state before the *current* authorization attempt began.
+
+    A repeated Connect tap must not turn a reconnect into a first-time link,
+    even if the connection is already ``authorizing``.
+    """
+    if connection.status not in {ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING}:
+        return connection.status
+    request_event = (
+        WearableConnectionEvent.objects.filter(
+            connection=connection, event_type="connection_requested",
+        ).order_by("-created_at").first()
+    )
+    if request_event is not None and request_event.previous_status:
+        return request_event.previous_status
+    callback_event = (
+        WearableConnectionEvent.objects.filter(
+            connection=connection, event_type="oauth_state_pending",
+        ).order_by("-created_at").first()
+    )
+    return callback_event.previous_status if callback_event is not None else connection.status
+
+
 def start_connection(
     *,
     request,
@@ -238,11 +262,15 @@ def start_connection(
     # because the member tapped the connect button again (PRD EC-043).
     if (connection.status in {ConnectionStatus.ACTIVE, ConnectionStatus.IDLE,
                               ConnectionStatus.PARTIAL, ConnectionStatus.IMPORTING,
-                              ConnectionStatus.HISTORICAL_REIMPORT}
+                              ConnectionStatus.RECONNECTED, ConnectionStatus.HISTORICAL_REIMPORT}
             and connection.authorization_status == AuthorizationStatus.AUTHORIZED):
         return {"connection": connection, "authorization_method": connection.connection_method,
                 "authorization_url": None}
-    was_reconnect = connection.status in {
+    pending_authorization = connection.status in {
+        ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING,
+    }
+    origin_status = connection_attempt_origin(connection)
+    was_reconnect = origin_status in {
         ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED,
     }
     if connection.last_error_code == "provider_account_closed":
@@ -259,6 +287,13 @@ def start_connection(
         ]
     )
     if data_source in NATIVE_WEARABLE_SOURCES:
+        if pending_authorization:
+            # The native SDK owns its permission screen; a second tap is a no-op.
+            return {
+                "connection": connection,
+                "authorization_method": ConnectionMethod.SDK,
+                "authorization_url": None,
+            }
         save_connection_transition(
             connection,
             status=ConnectionStatus.CONNECTING,
@@ -277,15 +312,27 @@ def start_connection(
             "authorization_url": None,
         }
 
-    from wearables.services.oauth import callback_url_for_connection
-    callback_url = callback_url_for_connection(connection, actor_user=request.user, correlation_id=correlation_id)
-    save_connection_transition(
-        connection, status=ConnectionStatus.CONNECTING,
-        authorization_status=AuthorizationStatus.PENDING,
-        import_status=HistoricalImportStatus.NOT_STARTED,
-        actor_user=request.user, event_type="connection_requested",
-        correlation_id=correlation_id,
+    previous_callback_ids = list(
+        WearableConnectionEvent.objects.filter(
+            connection=connection, event_type="oauth_state_pending",
+        ).values_list("pk", flat=True)
     )
+    callback_url = callback_url_for_connection(
+        connection,
+        actor_user=request.user,
+        correlation_id=correlation_id,
+        previous_status=origin_status,
+    )
+    if not pending_authorization:
+        save_connection_transition(
+            connection, status=ConnectionStatus.CONNECTING,
+            authorization_status=AuthorizationStatus.PENDING,
+            import_status=HistoricalImportStatus.NOT_STARTED,
+            actor_user=request.user, event_type="connection_requested",
+            correlation_id=correlation_id,
+        )
+    # A pending Authorizing -> Connecting transition is intentionally forbidden
+    # by PRD 10.1. Re-issuing a link keeps the pending status unchanged.
     # Prefer a server-owned state-validated callback over arbitrary mobile redirects.
     client = RookClient()
     try:
@@ -295,12 +342,15 @@ def start_connection(
             redirect_url=callback_url or validated_data.get("redirect_url"),
         )
     except (RookConfigurationError, RookServiceError) as error:
+        retire_oauth_callback_state(
+            connection, callback_url, event_type="oauth_state_authorizer_failed",
+        )
         connection.last_error_code = "rook_authorizer_failed"
         connection.last_error_detail = str(error)[:512]
         connection.save(
             update_fields=["last_error_code", "last_error_detail", "updated_at"]
         )
-        if connection.status != ConnectionStatus.DISCONNECTED:
+        if not pending_authorization and connection.status != ConnectionStatus.DISCONNECTED:
             save_connection_transition(
                 connection,
                 status=ConnectionStatus.PROVIDER_ERROR,
@@ -311,8 +361,31 @@ def start_connection(
                 detail=str(error),
             )
         raise
+    # Only a successfully issued new link supersedes an existing valid link.
+    if previous_callback_ids:
+        WearableConnectionEvent.objects.filter(
+            pk__in=previous_callback_ids, event_type="oauth_state_pending",
+        ).update(event_type="oauth_state_superseded", updated_at=timezone.now())
+    connection.refresh_from_db()
+    if connection.status in {
+        ConnectionStatus.NEVER_CONNECTED, ConnectionStatus.DISCONNECTED,
+        ConnectionStatus.AUTHORIZATION_EXPIRED,
+    }:
+        # A concurrent cancellation, disconnect or expiry cannot be undone by
+        # a slow ROOK request finishing after the status was changed.
+        retire_oauth_callback_state(connection, callback_url, event_type="oauth_state_superseded")
+        return {"connection": connection, "authorization_method": ConnectionMethod.API,
+                "authorization_url": None}
+    if (connection.status in {ConnectionStatus.IMPORTING, ConnectionStatus.ACTIVE,
+                              ConnectionStatus.PARTIAL, ConnectionStatus.IDLE,
+                              ConnectionStatus.RECONNECTED, ConnectionStatus.HISTORICAL_REIMPORT}
+            and connection.authorization_status == AuthorizationStatus.AUTHORIZED):
+        retire_oauth_callback_state(connection, callback_url, event_type="oauth_state_superseded")
+        return {"connection": connection, "authorization_method": ConnectionMethod.API,
+                "authorization_url": None}
     authorized = result["authorized"]
     if authorized:
+        retire_oauth_callback_state(connection, callback_url, event_type="oauth_state_verified")
         authorization_confirmed(
             connection, was_reconnect=was_reconnect,
             actor_user=request.user, correlation_id=correlation_id,
@@ -322,7 +395,9 @@ def start_connection(
             connection, status=ConnectionStatus.AUTHORIZING,
             authorization_status=AuthorizationStatus.PENDING,
             import_status=HistoricalImportStatus.NOT_STARTED,
-            actor_user=request.user, event_type="authorization_started",
+            actor_user=request.user,
+            event_type=("authorization_link_renewed" if pending_authorization
+                        else "authorization_started"),
             correlation_id=correlation_id,
         )
     return {
@@ -352,13 +427,7 @@ def refresh_authorizing_connections(customer_profile: CustomerProfile) -> None:
     for connection in connections:
         if connection.data_source not in authorized_sources:
             continue
-        state_event = (
-            WearableConnectionEvent.objects.filter(
-                connection=connection, event_type__in=["oauth_state_pending", "oauth_state_verified"],
-            ).order_by("-created_at").first()
-        )
-        initial_state = state_event.previous_status if state_event else ""
-        was_reconnect = initial_state in {
+        was_reconnect = connection_attempt_origin(connection) in {
             ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED,
         }
         authorization_confirmed(connection, was_reconnect=was_reconnect)
@@ -524,11 +593,13 @@ def update_native_connection(
 
 
 def connection_experience_state(connection: WearableConnection) -> str:
+    # A source that has never produced a measurement can still become stale.
+    # Use the authorization time until a successful sync timestamp exists.
+    latest_activity = connection.last_successful_sync or connection.connected_at
     if (
-        connection.status in {ConnectionStatus.ACTIVE, ConnectionStatus.IDLE}
-        and connection.last_successful_sync
-        and connection.last_successful_sync
-        < timezone.now()
+        connection.status in {ConnectionStatus.ACTIVE, ConnectionStatus.IDLE, ConnectionStatus.PARTIAL}
+        and latest_activity is not None
+        and latest_activity < timezone.now()
         - timedelta(hours=getattr(settings, "ROOK_SYNC_DELAY_HOURS", 48))
     ):
         return "sync_delayed"

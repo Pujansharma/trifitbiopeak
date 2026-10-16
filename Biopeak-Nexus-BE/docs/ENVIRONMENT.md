@@ -169,7 +169,7 @@ uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_
 
 If it ever leaks, treat it like a leaked password: rotate it and have every
 connected staff member reconnect their calendar. If unset, `_get_fernet()`
-(`integrations/google_calendar/utils.py`) raises `ImproperlyConfigured` the
+(`integrations/google_calendar/utils/helper.py`) raises `ImproperlyConfigured` the
 first time a token is encrypted/decrypted, rather than crashing with a raw
 `AttributeError`.
 
@@ -323,10 +323,9 @@ DEV_WHATSAPP_API_VERSION=v23.0
 DEV_WHATSAPP_WABA_ID=
 DEV_WHATSAPP_APP_ID=
 DEV_WHATSAPP_TEMPLATE_LANGUAGE=en
-DEV_WHATSAPP_TEMPLATE_CONFIRMED=appointment_confirmed
-DEV_WHATSAPP_TEMPLATE_CANCELLED=appointment_cancelled
-DEV_WHATSAPP_TEMPLATE_RESCHEDULED=appointment_rescheduled
 ```
+
+Template **names** live in code (`integrations.utils.constants.WHATSAPP_TEMPLATE_BY_EVENT`), not env.
 
 ### Staging / Production
 
@@ -339,19 +338,25 @@ Same keys with `STG_` / `PRD_` prefixes.
 3. Subscribe field: `messages` (delivery / read statuses)
 4. App secret: `*_WHATSAPP_APP_SECRET` (validates `X-Hub-Signature-256`)
 
-Approved Utility templates must match the `*_WHATSAPP_TEMPLATE_*` names and language.
-Templates use **named** body variables. Backend sends `parameter_name` + `text`.
+Approved Utility templates must match `WHATSAPP_TEMPLATE_BY_EVENT` names and `*_WHATSAPP_TEMPLATE_LANGUAGE`.
 
-| Template                | Named params                                                                             |
+Lifecycle Meta names: `appointment_confirmed_template`, `appointment_cancelled_template`, `appointment_rescheduled_template`.
+Reminder / no-show: `therapy_session_reminder`, `therapy_session_no_show`.
+
+Confirmed / cancelled / rescheduled use **named** body variables (`parameter_name` + `text`).
+Reminder / no-show use **positional** `{{1}}`…`{{4}}`.
+
+| Template | Params |
 | ----------------------- | ---------------------------------------------------------------------------------------- |
-| confirmed / rescheduled | `patient_name`, `appointment_date`, `appointment_time`, `service_name`, `clinic_address` |
-| cancelled               | `patient_name`, `appointment_date`, `appointment_time`, `service_name`                   |
+| confirmed / rescheduled | named: `patient_name`, `appointment_date`, `appointment_time`, `service_name`, `clinic_address` |
+| cancelled               | named: `patient_name`, `appointment_date`, `appointment_time`, `service_name` |
+| `therapy_session_reminder` / `therapy_session_no_show` | positional: name, start datetime, service name, clinic address (in person) or Meet link (virtual; fallback text if Meet link missing) |
 
 `clinic_address` value format: `{center.name}, {address lines/city/state/pincode}`.
 
 Retry pending/failed sends: `uv run manage.py process_communication_outbox`
 
-Book / cancel / reschedule enqueue **WhatsApp + Google Calendar** outbox rows. Google is desired-state from the live appointment (insert / patch / delete). Max 2 attempts. Wake: optional SQS (`*_COMMUNICATION_OUTBOX_WAKE_QUEUE_URL`) — one message per enqueue that has work; FIFO queue uses `MessageGroupId=communication-outbox` and 60s dedup. Unset URL = no-op (local: run the management command). User owns DB migrations for `CommunicationOutbox` / `CommunicationWebhookEvent`.
+Book / cancel / reschedule enqueue **WhatsApp + Google Calendar** outbox rows. Reminder / no-show are **WhatsApp only**. Google is desired-state from the live appointment (insert / patch / delete). Max 2 attempts. Wake: optional SQS (`*_COMMUNICATION_OUTBOX_WAKE_QUEUE_URL`) — one message per API enqueue that has work; FIFO queue uses `MessageGroupId=communication-outbox` and 60s dedup. Reminder enqueue from the 15‑min sweep does **not** wake SQS (same sweep drains outbox). Unset URL = no-op (local: run the management command). User owns DB migrations for `CommunicationOutbox` / `CommunicationWebhookEvent`.
 
 ```env
 DEV_COMMUNICATION_OUTBOX_WAKE_QUEUE_URL=
@@ -367,13 +372,15 @@ Not in `deploy-aws.yml` (image/service only).
 | Trigger                        | Command                                         | Purpose                                          |
 | ------------------------------ | ----------------------------------------------- | ------------------------------------------------ |
 | SQS wake (on outbox insert)    | `uv run manage.py process_communication_outbox` | First try WhatsApp send + Google Calendar sync   |
-| EventBridge `rate(10 minutes)` | `assets/scripts/sweep_jobs.sh`                  | Retry outbox (attempt 2) + drain exception scans |
+| EventBridge `rate(15 minutes)` | `assets/scripts/sweep_jobs.sh`                  | Reminder enqueue + outbox drain/retry + exception scans + Google watch renewal |
 
 Cap concurrent ECS RunTasks at 1 for the wake consumer. Sweep script:
 
 ```bash
+python manage.py enqueue_appointment_reminders
 python manage.py process_communication_outbox
 python manage.py process_appointment_exception_scans
+python manage.py process_google_calendar_channel_expiry_renewal
 ```
 
 Without the outbox worker/sweep, WhatsApp and Google Calendar rows stay `PENDING`. Without the exception-scan drain, care-team / roster / block writes enqueue scans that never run.
@@ -455,6 +462,64 @@ When moving from development to production:
 4. **Enable Redis**: Configure Redis for production caching
 5. **Update URLs**: Set production frontend URLs for password reset
 6. **Security Review**: Ensure all credentials are production-ready
+
+## SMS Configuration
+
+MSG91 SMS sending uses `SMS_API_KEY` from the active environment's settings:
+
+| Environment | Variable |
+|---|---|
+| Development | `DEV_SMS_API_KEY` |
+| Staging | `STG_SMS_API_KEY` |
+| Production | `PRD_SMS_API_KEY` |
+
+Set the appropriate variable to your MSG91 API key. It defaults to `None` when
+absent. SMS is optional: without a configured key, `SMSMessage.send()` logs a
+warning and returns `None` without making an HTTP request. Constructing a message
+does not raise a configuration error.
+
+`SMSMessage(template_id, recipients).send()` sends synchronously and returns the
+response JSON on success, or `None` for an unsuccessful HTTP response.
+`send_sms_message(template_id, recipients)` starts one background thread and
+returns `None` immediately; it does not return delivery confirmation. Sending
+uses no rate limiting or retries, and is also enabled in development.
+
+## PWA migration integration credentials
+
+MetSights uses the fixed API URL `https://api.metsights.com`. The existing
+`DEV_METSIGHTS_API_KEY`, `STG_METSIGHTS_API_KEY`, and `PRD_METSIGHTS_API_KEY`
+provide the server-side `X-API-KEY`; no MetSights base-URL environment variable
+is required.
+
+ASK-AI uses the fixed service URL `https://ask-ai.biopeak.com`; no service-URL
+environment variable is required. Configure `DEV_ASK_AI_API_KEY`,
+`STG_ASK_AI_API_KEY`, or `PRD_ASK_AI_API_KEY` with a Copilot Manager
+service-account key. Settings expose the selected value as `ASK_AI_API_KEY`,
+sent server-side as `X-API-KEY`. These names replace the former
+`DEV_BIOPEAK_AI_TOKEN`, `STG_BIOPEAK_AI_TOKEN`, and `PRD_BIOPEAK_AI_TOKEN`;
+the old internal-key credential must be replaced with a service-account key.
+
+`GET /profiles/:profile_id/copilot-chat/` registers a missing session through
+`POST https://ask-ai.biopeak.com/clients/register/` with the profile UUID as
+`client_id`. Existing sessions use
+`POST https://ask-ai.biopeak.com/clients/token/` with the saved `session_id`.
+Both requests have a 30-second timeout. Django stores only the fixed session
+ID and returns the service-issued token without storing it or its expiry.
+The API-key credential remains server-side; frontend chat calls send the
+returned token as `X-Api-Token`.
+
+ASK-AI controls token expiry through its own `TOKEN_TTL` setting, currently
+defaulting to 86400 seconds (24 hours). Each registration/token request issues
+a fresh token; earlier tokens remain valid until their expiry or revocation.
+The Biopeak response contains `id`, `session_id` and `token`, with no
+`expires_at`. Renew through the same profile endpoint when ASK-AI rejects an
+expired or revoked token with 401.
+
+Generate and apply the customer-model migration removing `registration_token`,
+`token` and `expires_at` from `CustomerCopilotSession` before deploying the model
+changes. Preserve the profile/session association and existing session IDs.
+The obsolete `/external/chat-tokens/validate/` endpoint is removed; ASK-AI
+validates tokens itself. Other external endpoints remain available.
 
 ## Support
 

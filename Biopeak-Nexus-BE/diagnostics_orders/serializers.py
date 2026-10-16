@@ -37,7 +37,7 @@ from diagnostics_orders.utils.helpers import (
     transform_serviceability_response,
     url_decode_address,
 )
-from integrations.orange_labs import sdk as orange_labs_sdk
+from integrations.orange_labs.utils import sdk as orange_labs_sdk
 
 
 class EligibleCustomerSerializer(BaseSerializer):

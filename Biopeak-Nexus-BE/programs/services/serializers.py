@@ -2,18 +2,49 @@ from django.db import transaction
 from rest_framework import serializers
 
 from accounts.centers.models import Center
-from accounts.centers.serializers import MinimumCenterSerializer
+from accounts.centers.serializers import BaseCenterSerializer, MinimumCenterSerializer
 from core.utils.serializers import BaseModelSerializer, BaseSerializer
 from programs.services.models import (
     CenterServiceAssignment,
     Service,
+    ServiceCareTemplate,
     ServiceDocument,
     ServiceProductAssignment,
+    ResultRequestFile,
 )
 from programs.services.utils.constants import get_service_document_module_category
 from programs.services.utils.db import (
     update_service_center_count,
+    upsert_service_care_template,
 )
+
+
+class ResultRequestFileSerializer(BaseModelSerializer):
+    class Meta:
+        model = ResultRequestFile
+        fields = [
+            "id",
+            "field_name",
+            "file",
+            "filename",
+            "content_type",
+            "is_active",
+            "created_at",
+            "updated_at"
+        ]
+        read_only_fields = fields
+
+
+class ResultRequestFilesSerializer(BaseModelSerializer):
+    files = serializers.SerializerMethodField()
+
+    def get_files(self, instance):
+        files = getattr(instance, "preview_files", None)
+        if files is None:
+            files = instance.files.all()[:3]
+        return ResultRequestFileSerializer(
+            files, many=True, context=self.context
+        ).data
 
 
 class CenterIDSerializer(BaseSerializer):
@@ -21,13 +52,32 @@ class CenterIDSerializer(BaseSerializer):
 
 
 class BaseServiceSerializer(BaseModelSerializer):
+    centers = serializers.SerializerMethodField(read_only=True)
     service_category_code = serializers.CharField(
         source="service_category", read_only=True
     )
 
     class Meta:
         model = Service
-        fields = ["id", "name", "service_category", "service_category_code", "image"]
+        fields = [
+            "id",
+            "name",
+            "service_category",
+            "service_category_code",
+            "image",
+            "centers",
+        ]
+
+    def get_centers(self, instance):
+        assignments = getattr(instance, "active_center_assignments", None)
+        if assignments is None:
+            assignments = instance.center_assignments.filter(
+                is_active=True,
+            ).select_related("center")[:3]
+        if not assignments:
+            return None
+        centers = [assignment.center for assignment in assignments[:3]]
+        return BaseCenterSerializer(centers, many=True, context=self.context).data
 
 
 class BaseServiceDocumentModuleCategorySerializer(BaseModelSerializer):
@@ -38,13 +88,15 @@ class BaseServiceDocumentModuleCategorySerializer(BaseModelSerializer):
         model = ServiceDocument
         fields = ["module_category", "module_category_code"]
 
-    def get_module_category(self, instance: ServiceDocument):
+    @classmethod
+    def get_module_category(cls, instance: ServiceDocument):
         module_category = get_service_document_module_category(
             instance.result.document_type
         )
         return module_category.label
 
-    def get_module_category_code(self, instance: ServiceDocument):
+    @classmethod
+    def get_module_category_code(cls, instance: ServiceDocument):
         return get_service_document_module_category(instance.result.document_type)
 
 
@@ -77,7 +129,7 @@ class BaseServiceSerializerMeta(BaseSerializer):
     )
     centers = serializers.SerializerMethodField(read_only=True)
 
-    def get_centers(self, instance: Service):
+    def get_centers(self, instance):
         center_assignments = getattr(instance, "center_assignments")
         assignments = center_assignments.all()[:3]
         centers = [asg.center for asg in assignments]
@@ -146,12 +198,55 @@ class BaseServiceSerializerMeta(BaseSerializer):
         return attrs
 
 
+class ServiceCareTemplateSerializer(BaseModelSerializer):
+    class Meta:
+        model = ServiceCareTemplate
+        fields = [
+            "pre_template_name",
+            "post_template_name",
+        ]
+
+
+class ServiceCareTemplateField(serializers.Field):
+    """
+    Nested care template config (read+write), keyed by service id.
+    Same shape as RequiredRoleIdsField: get_attribute returns parent instance.
+    """
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("required", False)
+        kwargs.setdefault("allow_null", True)
+        super().__init__(**kwargs)
+
+    def get_attribute(self, instance):
+        return instance
+
+    def to_representation(self, instance):
+        # Prefer select_related cache (None when no row); avoid reverse-O2O raise.
+        fields_cache = instance._state.fields_cache
+        if "care_template" in fields_cache:
+            care = fields_cache["care_template"]
+        else:
+            care = ServiceCareTemplate.objects.filter(service=instance).first()
+        if care is None:
+            return None
+        return ServiceCareTemplateSerializer(care).data
+
+    def to_internal_value(self, data):
+        if data is None:
+            return None
+        serializer = ServiceCareTemplateSerializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        return serializer.validated_data
+
+
 class ServiceSerializer(BaseServiceSerializerMeta, BaseModelSerializer):
     is_active = serializers.BooleanField(default=True, required=False)
     is_locked = serializers.BooleanField(default=False, read_only=True)
     service_category_code = serializers.CharField(
         source="service_category", read_only=True
     )
+    care_template = ServiceCareTemplateField()
 
     class Meta:
         model = Service
@@ -166,6 +261,7 @@ class ServiceSerializer(BaseServiceSerializerMeta, BaseModelSerializer):
             "service_category_code",
             "image",
             "centers_count",
+            "care_template",
             "created_at",
             "updated_at",
             "is_active",
@@ -177,6 +273,7 @@ class ServiceSerializer(BaseServiceSerializerMeta, BaseModelSerializer):
         is_global = validated_data.get("is_global", False)
         add_centers = validated_data.pop("add_centers", [])
         remove_centers = validated_data.pop("remove_centers", [])
+        care_data = validated_data.pop("care_template", serializers.empty)
         if not is_global and not add_centers and not remove_centers:
             raise serializers.ValidationError(
                 "Center IDs must be provided when all centers is off"
@@ -190,12 +287,15 @@ class ServiceSerializer(BaseServiceSerializerMeta, BaseModelSerializer):
             self.add_centers_action(service, add_centers)
             self.remove_centers_action(service, remove_centers)
             update_service_center_count(service.pk)
+            if care_data is not serializers.empty:
+                upsert_service_care_template(service, care_data)
         return service
 
     def update(self, instance: Service, validated_data):
         is_global = validated_data.get("is_global", instance.is_global)
         add_centers = validated_data.pop("add_centers", [])
         remove_centers = validated_data.pop("remove_centers", [])
+        care_data = validated_data.pop("care_template", serializers.empty)
         with transaction.atomic():
             instance = super().update(instance, validated_data)
             if is_global:
@@ -206,4 +306,6 @@ class ServiceSerializer(BaseServiceSerializerMeta, BaseModelSerializer):
 
             if add_centers or remove_centers or is_global:
                 update_service_center_count(instance.pk)
+            if care_data is not serializers.empty:
+                upsert_service_care_template(instance, care_data)
         return instance

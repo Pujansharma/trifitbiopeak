@@ -199,9 +199,7 @@ class CompositeTemplateServiceSerializer(BaseModelSerializer):
     ):
         return instance.service.get_service_category_display()
 
-    def get_centers(
-            self, instance: CompositeTemplateService,
-    ):
+    def get_centers(self, instance):
         centers = self._get_center_preview(instance)
         return MinimumCenterSerializer(
             centers,
@@ -209,10 +207,7 @@ class CompositeTemplateServiceSerializer(BaseModelSerializer):
             context=self.context,
         ).data
 
-    def get_redeemable_centers(
-            self,
-            instance: CompositeTemplateService,
-    ):
+    def get_redeemable_centers(self, instance):
         if instance.service.service_category not in [
             ServiceCategory.THERAPY
         ]:
@@ -229,10 +224,7 @@ class CompositeTemplateServiceSerializer(BaseModelSerializer):
             return 0
         return instance.service.centers_count
 
-    def get_products(
-            self,
-            instance: CompositeTemplateService,
-    ):
+    def get_products(self, instance):
         if instance.service.service_category != ServiceCategory.ASSESSMENT:
             return []
         product_assignments = instance.service.product_assignments.all()[:3]
@@ -527,9 +519,7 @@ class CompositeTemplateSerializer(BaseModelSerializer):
                 })
         return super().update(instance, validated_data)
 
-    def get_services(
-            self, instance: CompositeTemplate,
-    ):
+    def get_services(self, instance):
         template_services = getattr(instance, "service_preview", None)
         if not template_services:
             return None
@@ -956,10 +946,7 @@ class CompositeProgramSerializer(BaseModelSerializer):
             )
         return composite_program
 
-    def get_services(
-            self,
-            instance: CompositeProgram,
-    ):
+    def get_services(self, instance):
         program_services = getattr(instance.program, "service_preview", None)
         if not program_services:
             return None
@@ -1421,7 +1408,7 @@ class CompositeAddOnSerializer(BaseModelSerializer):
             composite_program.program.refresh_from_db(fields=["services_count"])
         return composite_program
 
-    def get_services(self, instance: CompositeProgram):
+    def get_services(self, instance):
         program_services = getattr(instance.program, "service_preview", None)
         if not program_services:
             return None

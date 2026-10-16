@@ -64,6 +64,16 @@ class CustomerProfile(BaseUUIDModel, AbstractUserProfile):
         related_name="created_customer_profiles",
     )
 
+    height_cm = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Height in centimeters.",
+    )
+    weight_kg = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Weight in kilograms.",
+    )
     centers_count = models.PositiveBigIntegerField(default=0, editable=False)
     external_centers_count = models.PositiveBigIntegerField(default=0, editable=False)
     data = models.JSONField(default=dict, null=True, blank=True, editable=False)
@@ -211,6 +221,21 @@ class CustomerProfileAddress(BaseUUIDModel):
                 name="uniq_default_customer_profile_address",
             )
         ]
+
+    def __str__(self):
+        return f"{self.pk}"
+
+
+class CustomerCopilotSession(BaseUUIDModel):
+    customer_profile = models.OneToOneField(
+        CustomerProfile, on_delete=models.CASCADE, related_name="copilot_session",
+    )
+    session_id = models.CharField(
+        max_length=255, null=True, blank=True, unique=True, editable=False
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
 
     def __str__(self):
         return f"{self.pk}"

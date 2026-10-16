@@ -73,16 +73,18 @@ def _normalize_body_parameters(body_parameters):
 
 def send_template(
     *,
-    to_phone,
-    template_name,
-    language_code,
-    body_parameters,
+    to_phone: str,
+    template_name: str,
+    language_code: str,
+    body_parameters: list[str | dict[str, str]] | dict[str, str],
+    buttons: list[dict] | None = None,
 ):
     """
     Send an approved WhatsApp template message.
 
     Returns (http_status, body_dict).
     Prefer named body_parameters for Meta named-variable templates.
+    buttons contains sub_type, index, and parameters for each button component.
     """
     if not is_whatsapp_configured():
         raise ValueError("WhatsApp Cloud API is not configured")
@@ -98,13 +100,25 @@ def send_template(
         },
     }
     normalized = _normalize_body_parameters(body_parameters)
+    components = []
     if normalized:
-        payload["template"]["components"] = [
+        components.append(
             {
                 "type": "body",
                 "parameters": normalized,
             }
-        ]
+        )
+    components.extend(
+        {
+            "type": "button",
+            "sub_type": button["sub_type"],
+            "index": str(button["index"]),
+            "parameters": button["parameters"],
+        }
+        for button in buttons or []
+    )
+    if components:
+        payload["template"]["components"] = components
 
     session = WhatsAppSession()
     try:

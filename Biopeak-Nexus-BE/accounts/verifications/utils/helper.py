@@ -26,61 +26,86 @@ from accounts.verifications.utils.emails import (
 )
 from accounts.verifications.utils.sms import send_login_otp_sms
 from accounts.verifications.utils.whatsapp import send_verification_code_whatsapp
+from core.utils.formatters import PhoneNumberFormat
+from core.utils.log import logger
 
 PASSWORD_URL = getattr(settings, "PASSWORD_BASE_URL", "") + "/create-password?code={}"
 
 
-def set_values_for_phone_verification(instance):
+def set_values_for_phone_verification(instance: PhoneVerification):
     data = {
-        "secret": get_secret(),
-        "counter": get_counter(),
-        "expires_at": get_expiry(),
-        "retry_count": F("retry_count") + 1,
+        "secret": instance.secret,
+        "counter": instance.counter,
         "is_active": True,
     }
+    if not instance.is_system:
+        data.update(
+            secret=get_secret(),
+            counter=get_counter(),
+            expires_at=get_expiry(),
+            retry_count=F("retry_count") + 1,
+        )
+    data["secret"] = data["secret"] or get_secret()
+    data["counter"] = data["counter"] or get_counter()
     for key, value in data.items():
         setattr(instance, key, value)
     instance.save(update_fields=["updated_at", *data.keys()])
     return instance
 
 
-def perform_otp_generation(phone, code):
+def perform_otp_generation(phone: str, code: str, is_system: bool = False):
+    if is_system:
+        logger.info(f"OTP For phone: {phone} is {code}")
+        return None
     if settings.DEBUG:
         send_verification_phone_email(phone, code)
         return None
-
-    send_verification_code_whatsapp(phone, code)
-    send_login_otp_sms(phone, code)
+    _phone = PhoneNumberFormat(phone)
+    _phone_number = _phone.phonenumber
+    if _phone_number:
+        country_code = _phone_number.country_code
+        if country_code == 91:
+            send_login_otp_sms(phone, code)
+            return None
+        send_verification_code_whatsapp(phone, code)
     return None
 
 
-def generate_otp_for_phone(phone, purpose):
+def generate_otp_for_phone(phone: str, purpose: str):
     instance, created = PhoneVerification.objects.get_or_create(
         phone=phone, purpose=purpose
     )
-    otp_time_diff = (timezone.localtime() - instance.updated_at).seconds
-    if not created and instance.is_active:
+    if not instance.is_system and not created and instance.is_active:
+        otp_time_diff = (timezone.localtime() - instance.updated_at).seconds
         if instance.retry_count % 3 < 3 and otp_time_diff < 60:
             return instance, False
         if instance.retry_count % 3 == 0 and otp_time_diff < 300:
             return instance, False
     instance = set_values_for_phone_verification(instance)
     otp_code = get_code(instance.secret, instance.counter)
-    perform_otp_generation(instance.phone, otp_code)
+    perform_otp_generation(instance.phone, otp_code, is_system=instance.is_system)
     return instance, True
 
 
-def verify_otp(instance, code):
+def verify_otp(instance: PhoneVerification, code: str):
     secret = instance.secret
     counter = instance.counter
     is_valid = code_valid(secret=secret, counter=counter, code=code)
-    if is_valid:
-        PhoneVerification.objects.filter(pk=instance.pk).update(
+    if not is_valid:
+        return is_valid
+
+    verification_data = {}
+    if instance.purpose == PhoneVerification.PURPOSE_REGISTER:
+        verification_data["verified_at"] = timezone.localtime()
+    if not instance.is_system:
+        verification_data.update(
             secret=None,
             counter=0,
             retry_count=0,
-            is_active=False,
+            is_active=instance.purpose == PhoneVerification.PURPOSE_REGISTER,
         )
+    if verification_data:
+        PhoneVerification.objects.filter(pk=instance.pk).update(**verification_data)
     return is_valid
 
 

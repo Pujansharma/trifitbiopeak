@@ -6,7 +6,7 @@ from rest_framework.exceptions import ValidationError
 
 
 class PhoneNumberFormat:
-    def __init__(self, value, region="IN"):
+    def __init__(self, value, region=None):
         self.value = str(value)
         self.region = region
         self._parsed_number = None

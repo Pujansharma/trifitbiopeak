@@ -10,12 +10,12 @@ separate layers.
 
 | Layer | Location | Responsibility | Django models allowed |
 |---|---|---|---|
-| Provider SDK | `integrations/<provider>/sdk.py` | Make HTTP requests and return provider responses or file streams | No |
+| Provider SDK | `integrations/<provider>/utils/sdk.py` | Make HTTP requests and return provider responses or file streams | No |
 | Integration helper | `integrations/<provider>/tasks.py` | Coordinate SDK calls, validate provider responses, and normalize metadata | No |
 | Provider result handler | `integrations/<provider>/utils/results.py` | Interpret normalized provider data, create results and documents, update request status, and refresh counters | Yes |
-| Provider product registry | `integrations/<provider>/utils/__init__.py` | Map each supported product callback to that provider's result handler | Yes |
+| Provider product registry | `integrations/<provider>/utils/handlers.py` | Map each supported product callback to that provider's result handler | Yes |
 | Central provider registry | `programs/program_services/utils/results.py` | Map provider callbacks to provider-owned product registries and resolve handlers | Yes |
-| Dispatcher | `programs/program_services/utils/tasks.py` | Resolve the provider/product handler and run it for a queued request | Yes |
+| Dispatcher | `programs/program_services/tasks.py` | Resolve the provider/product handler and run it for a queued request | Yes |
 | API serializer | `programs/program_services/serializers.py` | Validate create/refetch requests and initiate dispatch | Yes |
 
 The important boundary is:

@@ -17,7 +17,7 @@ Authorization: Bearer <token>
 4. **List result requests** — Load request history when the screen opens or the user explicitly refreshes it.
 5. **Read result request** — Load one request only when the user opens its details.
 6. **List assessment results** — Load collected manual and fetched results through the normal results-screen lifecycle.
-7. **Refetch result request** — Delete the request's existing results and start the same request again.
+7. **Refetch result request** — Delete the request's previous results and documents, then fetch a fresh result set using the same request.
 8. **Cancel result request** — Change an eligible request's persisted status to cancelled.
 
 The backend is the authority for service, provider, product, and request state.
@@ -270,6 +270,7 @@ read remains available when the program service is inactive.
 
 | Name | Required | Example | Notes |
 | --- | --- | --- | --- |
+| `mode` | No | `order` | Filter by request type: `fetch` or `order`. Omit to show all request types; unknown values are ignored |
 | `status` | No | `completed` | One of `queued`, `running`, `completed`, `partially_fetched`, `failed`, or `cancelled`; invalid values leave the list unfiltered |
 | `page` | No | `1` | Defaults to the first page |
 | `limit` | No | `10` | Maximum 50 |
@@ -484,8 +485,8 @@ screen normally loads, its query changes, or the user explicitly refreshes it.
 
 ### 7. Refetch result request
 
-Deletes the request's existing result rows and starts the same request again
-with its original `data` and `profile_data`.
+Deletes the request's previous result and document rows, then starts the same
+request again with its original `data` and `profile_data`.
 
 **Method:** `POST`
 
@@ -536,10 +537,14 @@ with its original `data` and `profile_data`.
 }
 ```
 
-Refetch deletes all linked `ServiceResult` rows and cascades deletion to their
-document database rows. It then clears failure and timing state, recomputes
-result/document counters, and queues the same request. Deleted rows are not
-restored if the new fetch fails.
+Refetch deletes linked `ServiceResult` rows and cascades deletion to their document
+rows before requeuing the same request. Failure and timing state are cleared.
+Successful provider retrieval builds a fresh result set; previous output is not
+restored if the new attempt fails. The queued response has no previous results.
+
+Fetch requests have read-only `request_type_code="fetch"` and `is_submitted=false`.
+Request list, detail, refetch, and cancel responses also expose `request_type`
+(the display label) and `request_type_code` (the stored value).
 
 A queued or running request updated within the previous second is rejected.
 Refetch also requires the program service, provider, provider API configuration,

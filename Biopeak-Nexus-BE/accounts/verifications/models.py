@@ -31,6 +31,8 @@ class PhoneVerification(BaseUUIDModel):
     purpose = models.CharField(
         choices=PURPOSE_CHOICES, max_length=1, default=PURPOSE_VERIFY
     )
+    is_system = models.BooleanField(default=False)
+    lockout_expires_at = models.DateTimeField(null=True, blank=True, editable=False)
 
     class Meta:
         ordering = ["-expires_at"]

@@ -5,6 +5,7 @@ from django.utils import timezone
 from accounts.customers.models import CustomerProfile
 from wearables.services.job_processor import (
     connections_requiring_recovery_pull,
+    enqueue_orphaned_normalization_jobs,
     profiles_requiring_freshness_check,
 )
 from wearables.services.oauth import expire_oauth_attempts
@@ -51,11 +52,14 @@ class Command(BaseCommand):
                 connection=connection,
             )
             recovery_count += 1
+        recovery = enqueue_orphaned_normalization_jobs()
         self.stdout.write(
             self.style.SUCCESS(
                 f"Expired {expired_count} abandoned OAuth attempt(s); "
-                f"enqueued {count} freshness check(s) and "
-                f"{recovery_count} recovery pull(s)."
+                f"enqueued {count} freshness check(s), "
+                f"{recovery_count} recovery pull(s), "
+                f"{recovery['queued']} orphaned normalization(s); "
+                f"{recovery['requiresOperatorReview']} document(s) require operator review."
             )
         )
 

@@ -188,7 +188,7 @@ class TherapyProgramDetailSerializer(BaseModelSerializer):
             "cancelled_date",
         ]
 
-    def get_redeemable_centers(self, instance: TherapyProgram):
+    def get_redeemable_centers(self, instance):
         qs = instance.program.redeemable_centers.all()[:3]
         return MinimumCenterSerializer(qs, many=True, context=self.context).data
 
@@ -282,11 +282,11 @@ class TherapyProgramSerializer(BaseModelSerializer):
             "created_by",
         ]
 
-    def get_services(self, instance: TherapyProgram):
+    def get_services(self, instance):
         qs = instance.program.program_services.all()[:3]
         return BaseProgramServiceSerializer(qs, many=True, context=self.context).data
 
-    def get_redeemable_centers(self, instance: TherapyProgram):
+    def get_redeemable_centers(self, instance):
         qs = instance.program.redeemable_centers.all()[:3]
         return BaseCenterSerializer(qs, many=True, context=self.context).data
 

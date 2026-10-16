@@ -1,8 +1,10 @@
 from django.contrib import admin
+from django.http import HttpRequest
 
 from accounts.customers.models import (
     Customer,
     CustomerAssociateAssignment,
+    CustomerCopilotSession,
     CustomerProfile,
 )
 
@@ -50,3 +52,32 @@ class CustomerAssociateAssignmentAdmin(admin.ModelAdmin):
     list_display = ["id", "center", "customer_profile", "associate"]
     list_select_related = True
     raw_id_fields = ["customer_profile", "associate", "center", "created_by"]
+
+
+@admin.register(CustomerCopilotSession)
+class CustomerCopilotSessionAdmin(admin.ModelAdmin):
+    readonly_fields = [
+        "id",
+        "customer_profile",
+        "session_id",
+        "is_active",
+        "created_at",
+        "updated_at",
+    ]
+    list_display = [
+        "id",
+        "customer_profile",
+        "session_id",
+        "is_active",
+        "created_at",
+    ]
+    list_select_related = ["customer_profile"]
+    list_per_page = 25
+    actions = None
+    search_fields = ['customer_profile__pk', 'session_id']
+
+    def has_add_permission(self, request: HttpRequest) -> bool:
+        return False
+
+    def has_delete_permission(self, request, obj=None) -> bool:
+        return False

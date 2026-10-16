@@ -2,8 +2,13 @@ from django.db.models import Prefetch, OuterRef, Exists
 
 from accounts.centers.models import Center
 from accounts.customers.models import CustomerCenterAssignment
-from accounts.utils.permissions import IsAdminUser, IsAssociateUser
+from accounts.utils.constants import UserType
+from accounts.utils.db import get_user_account_type
+from accounts.utils.permissions import IsAdminUser, IsAssociateUser, IsCustomerUser
+from appointments.models import Appointment, AppointmentAssociate
+from appointments.utils.redemption import OPEN_APPOINTMENT_STATUSES
 from core.utils.exceptions import get_object_or_404
+from core.utils.permissions import ReadOnly
 from core.utils.views.main import (
     BaseListAPIView,
     BaseRetrieveUpdateAPIView,
@@ -42,11 +47,15 @@ class TherapyProgramServicesView(BaseListAPIView):
 
 class TherapyProgramDetailView(BaseRetrieveUpdateAPIView):
     serializer_class = TherapyProgramDetailSerializer
-    permission_classes = [IsAdminUser | IsAssociateUser]
+    permission_classes = [IsAdminUser | IsAssociateUser | (IsCustomerUser & ReadOnly)]
 
     def get_queryset(self):
-        qs = (
-            TherapyProgram.objects.filter()
+        filter_kwargs = {}
+        account_type = get_user_account_type(self.request.user)
+        if account_type == UserType.CUSTOMER:
+            filter_kwargs["program__customer_profile__customer"] = self.request.user.customer
+        return (
+            TherapyProgram.objects.filter(**filter_kwargs)
             .select_related(
                 "program",
                 "program__center",
@@ -70,36 +79,66 @@ class TherapyProgramDetailView(BaseRetrieveUpdateAPIView):
                 ),
             )
         )
-        return qs
 
 
 class TherapyProgramServicesListView(BaseListAPIView):
     serializer_class = BaseProgramServiceSerializer
-    permission_classes = [IsAdminUser | IsAssociateUser]
+    permission_classes = [IsAdminUser | IsAssociateUser | (IsCustomerUser & ReadOnly)]
 
     def get_queryset(self):
+        filter_kwargs = {}
+        account_type = get_user_account_type(self.request.user)
+        if account_type == UserType.CUSTOMER:
+            filter_kwargs["program__customer_profile__customer"] = self.request.user.customer
         subquery_filter_kwargs = {}
         center_id = self.request.headers.get("x-center-id", None)
         if center_id:
-            subquery_filter_kwargs["center_id"] = center_id
+            subquery_filter_kwargs["center__pk"] = center_id
         can_redeem_subquery = CenterServiceAssignment.objects.filter(
             service=OuterRef("service"), is_active=True, **subquery_filter_kwargs
         )
-        qs = (
+        return (
             ProgramService.objects.filter(
-                program__therapy_program__pk=self.kwargs["pk"]
+                program__therapy_program__pk=self.kwargs["pk"],
+                **filter_kwargs,
             )
             .select_related(
                 "cancelled_by",
                 "created_by",
                 "service",
                 "therapy_service",
+                "program__customer_profile__customer__user",
+                "program__therapy_program",
+            )
+            .prefetch_related(
+                Prefetch(
+                    "service__center_assignments",
+                    queryset=CenterServiceAssignment.objects.filter(
+                        is_active=True,
+                        center__redeemable_programs__therapy_program__pk=self.kwargs["pk"],
+                    ).select_related("center"),
+                    to_attr="active_center_assignments",
+                ),
+                Prefetch(
+                    "appointments",
+                    queryset=Appointment.objects.filter(
+                        status__in=OPEN_APPOINTMENT_STATUSES,
+                    )
+                    .select_related("center", "care_team", "room", "equipment")
+                    .prefetch_related(
+                        Prefetch(
+                            "associate_links",
+                            queryset=AppointmentAssociate.objects.select_related(
+                                "associate__user", "role"
+                            ),
+                        ),
+                    ),
+                    to_attr="open_appointments",
+                ),
             )
             .annotate(can_redeem=Exists(can_redeem_subquery))
             .order_by("-created_at")
         )
-
-        return qs
 
 
 class TherapyProgramCancelView(BaseCreateAPIView):

@@ -4,8 +4,10 @@ from django.db import transaction
 from django.db.models import Count, F, OuterRef, Subquery, Value
 from django.db.models.functions import Coalesce
 from django.utils import timezone
+from rest_framework import serializers
 
 from accounts.centers.models import Center
+from appointments.utils.redemption import increment_therapy_sessions_used
 from programs.models import (
     RedemptionHistory,
     TherapyProgram,
@@ -13,9 +15,29 @@ from programs.models import (
 )
 from programs.services.models import (
     Service,
+    ServiceCareTemplate,
     CenterServiceAssignment,
     ServiceProductAssignment,
 )
+
+
+def upsert_service_care_template(service, care_data):
+    """Create/update/delete care templates for an existing Service (by pk)."""
+    if care_data is None:
+        ServiceCareTemplate.objects.filter(service_id=service.pk).delete()
+        return
+    pre_template_name = (care_data.get("pre_template_name") or "").strip()
+    post_template_name = (care_data.get("post_template_name") or "").strip()
+    if not pre_template_name and not post_template_name:
+        ServiceCareTemplate.objects.filter(service_id=service.pk).delete()
+        return
+    ServiceCareTemplate.objects.update_or_create(
+        service_id=service.pk,
+        defaults={
+            "pre_template_name": pre_template_name,
+            "post_template_name": post_template_name,
+        },
+    )
 
 
 def update_service_center_count(service_id: UUID) -> None:
@@ -59,12 +81,11 @@ def redeem_program_service(
         program_service__pk=program_service_id
     ).first()
     with transaction.atomic():
-        TherapyProgramService.objects.filter(
-            program_service__pk=program_service_id
-        ).update(sessions_used=F("sessions_used") + quantity)
-        TherapyProgram.objects.filter(
-            program__program_services__pk=program_service_id
-        ).update(sessions_used=F("sessions_used") + quantity)
+        burned = increment_therapy_sessions_used(program_service_id, quantity)
+        if burned != 1:
+            raise serializers.ValidationError(
+                "No sessions remaining for this service."
+            )
         RedemptionHistory.objects.create(
             therapy_program_service=therapy_program_service,
             redeem_center=center,

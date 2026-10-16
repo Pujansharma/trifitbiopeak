@@ -28,7 +28,9 @@ def callback_url_configured() -> bool:
     return bool(getattr(settings, "ROOK_CALLBACK_URL", ""))
 
 
-def callback_url_for_connection(connection, *, actor_user, correlation_id="") -> str | None:
+def callback_url_for_connection(
+    connection, *, actor_user, correlation_id="", previous_status: str | None = None,
+) -> str | None:
     """Make a short, one-time callback URL compatible with ROOK's authorizer.
 
     ROOK's redirect_url limit is 50 characters; it appends
@@ -60,7 +62,7 @@ def callback_url_for_connection(connection, *, actor_user, correlation_id="") ->
     WearableConnectionEvent.objects.create(
         connection=connection,
         event_type="oauth_state_pending",
-        previous_status=connection.status,
+        previous_status=(connection.status if previous_status is None else previous_status),
         current_status=connection.status,
         actor_user=actor_user,
         correlation_id=correlation_id[:128],
@@ -68,6 +70,19 @@ def callback_url_for_connection(connection, *, actor_user, correlation_id="") ->
         payload={"nonceDigest": digest, "source": connection.data_source},
     )
     return redirect_url
+
+
+def retire_oauth_callback_state(connection, callback_url: str | None, *, event_type: str) -> None:
+    """Invalidate an unreturned or already-handled callback without touching old links."""
+    if not callback_url:
+        return
+    nonce = urlsplit(callback_url).path.rsplit("/", 1)[-1]
+    digest = hashlib.sha256(nonce.encode("utf-8")).hexdigest()
+    WearableConnectionEvent.objects.filter(
+        connection=connection,
+        event_type="oauth_state_pending",
+        payload__nonceDigest=digest,
+    ).update(event_type=event_type, updated_at=timezone.now())
 
 
 def _decode_state(state: str) -> str:
@@ -154,10 +169,32 @@ def complete_oauth_callback(
         if connection.data_source not in authorized:
             # ROOK may be eventually consistent: status-polling remains available.
             return "pending"
+        # A verified upstream grant is not enough to finish the local attempt:
+        # the connection transition and recovery job must commit together with
+        # consuming the one-time callback state. Otherwise a transient database
+        # error can burn the callback while the UI remains "Authorizing".
+        from wearables.services.connections import authorization_confirmed
+        from wearables.models import WearableConnection
+
+        connection = WearableConnection.objects.select_for_update().get(pk=connection.pk)
+        if connection.status in {ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING}:
+            was_reconnect = event.previous_status in {
+                ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED,
+            }
+            authorization_confirmed(
+                connection, was_reconnect=was_reconnect,
+                actor_user=event.actor_user, correlation_id=event.correlation_id,
+            )
+        elif connection.authorization_status != AuthorizationStatus.AUTHORIZED:
+            # Disconnect/cancellation raced the external ROOK check. Never
+            # override the local member's explicit revocation with a late page.
+            event.event_type = "oauth_state_superseded"
+            event.save(update_fields=["event_type", "updated_at"])
+            return "cancelled"
+        # A status poll may have completed the grant first; that is already a
+        # success, and this callback must not trigger another historical import.
         event.event_type = "oauth_state_verified"
         event.save(update_fields=["event_type", "updated_at"])
-        from wearables.services.connections import refresh_authorizing_connections
-        refresh_authorizing_connections(connection.customer_profile)
         return "authorized"
 
 

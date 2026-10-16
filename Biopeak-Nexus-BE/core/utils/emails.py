@@ -28,8 +28,12 @@ def send_email(data):
     EmailThread(email_message).start()
 
 
-def send_templated_email(subject, template, email):
-    email_message = EmailMultiAlternatives(subject=subject, to=[email])
+def send_templated_email(
+    subject, template, email, from_email: str = settings.DEFAULT_FROM_EMAIL
+):
+    email_message = EmailMultiAlternatives(
+        subject=subject, to=[email], from_email=from_email
+    )
     email_message.attach_alternative(template, "text/html")
     EmailThread(email_message).start()
 

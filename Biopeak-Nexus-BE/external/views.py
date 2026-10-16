@@ -24,11 +24,13 @@ from accounts.notifications.serializers import UserNotificationSerializer
 from core.utils.exceptions import get_object_or_404
 from core.utils.formatters import PhoneNumberFormat
 from core.utils.helper import get_request_ip_address, get_request_user_agent
+from core.utils.permissions import ReadOnly
 from core.utils.views.main import (
     BaseCreateAPIView,
     BaseListAPIView,
     BaseRetrieveAPIView,
 )
+from external.permissions import ExternalAPIKeyPermission
 from external.serializers import (
     CustomerProfileSummarySerializer,
     ExternalProgramServiceSerializer,
@@ -36,6 +38,7 @@ from external.serializers import (
     CustomerTherapyProgramDetailSerializer,
     CustomerServiceDetailSerializer,
     ExternalCustomerAssociateSerializer,
+    ExternalCustomerProfileSerializer,
     CustomerFirebaseTokenSerializer,
     CustomerFirebaseTokenDeregisterSerializer,
 )
@@ -48,6 +51,20 @@ from programs.models import (
 from programs.serializers import ProgramServiceRedemptionHistorySerializer
 from programs.services.models import CenterServiceAssignment
 from programs.utils.constants import ProgramType
+
+
+class ExternalCustomerProfilesListView(BaseListAPIView):
+    permission_classes = [ExternalAPIKeyPermission & ReadOnly]
+    serializer_class = ExternalCustomerProfileSerializer
+
+    def get_queryset(self):
+        filter_kwargs = {}
+        active_query = self.request.query_params.get("active")
+        if active_query in {"0", "1"}:
+            filter_kwargs["is_active"] = bool(int(active_query))
+        return CustomerProfile.objects.select_related("customer__user").filter(
+            **filter_kwargs,
+        ).order_by("-created_at", "-pk")
 
 
 class ExternalUserProgramView(BaseListAPIView):
@@ -262,7 +279,7 @@ class ExternalUserProgramServiceRedemptionHistory(BaseListAPIView):
         therapy_program_service = self.get_therapy_program_service()
         return RedemptionHistory.objects.filter(
             therapy_program_service=therapy_program_service
-        ).select_related("redeemed_by", "redeem_center")
+        ).select_related("redeemed_by", "redeem_center", "appointment")
 
 
 class ExternalUserProgramServiceDetailView(BaseRetrieveAPIView):

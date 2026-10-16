@@ -1,5 +1,5 @@
 from core.utils.log import logger
-from integrations.strand_genomics.sdk import (
+from integrations.strand_genomics.utils.sdk import (
     get_order_status,
     get_pdf_report,
     get_report_data,

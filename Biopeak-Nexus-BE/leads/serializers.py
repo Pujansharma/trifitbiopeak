@@ -10,7 +10,7 @@ from accounts.utils.auth import get_user_model
 from accounts.utils.helper import get_date_of_birth_from_age
 from core.utils.fields import PhoneNumberSerializerField
 from core.utils.serializers import BaseModelSerializer
-from integrations.metsights.helper import get_or_create_metsights_profile
+from integrations.metsights.utils.profiles import get_or_create_metsights_profile
 from leads.models import Lead
 from leads.utils.db import (
     decrement_leads_assigned,
@@ -204,9 +204,9 @@ class LeadDetailSerializer(BaseLeadSerializer):
             if was_joined and not lead.is_joined and not was_converted:
                 decrement_leads_assigned()
             if (
-                self.should_sync_onboarding_sent_to_profile(lead)
-                and lead.customer_profile_id is not None
-                and lead.is_onboarding_sent != was_onboarding_sent
+                    self.should_sync_onboarding_sent_to_profile(lead)
+                    and lead.customer_profile_id is not None
+                    and lead.is_onboarding_sent != was_onboarding_sent
             ):
                 lead.customer_profile.is_onboarding_sent = lead.is_onboarding_sent
                 lead.customer_profile.save(
@@ -245,8 +245,8 @@ class LeadV2DetailSerializer(LeadDetailSerializer):
 
     def update(self, instance: Lead, validated_data: dict) -> Lead:
         is_converted = (
-            instance.customer_profile_id is not None
-            and instance.customer_profile.is_converted
+                instance.customer_profile_id is not None
+                and instance.customer_profile.is_converted
         )
         if is_converted:
             allowed_fields = {"is_onboarding_sent", "updated_by"}

@@ -1,0 +1,135 @@
+meta {
+  name: GET Service Detail
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseURL}}/services/{{service_id}}/
+  body: none
+  auth: inherit
+}
+
+settings {
+  encodeUrl: true
+  timeout: 30000
+}
+
+docs {
+  Full catalog service detail. Admin / associate (read). Env: service_id = UUID (not name).
+
+  data fields:
+  - id, name, is_global, is_active, is_locked
+  - service_category (display label), service_category_code (raw: therapy|assessment|consultation|…)
+  - image (URL or null), centers_count
+  - centers[] — up to 3 {id, code, name} (empty list if global / none)
+  - care_template — null, or {
+      pre_template_name, post_template_name
+    }
+  - created_by (user UUID or null), created_at, updated_at
+
+  Write-only add_centers / remove_centers never appear on GET.
+  Care templates write: care-templates / PATCH Service Care Template.
+}
+
+example {
+  name: 200 Service Detail
+
+  request: {
+    url: {{baseURL}}/services/{{service_id}}/
+    method: GET
+    mode: none
+  }
+
+  response: {
+    headers: {
+      Content-Type: application/json
+    }
+
+    status: {
+      code: 200
+      text: OK
+    }
+
+    body: {
+      type: json
+      content: '''
+        {
+          "detail": "Details.",
+          "data": {
+            "id": "0199a1b2-c3d4-7000-8000-000000000001",
+            "name": "IR Sauna",
+            "is_global": true,
+            "centers": [],
+            "service_category": "Therapy",
+            "service_category_code": "therapy",
+            "image": null,
+            "centers_count": 0,
+            "care_template": {
+              "pre_template_name": "service_pre_care_example",
+              "post_template_name": "service_post_care_example"
+            },
+            "created_at": "2026-10-14T08:00:00.000000+00:00",
+            "updated_at": "2026-10-14T10:00:00.000000+00:00",
+            "is_active": true,
+            "is_locked": false,
+            "created_by": "0199a1b2-c3d4-7000-8000-000000000099"
+          }
+        }
+      '''
+    }
+  }
+}
+
+example {
+  name: 200 Care template null
+
+  request: {
+    url: {{baseURL}}/services/{{service_id}}/
+    method: GET
+    mode: none
+  }
+
+  response: {
+    headers: {
+      Content-Type: application/json
+    }
+
+    status: {
+      code: 200
+      text: OK
+    }
+
+    body: {
+      type: json
+      content: '''
+        {
+          "detail": "Details.",
+          "data": {
+            "id": "0199a1b2-c3d4-7000-8000-000000000002",
+            "name": "Consult",
+            "is_global": false,
+            "centers": [
+              {
+                "id": "0199a1b2-c3d4-7000-8000-000000000010",
+                "code": "BLR01",
+                "name": "Biopeak Bengaluru"
+              }
+            ],
+            "service_category": "Consultation",
+            "service_category_code": "consultation",
+            "image": "https://cdn.example/services/consult.png",
+            "centers_count": 1,
+            "care_template": null,
+            "created_at": "2026-10-14T08:00:00.000000+00:00",
+            "updated_at": "2026-10-14T08:00:00.000000+00:00",
+            "is_active": true,
+            "is_locked": false,
+            "created_by": null
+          }
+        }
+      '''
+    }
+  }
+}
+​

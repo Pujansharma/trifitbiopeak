@@ -1,0 +1,14 @@
+meta {
+  name: care-templates
+}
+
+auth {
+  mode: inherit
+}
+
+docs {
+  Pre/post care Meta WhatsApp templates for an **existing** catalog service.
+  Always address by service_id (UUID env), never by service name.
+  PATCH /services/{{service_id}}/ with body care_template only.
+  GET Service Detail (parent folder) to read care_template.
+}

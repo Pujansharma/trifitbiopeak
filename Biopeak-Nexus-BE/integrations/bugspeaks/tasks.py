@@ -1,7 +1,7 @@
 import arrow
 
 from core.utils.log import logger
-from integrations.bugspeaks.sdk import get_bugspeaks_record, fetch_bugspeaks_report
+from integrations.bugspeaks.utils.sdk import get_bugspeaks_record, fetch_bugspeaks_report
 
 
 def process_bugspeaks_report_fetch(

@@ -8,7 +8,7 @@ from django.db.models import Count, Q
 from django.utils import timezone
 
 from wearables.models import (
-    HealthProcessingJob, RookWebhookReceipt, WearableConnection,
+    HealthProcessingJob, RookHealthDocument, RookWebhookReceipt, WearableConnection,
     WearableConnectionEvent,
 )
 from wearables.utils.constants import ConnectionStatus, DocumentStatus, HealthJobStatus
@@ -43,6 +43,9 @@ class Command(BaseCommand):
             Q(last_successful_sync__isnull=True)
             | Q(last_successful_sync__lt=now - timedelta(hours=getattr(settings, "ROOK_SYNC_DELAY_HOURS", 48)))
         ).count()
+        overdue_documents = RookHealthDocument.objects.filter(
+            status=DocumentStatus.QUEUED, received_at__lt=now - timedelta(minutes=15),
+        ).count()
         schema_events = WearableConnectionEvent.objects.filter(
             event_type="unmapped_or_empty_rook_document", created_at__gte=since,
         ).count()
@@ -58,12 +61,17 @@ class Command(BaseCommand):
             alerts.append("webhook_rejection_rate_above_0.5_percent")
         if job_counts.get(HealthJobStatus.FAILED, 0) > 0:
             alerts.append("health_processing_jobs_failed")
+        if overdue_documents:
+            alerts.append("queued_documents_not_normalized")
         if schema_events >= 3:
             alerts.append("rook_schema_or_empty_document_drift")
         if closed_upstream_accounts:
             alerts.append("rook_provider_accounts_closed")
+        # Database snapshots are the deliberate supported fallback when Redis
+        # is absent; flag reduced performance as a warning, not a broken alert.
+        warnings = []
         if not getattr(settings, "HEALTH_REDIS_URL", ""):
-            alerts.append("shared_health_redis_not_configured")
+            warnings.append("shared_health_redis_not_configured_db_snapshot_fallback")
         payload = {
             "generatedAt": now.isoformat(), "windowHours": hours,
             "webhookReceipts": total_receipts,
@@ -73,9 +81,11 @@ class Command(BaseCommand):
             "jobCounts": job_counts,
             "importsStalledOverFourHours": stalled,
             "delayedConnections": sync_delayed,
+            "unprocessedQueuedDocuments": overdue_documents,
             "unmappedRookDocuments": schema_events,
             "closedProviderAccounts": closed_upstream_accounts,
             "alerts": alerts,
+            "warnings": warnings,
         }
         self.stdout.write(json.dumps(payload, sort_keys=True))
         if alerts and options["strict"]:

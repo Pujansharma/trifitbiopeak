@@ -37,11 +37,15 @@ urlpatterns = [
     path("external/", include("external.urls")),
     # Centers
     path("centers/", include("accounts.centers.urls")),
+    # Customer appointments (not center-scoped)
+    path("appointments/", include("appointments.customer_urls")),
     # Associates
     path("associates/", include("accounts.associates.urls")),
     path("admins/", include("accounts.admins.urls")),
+    # Customer account
+    path("customers/", include("accounts.customers.urls")),
     # Customer-profiles
-    path("profiles/", include("accounts.customers.urls")),
+    path("profiles/", include("accounts.customers.profiles.urls")),
     # Admin level actions
     path("products/", include("products.urls")),
     path("test_kit_inventory/", include("test_kit_inventory.urls")),
@@ -50,9 +54,10 @@ urlpatterns = [
     path("services/", include("programs.services.urls")),
     path("leads/", include("leads.urls")),
     path("google-calendar/", include("integrations.google_calendar.urls")),
+    path("app/", include("integrations.communications.urls")),
     path("webhooks/", include("webhooks.urls")),
     path("pre-consultation/", include("pre_consultation.urls")),
-    # Phase 1 wearable endpoints (additive; existing routes stay untouched).
+      # Phase 1 wearable endpoints
     path("r/", include("wearables.callback_urls")),
     path("api/v1/devices/", include("wearables.device_urls")),
     path("api/v1/health/", include("wearables.health_urls")),

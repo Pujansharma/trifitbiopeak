@@ -91,7 +91,7 @@ class ServicesView(BaseListCreateAPIView):
             Service.objects.filter(search, **filter_kwargs)
             .annotate(is_locked=Exists(locked_subquery))
             .prefetch_related(prefetch)
-            .select_related("created_by")
+            .select_related("created_by", "care_template")
             .order_by("-created_at")
             .distinct()
         )
@@ -114,7 +114,7 @@ class ServiceDetailView(BaseRetrieveUpdateDestroyAPIView):
                     queryset=CenterServiceAssignment.objects.select_related("center"),
                 )
             )
-            .select_related("created_by")
+            .select_related("created_by", "care_template")
         )
         return qs
 

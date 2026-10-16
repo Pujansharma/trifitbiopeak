@@ -1,9 +1,9 @@
-from django.db.models import Prefetch, Q, ProtectedError, RestrictedError
+from django.db.models import Prefetch, Q, ProtectedError, QuerySet, RestrictedError
 
 from accounts.centers.models import Center
 from accounts.utils.constants import UserType
 from accounts.utils.db import get_user_account_type
-from accounts.utils.permissions import IsAdminUser, IsAssociateUser
+from accounts.utils.permissions import IsAdminUser, IsAssociateUser, IsCustomerUser
 from core.utils.exceptions import get_object_or_404
 from core.utils.permissions import ReadOnly
 from core.utils.views.main import (
@@ -28,13 +28,21 @@ from programs.services.utils.constants import ServiceCategory
 
 class TherapyServicesListView(BaseListCreateAPIView):
     serializer_class = TherapyServiceSerializer
-    permission_classes = [IsAdminUser|IsAssociateUser]
+    permission_classes = [IsAdminUser | IsAssociateUser]
 
-    def get_queryset(self):
+    def get_queryset(self) -> QuerySet[Service]:
         search = Q()
+        center_filter = Q()
+        center_assignment_filter = Q()
         filter_kwargs = {}
         search_query = self.request.query_params.get("search", "").strip()
         active_query = self.request.query_params.get("active", None)
+        center_identifiers = self.request.query_params.getlist("center_id", [])
+        for center_identifier in center_identifiers:
+            center_filter |= Q(
+                center_assignments__center__pk__iexact=center_identifier
+            )
+            center_assignment_filter |= Q(center__pk__iexact=center_identifier)
         if search_query:
             search |= Q(name__istartswith=search_query)
             search |= Q(name__icontains=search_query)
@@ -47,17 +55,26 @@ class TherapyServicesListView(BaseListCreateAPIView):
                 "center_assignments__center__associate_assignments__associate"
             ] = user.associate
 
-        qs = (
+        queryset = (
             Service.objects.filter(
-                search, service_category=ServiceCategory.THERAPY, **filter_kwargs
+                search,
+                center_filter,
+                service_category=ServiceCategory.THERAPY,
+                **filter_kwargs,
             )
             .prefetch_related(
-                "center_assignments__center", "center_assignments__center__created_by"
+                Prefetch(
+                    "center_assignments",
+                    queryset=CenterServiceAssignment.objects.filter(
+                        center_assignment_filter
+                    ).select_related("center"),
+                ),
+                "center_assignments__center__created_by",
             )
             .select_related("created_by")
             .distinct()
         )
-        return qs
+        return queryset
 
     def perform_create(self, serializer):
         serializer.save(
@@ -121,12 +138,18 @@ class TherapyServiceRedeemView(BaseCreateAPIView):
 
 class ProgramServiceRedemptionHistory(BaseListAPIView):
     serializer_class = ProgramServiceRedemptionHistorySerializer
-    permission_classes = [IsAdminUser | IsAssociateUser]
+    permission_classes = [IsAdminUser | IsAssociateUser | (IsCustomerUser & ReadOnly)]
 
     def get_therapy_program_service(self):
-        qs = TherapyProgramService.objects.select_related("program_service").filter()
+        filter_kwargs = {}
+        account_type = get_user_account_type(self.request.user)
+        if account_type == UserType.CUSTOMER:
+            filter_kwargs["program_service__program__customer_profile__customer"] = self.request.user.customer
+        therapy_program_services = TherapyProgramService.objects.select_related("program_service").filter(
+            **filter_kwargs,
+        )
         return get_object_or_404(
-            qs, "Therapy program service not found", pk=self.kwargs["pk"]
+            therapy_program_services, "Therapy program service not found", pk=self.kwargs["pk"]
         )
 
     def get_queryset(self):
@@ -135,8 +158,7 @@ class ProgramServiceRedemptionHistory(BaseListAPIView):
             RedemptionHistory.objects.filter(
                 therapy_program_service=therapy_program_service
             )
-            .select_related("redeemed_by", "redeem_center")
-            .prefetch_related()
+            .select_related("redeemed_by", "redeem_center", "appointment")
             .order_by("-redeemed_date", "-redeemed_at")
         )
         return qs

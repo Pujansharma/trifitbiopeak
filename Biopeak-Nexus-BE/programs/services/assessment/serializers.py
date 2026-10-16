@@ -30,7 +30,7 @@ class AssessmentServiceSerializerMeta(BaseServiceSerializerMeta):
     )
     products = serializers.SerializerMethodField(read_only=True)
 
-    def get_products(self, instance: Service):
+    def get_products(self, instance):
         product_assignments = getattr(instance, "product_assignments")
         assignment_instances = product_assignments.all()[:3]
         qs = [

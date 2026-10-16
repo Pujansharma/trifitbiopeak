@@ -1,3 +1,4 @@
+from django.utils import timezone
 from rest_framework import serializers
 
 from accounts.associates.serializers import (
@@ -14,11 +15,56 @@ from accounts.customers.models import (
 from accounts.notifications.models import FirebaseRegistrationToken
 from accounts.notifications.utils.db import save_firebase_registration_token
 from accounts.users.utils.constants import Gender
+from accounts.users.utils.helper import calculate_age
 from core.utils.fields import PhoneNumberSerializerField
 from core.utils.serializers import BaseModelSerializer, BaseSerializer
 from programs.models import TherapyProgram, TherapyProgramService
 from programs.services.models import Service
 from programs.utils.constants import ProgramType
+
+
+class ExternalCustomerProfileSerializer(BaseModelSerializer):
+    email = serializers.EmailField(source="customer.contact_email", read_only=True)
+    phone = PhoneNumberSerializerField(source="customer.user.phone", read_only=True)
+    age = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CustomerProfile
+        fields = [
+            "id",
+            "email",
+            "phone",
+            "first_name",
+            "last_name",
+            "gender",
+            "date_of_birth",
+            "age",
+            "image",
+            "is_main",
+            "is_onboarding_sent",
+            "is_onboarding_completed",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "first_name",
+            "last_name",
+            "gender",
+            "date_of_birth",
+            "image",
+            "is_main",
+            "is_onboarding_sent",
+            "is_onboarding_completed",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_age(self, instance):
+        date_of_birth = instance.date_of_birth
+        if date_of_birth is None or date_of_birth > timezone.localdate():
+            return None
+        return calculate_age(date_of_birth)
 
 
 class ExternalCustomerServiceSerializer(BaseModelSerializer):

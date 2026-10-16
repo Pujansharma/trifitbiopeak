@@ -6,5 +6,6 @@ urlpatterns = [
     path("metsights/", include("webhooks.metsights.urls")),
     path("orange-labs/", include("webhooks.orange_labs.urls")),
     path("whatsapp/", include("webhooks.whatsapp.urls")),
+    path("sms/", include("webhooks.sms.urls")),
     path("rook/", include("webhooks.rook.urls")),
 ]

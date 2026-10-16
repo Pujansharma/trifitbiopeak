@@ -1,0 +1,82 @@
+meta {
+  name: PATCH Service Care Template
+  type: http
+  seq: 1
+}
+
+patch {
+  url: {{baseURL}}/services/{{service_id}}/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "care_template": {
+      "pre_template_name": "service_pre_care_example",
+      "post_template_name": "service_post_care_example"
+    }
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 30000
+}
+
+docs {
+  Set / update pre+post care Meta templates on an **existing** service.
+  Admin write. Env: service_id = service UUID (not name).
+
+  Body only care_template — does not create a service.
+  Blank template name = that side off.
+  Care Meta templates have no variables → body params always [].
+  Response data.care_template nest (or null if cleared).
+}
+
+example {
+  name: Clear care template config
+
+  request: {
+    url: {{baseURL}}/services/{{service_id}}/
+    method: PATCH
+    mode: json
+    headers: {
+      Content-Type: application/json
+    }
+
+    body:json: {
+      {
+        "care_template": null
+      }
+    }
+  }
+
+  response: {
+    headers: {
+      Content-Type: application/json
+    }
+
+    status: {
+      code: 200
+      text: OK
+    }
+
+    body: {
+      type: json
+      content: '''
+        {
+          "detail": "Updated successfully.",
+          "data": {
+            "id": "0199a1b2-c3d4-7000-8000-000000000001",
+            "care_template": null
+          }
+        }
+      '''
+    }
+  }
+}

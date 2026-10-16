@@ -5,11 +5,11 @@ from rest_framework import serializers
 
 from accounts.associates.models import Associate, AssociateCenterAssignment
 from accounts.associates.serializers import (
+    AssociateSourceMixinSerializer,
     BaseAssociateSerializer,
     assignment_roles_representation,
 )
 from accounts.associates.utils.roles import assignment_for_center
-from accounts.utils.helper import dedupe_id_dicts, dedupe_ids
 from accounts.centers.models import Center
 from accounts.centers.serializers import MinimumCenterSerializer, BaseCenterSerializer
 from accounts.centers.utils.db import (
@@ -36,11 +36,13 @@ from accounts.organizations.utils.db import (
 from accounts.users.models import User
 from accounts.users.serializers import BaseUserSerializer
 from accounts.users.utils.constants import Gender
+from accounts.users.utils.helper import calculate_age
+from accounts.utils.constants import UserType
 from accounts.utils.db import get_user_account_type
-from accounts.verifications.models import PhoneVerification
+from accounts.utils.helper import dedupe_id_dicts, dedupe_ids
 from core.utils.fields import PhoneNumberSerializerField
 from core.utils.serializers import BaseModelSerializer, BaseSerializer
-from integrations.metsights.helper import get_or_create_metsights_profile
+from integrations.metsights.utils.profiles import get_or_create_metsights_profile
 from leads.models import Lead
 
 PROFILE_FIELDS = ["first_name", "last_name", "gender", "date_of_birth", "image"]
@@ -64,56 +66,22 @@ def validate_phone_for_customer_create(phone: str) -> None:
 
 
 class CustomerAccountSerializer(BaseModelSerializer):
-    """Serializer for customers to view and update their account details"""
+    """Customer account identity with customer contact email."""
 
-    phone = PhoneNumberSerializerField(source="user.phone", read_only=True)
-    phone_otp = serializers.CharField(write_only=True, required=False)
-    # email = serializers.EmailField(source="user.email", required=False, allow_null=True)
-    email_otp = serializers.CharField(write_only=True, required=False)
+    email = serializers.EmailField(source="customer.contact_email", read_only=True)
+    phone = PhoneNumberSerializerField(read_only=True)
 
     class Meta:
-        model = Customer
+        model = User
         fields = [
-            "phone",
-            "contact_email",
-            "phone_otp",
+            "id",
             "email",
-            "email_otp",
+            "phone",
+            "date_joined",
+            "last_login",
+            "updated_at",
         ]
-
-    def update(self, instance: Customer, validated_data):
-        phone = validated_data.pop("phone", None)
-        phone_otp = validated_data.pop("phone_otp", None)
-
-        contact_email = validated_data.get("contact_email", None)
-        email_otp = validated_data.pop("email_otp", None)
-
-        if phone and not phone_otp:
-            raise serializers.ValidationError(
-                {"phone_otp": "OTP is required for phone validation"}
-            )
-
-        phone_validation = PhoneVerification.objects.filter(
-            phone=phone, expires_at__gte=timezone.localtime(), is_active=True
-        ).first()
-        if not phone_validation:
-            raise serializers.ValidationError(
-                {"phone": "Invalid Phone number provided"}
-            )
-
-        if contact_email and not email_otp:
-            raise serializers.ValidationError({"email_otp": "Invalid OTP provided"})
-
-        # TODO: Validate OTPs for phone and email
-
-        user_data = validated_data.pop("user", {})
-
-        if user_data:
-            user = instance.user
-            for key, value in user_data.items():
-                setattr(user, key, value)
-            user.save()
-        return super().update(instance, validated_data)
+        read_only_fields = fields
 
 
 class BaseCustomerProfileSerializer(BaseModelSerializer):
@@ -172,30 +140,91 @@ class CustomerProfileWithCenterSerializer(BaseCustomerProfileSerializer):
 class CustomerProfileSerializer(BaseModelSerializer):
     """Serializer for customers to view and update profile details"""
 
+    contact_email = serializers.EmailField(source="customer.contact_email", required=False)
+    phone = PhoneNumberSerializerField(source="customer.user.phone", required=False)
+    age = serializers.SerializerMethodField()
+    created_by = BaseUserSerializer(read_only=True)
+
+    home_center = serializers.SerializerMethodField(read_only=True)
+
     class Meta:
         model = CustomerProfile
         fields = [
             "id",
+            "contact_email",
+            "phone",
             "first_name",
             "last_name",
             "gender",
             "date_of_birth",
+            "age",
             "image",
             "is_main",
             "is_onboarding_sent",
             "is_onboarding_completed",
+            "is_active",
             "created_at",
             "updated_at",
+            "created_by",
+            "home_center",
         ]
 
-    def update(self, instance, validated_data):
+    @classmethod
+    def get_age(cls, instance: CustomerProfile):
+        date_of_birth = instance.date_of_birth
+        if date_of_birth is None:
+            return None
+        if date_of_birth > timezone.localdate():
+            return None
+        return calculate_age(date_of_birth)
+
+    def get_home_center(self, instance):
+        assignments = getattr(instance, "primary_center_assignments", None)
+        if not assignments:
+            return None
+        return MinimumCenterSerializer(assignments[0].center, context=self.context).data
+
+    @transaction.atomic
+    def update(self, instance: CustomerProfile, validated_data: dict) -> CustomerProfile:
+        customer_data = validated_data.pop("customer", {}) or {}
+        user_data = customer_data.pop("user", {}) or {}
+        request = self.context.get("request")
+        if "phone" in user_data and (
+                request is None
+                or get_user_account_type(request.user) not in {
+                    UserType.ADMIN,
+                    UserType.ASSOCIATE,
+                }
+        ):
+            raise serializers.ValidationError(
+                {"phone": "Only admins and associates can change the phone number."}
+            )
+
+        user = instance.customer.user
+        phone = user_data.get("phone")
+        if phone and User.objects.filter(phone__iexact=phone).exclude(pk=user.pk).exists():
+            raise serializers.ValidationError(
+                {"phone": "A user with this phone number already exists."}
+            )
+
         profile: CustomerProfile = super().update(instance, validated_data)
 
+        user_update_fields = [*user_data.keys()]
         if profile.is_main:
-            user = profile.customer.user
             for field in PROFILE_FIELDS:
                 setattr(user, field, getattr(profile, field))
-            user.save(update_fields=[*PROFILE_FIELDS, "updated_at"])
+            user_update_fields.extend(PROFILE_FIELDS)
+
+        for field, value in user_data.items():
+            setattr(user, field, value)
+        if user_update_fields:
+            user.save(update_fields=[*user_update_fields, "updated_at"])
+
+        if customer_data:
+            customer = profile.customer
+            for field, value in customer_data.items():
+                setattr(customer, field, value)
+            customer.save(update_fields=[*customer_data.keys(), "updated_at"])
 
         return profile
 
@@ -537,7 +566,7 @@ class CenterCustomerProfileDetailSerializer(BaseModelSerializer):
         source='customer_profile.is_onboarding_sent', required=False
     )
     is_onboarding_completed = serializers.BooleanField(
-        source='customer_profile.is_onboarding_completed', read_only=True
+        source='customer_profile.is_onboarding_completed', required=False
     )
     home_center = serializers.SerializerMethodField(read_only=True)
 
@@ -781,11 +810,14 @@ class CustomerAvailableAssociateSerializer(BaseAssociateSerializer):
         ]
 
 
-class CustomerAssociateSerializer(BaseModelSerializer):
+class CustomerAssociateSerializer(AssociateSourceMixinSerializer, BaseModelSerializer):
     id = serializers.UUIDField(source="associate.user.id", read_only=True)
     email = serializers.EmailField(source="associate.user.email", required=False)
     phone = PhoneNumberSerializerField(
         source="associate.user.phone", required=False, allow_null=True
+    )
+    contact_phone = PhoneNumberSerializerField(
+        source="associate.contact_phone", read_only=True
     )
     first_name = serializers.CharField(
         source="associate.user.first_name", required=False, allow_null=True
@@ -828,6 +860,14 @@ class CustomerAssociateSerializer(BaseModelSerializer):
             "roles",
             "role_ids",
             "created_by",
+            "contact_phone",
+            "title",
+            "description",
+            "tagline",
+            "experience",
+            "qualifications",
+            "professions",
+            "has_verified_badge",
         ]
 
     def get_roles(self, instance):

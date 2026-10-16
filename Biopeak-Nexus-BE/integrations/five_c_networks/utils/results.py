@@ -9,17 +9,17 @@ from programs.composites.utils.db import (
     update_composite_program_results_count,
 )
 from programs.program_services.utils.db import (
+    save_result_request_result,
     update_program_service_document_counts,
     update_program_service_results_count,
     update_result_documents_count,
 )
 from programs.program_services.utils.helper import generate_file_hash
-from programs.services.models import ServiceDocument, ServiceResult
+from programs.services.models import ServiceDocument
 from programs.services.utils.constants import (
     ResultRequestStatus,
     ServiceDocumentCategory,
     ServiceDocumentType,
-    ServiceResultMode,
 )
 
 
@@ -54,18 +54,10 @@ def _process_evo_result_data(
         f"result_request_id={result_request.pk}"
     )
 
-    service_result, _ = ServiceResult.objects.update_or_create(
-        result_request=result_request,
-        document_type=ServiceDocumentType.EVO_360,
-        defaults={
-            "program_service": program_service,
-            "product": result_request.product,
-            "provider_name": result_request.product.provider.name,
-            "product_name": result_request.product.name,
-            "result_mode": ServiceResultMode.FETCH,
-            "data": metadata,
-            "created_by": result_request.created_by,
-        },
+    service_result = save_result_request_result(
+        result_request,
+        ServiceDocumentType.EVO_360,
+        defaults={"data": metadata},
     )
 
     file_name = (

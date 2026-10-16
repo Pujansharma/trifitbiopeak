@@ -202,6 +202,11 @@ class CenterAssociateRolesListView(BaseListCreateAPIView, CenterViewMeta):
     serializer_class = AssociateRoleSerializer
     permission_classes = [IsAdminUser | IsAssociateUser]
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["center"] = self.get_center()
+        return context
+
     def get_queryset(self):
         center = self.get_center()
         user = self.request.user

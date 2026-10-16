@@ -1,9 +1,10 @@
 from django.test import TestCase
 from rest_framework.exceptions import ValidationError
 
-from programs.services.models import Service
+from programs.services.models import Service, ServiceCareTemplate
 from programs.services.serializers import ServiceSerializer
 from programs.services.utils.constants import ServiceCategory
+from programs.services.utils.db import upsert_service_care_template
 
 
 def plain_error(value):
@@ -81,3 +82,36 @@ class ServiceNameUniquenessTests(TestCase):
             partial=True,
         )
         self.assertEqual(serializer.validated_data["name"], "IR Sauna")
+
+
+class ServiceCareTemplateUpsertTests(TestCase):
+    def test_blank_names_delete_row(self):
+        service = create_service()
+        upsert_service_care_template(
+            service,
+            {
+                "pre_template_name": "pre_tpl",
+                "post_template_name": "post_tpl",
+            },
+        )
+        self.assertTrue(
+            ServiceCareTemplate.objects.filter(service_id=service.pk).exists()
+        )
+        upsert_service_care_template(
+            service,
+            {"pre_template_name": "", "post_template_name": "  "},
+        )
+        self.assertFalse(
+            ServiceCareTemplate.objects.filter(service_id=service.pk).exists()
+        )
+
+    def test_null_deletes_row(self):
+        service = create_service()
+        upsert_service_care_template(
+            service,
+            {"pre_template_name": "pre_tpl", "post_template_name": ""},
+        )
+        upsert_service_care_template(service, None)
+        self.assertFalse(
+            ServiceCareTemplate.objects.filter(service_id=service.pk).exists()
+        )

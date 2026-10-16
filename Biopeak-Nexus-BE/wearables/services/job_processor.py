@@ -1,10 +1,11 @@
 from datetime import timedelta
 
 from django.conf import settings
+from django.db import DatabaseError
 from django.db.models import F, Q
 from django.utils import timezone
 
-from wearables.models import HealthProcessingJob, WearableConnection, WearableConnectionEvent
+from wearables.models import HealthProcessingJob, RookHealthDocument, WearableConnection, WearableConnectionEvent
 from wearables.services.analytics import refresh_profile_snapshots
 from wearables.services.client import (
     RookClient,
@@ -13,6 +14,7 @@ from wearables.services.client import (
 )
 from wearables.services.connections import refresh_authorizing_connections
 from wearables.services.lifecycle import can_ingest_source
+from wearables.services.job_queue import enqueue_health_job
 from wearables.services.ingestion import (
     ingest_rook_document, normalize_health_document, remap_member_local_days,
 )
@@ -21,6 +23,7 @@ from wearables.utils.constants import (
     AuthorizationStatus,
     ConnectionMethod,
     ConnectionStatus,
+    DocumentStatus,
     HealthJobStatus,
     HealthJobType,
     HistoricalImportStatus,
@@ -108,6 +111,7 @@ def process_recovery_pull(job: HealthProcessingJob) -> dict:
     already_processed_count = 0
     error_count = 0
     failed_documents = 0
+    unmapped_documents = 0
     # API-based ROOK Pre-Existing Data is limited to seven days. Native SDK
     # backfill (up to ~29 days) happens on-device, not through this endpoint.
     from wearables.services.analytics import member_today
@@ -159,8 +163,15 @@ def process_recovery_pull(job: HealthProcessingJob) -> dict:
                     )
                     if result.get("queued"):
                         outcome = normalize_health_document(result["documentId"])
-                        if outcome.get("skipped") or outcome.get("alreadyProcessed") or not outcome.get("v1MetricCount", 0):
+                        if outcome.get("skipped"):
                             failed_documents += 1
+                        elif outcome.get("alreadyProcessed"):
+                            already_processed_count += 1
+                        elif not outcome.get("v1MetricCount", 0):
+                            # EC-025/EC-074: an otherwise well-formed ROOK
+                            # document without V1 measurements is not a local
+                            # normalization failure. Retain it for drift audit.
+                            unmapped_documents += 1
                         else:
                             imported_count += 1
                     elif result.get("reason") in ("exact_replay", "same_version_conflict"):
@@ -239,6 +250,7 @@ def process_recovery_pull(job: HealthProcessingJob) -> dict:
         "partial": bool(error_count or failed_documents),
         "errorCount": error_count,
         "failedDocumentCount": failed_documents,
+        "unmappedDocumentCount": unmapped_documents,
         "alreadyProcessedCount": already_processed_count,
     }
 
@@ -351,6 +363,9 @@ def process_pending_health_jobs(*, limit: int = 50) -> list[dict]:
         RookServiceError,
         RookConfigurationError,
         ValueError,
+        TypeError,
+        DatabaseError,
+        RookHealthDocument.DoesNotExist,
         WearableConnection.DoesNotExist,
     )
     for job_id in job_ids:
@@ -406,3 +421,44 @@ def connections_requiring_recovery_pull():
             import_started_at__lt=timezone.now() - timedelta(hours=4))
     )
 
+
+
+def enqueue_orphaned_normalization_jobs(*, grace_minutes: int = 10, limit: int = 100) -> dict:
+    """Recover queued documents with no runnable normalization work item.
+
+    A terminated worker or a pre-upgrade on_commit failure can leave accepted
+    webhook data without its processing job. Never retry a document whose
+    normalization already exhausted its bounded attempt budget; alert ops.
+    """
+    cutoff = timezone.now() - timedelta(minutes=max(1, grace_minutes))
+    unprocessed = RookHealthDocument.objects.filter(
+        status=DocumentStatus.QUEUED,
+        received_at__lt=cutoff,
+    ).order_by("received_at")[:max(1, limit)]
+    queued_count = 0
+    exhausted_count = 0
+    for document in unprocessed.iterator():
+        normalize_jobs = HealthProcessingJob.objects.filter(
+            document=document, job_type=HealthJobType.NORMALIZE_DOCUMENT,
+        )
+        if normalize_jobs.filter(
+            Q(status__in=(HealthJobStatus.PENDING, HealthJobStatus.RUNNING))
+            | Q(status=HealthJobStatus.FAILED,
+                attempt_count__lt=MAXIMUM_JOB_ATTEMPTS)
+        ).exists():
+            continue
+        if normalize_jobs.filter(
+            status=HealthJobStatus.FAILED,
+            attempt_count__gte=MAXIMUM_JOB_ATTEMPTS,
+        ).exists():
+            exhausted_count += 1
+            continue
+        enqueue_health_job(
+            job_type=HealthJobType.NORMALIZE_DOCUMENT,
+            idempotency_key=(f"orphan-normalize:{document.pk}:"
+                             f"{document.document_version}:{document.content_hash[:16]}"),
+            customer_profile=document.customer_profile,
+            document=document,
+        )
+        queued_count += 1
+    return {"queued": queued_count, "requiresOperatorReview": exhausted_count}

@@ -1,0 +1,133 @@
+meta {
+  name: GET Therapy Program Services
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseURL}}/programs/therapy-programs/{{therapy_program_id}}/services/?page=1&limit=10
+  body: none
+  auth: inherit
+}
+
+params:query {
+  page: 1
+  limit: 10
+}
+
+headers {
+  X-Center-ID: {{center_id}}
+}
+
+script:post-response {
+  test('status 200', () => expect(res.getStatus()).to.equal(200));
+  const json = res.getBody();
+  test('success true', () => expect(json.success).to.eql(true));
+  test('paginated envelope', () => {
+      expect(json).to.have.property('count');
+      expect(json).to.have.property('data');
+  });
+  const rows = json.data || [];
+  if (rows.length > 0) {
+      test('row has active_appointment key', () => {
+          expect(rows[0]).to.have.property('active_appointment');
+      });
+  }
+  const withAppointment = rows.find((row) => row.active_appointment);
+  if (withAppointment) {
+      test('active_appointment nests center, associates, care_team, room, equipment', () => {
+          const appointment = withAppointment.active_appointment;
+          expect(appointment).to.include.all.keys(
+              'id', 'code', 'status', 'start', 'end',
+              'center', 'associates', 'care_team', 'room', 'equipment'
+          );
+          expect(appointment.associates).to.be.an('array');
+      });
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}
+
+docs {
+  GET /programs/therapy-programs/{{therapy_program_id}}/services/
+
+  Paginated list of the program-service lines in one therapy program, newest first.
+
+  Auth: Admin or Associate (full access). Customer (bearer token): read-only, and
+  only lines from their own profiles.
+
+  Headers:
+  - X-Center-ID (optional) — when set, can_redeem is true only if the service is
+    active at that center; omitted → active at any center.
+
+  Query params:
+  - page (default 1)
+  - limit (default 10)
+
+  Response envelope:
+  { success, detail, count, next, previous, data: [...] }
+
+  Each data[] row:
+  - id — ProgramService.pk
+  - program — nested program summary (uid, profile, sessions_*, expires_at, …)
+  - service — nested service (name, category, centers)
+  - sessions_count, sessions_used, sessions_cancelled, redeem_code — from the
+    therapy service line
+  - can_redeem — see X-Center-ID above
+  - created_date, created_at, is_active, cancellation_reason, cancelled_by,
+    cancelled_at, cancelled_date
+  - active_appointment — the open appointment linked to this line, or null
+
+  active_appointment:
+  - Only open statuses: confirmed | checked_in | in_progress. completed /
+    cancelled / no_show → null. At most one per line (DB constraint).
+  - id, code, status, start, end
+  - center — { id, code, name }
+  - associates — [{ id, name, role: { id, name } }], every associate on the
+    appointment (doctor and specialty alike); [] when none
+  - care_team — { id, name } or null
+  - room — { id, name } or null
+  - equipment — { id, name } or null
+
+  Example data[] row (program/service trimmed):
+  {
+    "id": "01a11ad8-ceb3-73de-875d-f703e17527f0",
+    "program": { "id": "01a11ad8-ceaf-7077-b06e-f2f612875a05", "uid": "PID0769", "...": "..." },
+    "service": { "id": "01a110d7-428b-7105-b900-8e8f40995dc0", "name": "HBOT", "...": "..." },
+    "sessions_count": 2,
+    "sessions_used": 1,
+    "sessions_cancelled": 0,
+    "redeem_code": "M59R9SSIOH",
+    "created_date": "2026-10-08",
+    "created_at": "2026-10-08T14:59:38.740178+05:30",
+    "is_active": true,
+    "can_redeem": true,
+    "cancellation_reason": null,
+    "cancelled_by": null,
+    "cancelled_at": null,
+    "cancelled_date": null,
+    "active_appointment": {
+      "id": "01a13eb3-a23c-730c-9b7f-601af6c864c3",
+      "code": "APT-CT-0005-00015",
+      "status": "Confirmed",
+      "start": "2026-10-20T15:30:00+05:30",
+      "end": "2026-10-20T17:00:00+05:30",
+      "center": { "id": "019e1543-e779-7356-9426-170a4f829615", "code": "CT-0005", "name": "Indiranagar" },
+      "associates": [
+        {
+          "id": "01a08f05-393b-771b-a1cb-39983d707a52",
+          "name": "Jane Doe",
+          "role": { "id": "019e2a29-b7e4-7560-9bf6-0b3e176f12a4", "name": "Technical Assistant" }
+        }
+      ],
+      "care_team": null,
+      "room": { "id": "01a11ac4-cd3c-709e-b446-cbaded3f4b9c", "name": "HBOT Room" },
+      "equipment": null
+    }
+  }
+
+  Env: therapy_program_id, center_id. Auth: Admin/Associate login first.
+}

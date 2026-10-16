@@ -4,14 +4,14 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.contrib.auth import views as auth_views
 from django.urls import path, include
+from django.urls import path, include
 from wearables.oauth_callback import rook_oauth_callback
-
 admin.site.site_header = "Biopeak Nexus Admin Dashboard"
 admin.site.site_title = "Biopeak Nexus Dashboard"
 admin.site.index_title = "Biopeak Nexus Dashboard"
 
 urlpatterns = [
-    # Public browser-to-React-Native return bridge; ROOK may append identifiers.
+       # Public browser-to-React-Native return bridge; ROOK may append identifiers.
     path("rook/return", rook_oauth_callback, name="rook-oauth-mobile-return"),
     path("rook/return/", rook_oauth_callback, name="rook-oauth-mobile-return-slash"),
     path(

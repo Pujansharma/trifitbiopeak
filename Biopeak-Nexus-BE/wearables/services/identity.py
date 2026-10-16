@@ -54,11 +54,14 @@ def get_or_create_rook_identity(
         if "timezone_name" in update_fields:
             from wearables.services.job_queue import enqueue_health_job
             from wearables.utils.constants import HealthJobType
-            transaction.on_commit(lambda: enqueue_health_job(
+            # Persist a durable remap job in the same transaction as the
+            # member-timezone change. Never rely on an on_commit callback that
+            # could fail after the new timezone has already been committed.
+            enqueue_health_job(
                 job_type=HealthJobType.REMAP_TIMEZONE,
                 idempotency_key=f"timezone:{customer_profile.pk}:{identity.timezone_name}:{identity.updated_at.isoformat()}",
                 customer_profile=customer_profile,
-            ))
+            )
     return identity
 
 

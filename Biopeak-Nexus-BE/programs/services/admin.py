@@ -1,6 +1,10 @@
 from django.contrib import admin
 
-from programs.services.models import Service, CenterServiceAssignment
+from programs.services.models import (
+    CenterServiceAssignment,
+    Service,
+    ServiceCareTemplate,
+)
 
 
 class CenterServiceAssignmentInline(admin.TabularInline):
@@ -12,6 +16,21 @@ class CenterServiceAssignmentInline(admin.TabularInline):
     can_delete = True
 
 
+class ServiceCareTemplateInline(admin.StackedInline):
+    model = ServiceCareTemplate
+    extra = 0
+    max_num = 1
+    readonly_fields = ["id", "created_at", "updated_at"]
+    fields = [
+        "pre_template_name",
+        "post_template_name",
+        "is_active",
+        "created_at",
+        "updated_at",
+    ]
+    can_delete = True
+
+
 @admin.register(Service)
 class ServiceAdmin(admin.ModelAdmin):
     readonly_fields = ["id", "created_at", "updated_at"]
@@ -19,7 +38,7 @@ class ServiceAdmin(admin.ModelAdmin):
     list_filter = ["is_active"]
     search_fields = ["id", "name"]
     raw_id_fields = ["created_by"]
-    inlines = [CenterServiceAssignmentInline]
+    inlines = [ServiceCareTemplateInline, CenterServiceAssignmentInline]
     list_per_page = 25
 
 

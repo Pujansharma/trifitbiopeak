@@ -1,5 +1,5 @@
 from core.utils.log import logger
-from integrations.five_c_networks.sdk import (
+from integrations.five_c_networks.utils.sdk import (
     get_access_token,
     get_pdf_report,
     get_pdf_status,

@@ -1,10 +1,16 @@
+from django.db.models import Prefetch, QuerySet
+from rest_framework.exceptions import ValidationError
 from rest_framework.mixins import UpdateModelMixin
+from rest_framework.request import Request
 from rest_framework.response import Response
 
 from accounts.centers.models import Center
-from accounts.utils.permissions import IsAdminUser, IsAssociateUser
+from accounts.utils.constants import UserType
+from accounts.utils.db import get_user_account_type
+from accounts.utils.permissions import IsAdminUser, IsAssociateUser, IsCustomerUser
 from core.utils.exceptions import get_object_or_404
 from core.utils.helper import response_format
+from core.utils.permissions import ReadOnly
 from core.utils.views.main import (
     BaseCreateAPIView,
     BaseDestroyAPIView,
@@ -13,16 +19,21 @@ from core.utils.views.main import (
     BaseListCreateAPIView,
     BaseRetrieveAPIView,
     BaseRetrieveDestroyAPIView,
+    BaseRetrieveUpdateAPIView,
 )
+from integrations.confirmation import OrderConfirmationSerializer
 from products.models import Product, Provider
 from products.serializers import (
     AssessmentServiceProviderSerializer,
     BaseProductSerializer,
 )
+from products.utils.constants import ProviderCallbackFunction
 from programs.models import ProgramService
 from programs.program_services.serializers import (
     AssessmentProgramServiceSerializer,
     AssessmentServiceDocumentSerializer,
+    AssessmentServiceResultRequestHistorySerializer,
+    AssessmentServiceReportRequestSerializer,
     AssessmentServiceResultRequestSerializer,
     AssessmentServiceResultSerializer,
     ProgramServiceCancelSerializer,
@@ -34,8 +45,16 @@ from programs.program_services.utils.db import (
     delete_service_document,
     delete_service_result,
 )
-from programs.services.models import ResultRequest, ServiceDocument, ServiceResult
+from programs.services.models import (
+    CenterServiceAssignment,
+    ResultRequest,
+    ResultRequestFile,
+    ServiceDocument,
+    ServiceResult,
+)
+from programs.services.serializers import ResultRequestFileSerializer
 from programs.services.utils.constants import (
+    RequestResultType,
     ServiceCategory,
     get_module_category_document_types, ResultRequestStatus,
 )
@@ -180,20 +199,36 @@ class AssessmentProgramServiceProducts(
 
 class TherapyProgramServiceDetailView(BaseRetrieveAPIView):
     serializer_class = TherapyProgramServiceSerializer
-    permission_classes = [IsAdminUser | IsAssociateUser]
+    permission_classes = [IsAdminUser | IsAssociateUser | (IsCustomerUser & ReadOnly)]
 
     def get_queryset(self):
-        program_services = (
+        filter_kwargs = {}
+        account_type = get_user_account_type(self.request.user)
+        if account_type == UserType.CUSTOMER:
+            filter_kwargs["program__customer_profile__customer"] = self.request.user.customer
+        return (
             ProgramService.objects.filter(
                 service__service_category=ServiceCategory.THERAPY,
+                **filter_kwargs,
             ).select_related(
                 "service",
                 "therapy_service",
                 "created_by",
                 "cancelled_by",
+                "program__customer_profile__customer__user",
+                "program__therapy_program",
+            )
+            .prefetch_related(
+                Prefetch(
+                    "service__center_assignments",
+                    queryset=CenterServiceAssignment.objects.filter(
+                        is_active=True,
+                        center__redeemable_programs__program_services__pk=self.kwargs["pk"],
+                    ).select_related("center"),
+                    to_attr="active_center_assignments",
+                ),
             )
         )
-        return program_services
 
 
 class BaseProgramServiceCancelView(
@@ -249,10 +284,19 @@ class AssessmentServiceResultRequestView(
     serializer_class = AssessmentServiceResultRequestSerializer
     permission_classes = [IsAdminUser | IsAssociateUser]
 
-    def get_queryset(self):
+    def get_serializer_class(self) -> type:
+        if self.request.method == "POST":
+            return AssessmentServiceResultRequestSerializer
+        return AssessmentServiceResultRequestHistorySerializer
+
+    def get_queryset(self) -> QuerySet[ResultRequest]:
         filter_kwargs = {}
         program_service = self.get_assessment_program_service()
         status = self.request.query_params.get('status', None)
+        mode = self.request.query_params.get("mode", None)
+
+        if mode and mode in RequestResultType:
+            filter_kwargs["request_type"] = mode
 
         if status and status in ResultRequestStatus:
             filter_kwargs['status'] = status
@@ -265,7 +309,9 @@ class AssessmentServiceResultRequestView(
                 "product__provider",
                 "created_by",
             )
-            .prefetch_related("results")
+            .prefetch_related("results", Prefetch(
+                "files", queryset=ResultRequestFile.objects.order_by("-created_at")[:3], to_attr="preview_files",
+            ))
         )
 
     def perform_create(self, serializer):
@@ -275,8 +321,23 @@ class AssessmentServiceResultRequestView(
         )
 
 
+class AssessmentServiceReportRequestView(
+    BaseCreateAPIView,
+    AssessmentProgramServiceViewMeta,
+):
+    serializer_class = AssessmentServiceReportRequestSerializer
+    permission_classes = [IsAdminUser | IsAssociateUser]
+    create_success_message = "Report request accepted."
+
+    def perform_create(self, serializer):
+        serializer.save(
+            program_service=self.get_active_assessment_program_service(),
+            created_by=self.request.user,
+        )
+
+
 class ResultRequestViewMeta(BaseGenericAPIView):
-    def get_result_request_queryset(self):
+    def get_queryset(self) -> QuerySet[ResultRequest]:
         return (
             ResultRequest.objects.filter(
                 program_service__service__service_category=(
@@ -289,26 +350,57 @@ class ResultRequestViewMeta(BaseGenericAPIView):
                 "product__provider__api",
                 "created_by",
             )
-            .prefetch_related("results")
+            .prefetch_related("results", Prefetch(
+                "files", queryset=ResultRequestFile.objects.order_by("-created_at")[:3], to_attr="preview_files",
+            ))
         )
 
-    def get_result_request(self):
+    def get_result_request(self) -> ResultRequest:
         return get_object_or_404(
-            self.get_result_request_queryset(),
+            ResultRequestViewMeta.get_queryset(self),
             "Result request not found.",
             pk=self.kwargs["pk"],
         )
 
 
 class ResultRequestDetailView(
-    BaseRetrieveAPIView,
+    BaseRetrieveUpdateAPIView,
     ResultRequestViewMeta,
 ):
-    serializer_class = AssessmentServiceResultRequestSerializer
+    serializer_class = AssessmentServiceResultRequestHistorySerializer
     permission_classes = [IsAdminUser | IsAssociateUser]
 
-    def get_queryset(self):
-        return self.get_result_request_queryset()
+
+class ResultRequestConfirmOrderView(BaseCreateAPIView, ResultRequestViewMeta):
+    serializer_class = OrderConfirmationSerializer
+    permission_classes = [IsAdminUser | IsAssociateUser]
+    create_success_message = "Order confirmation accepted."
+
+    def post(self, request: Request, *args, **kwargs) -> Response:
+        result_request = self.get_result_request()
+        if result_request.request_type != RequestResultType.ORDER or result_request.status == ResultRequestStatus.CANCELLED:
+            raise ValidationError("Only non-cancelled order requests can be confirmed.")
+        if result_request.is_submitted or result_request.status in [ResultRequestStatus.QUEUED, ResultRequestStatus.RUNNING]:
+            return self.send_response(self.get_create_success_message(), status=202)
+        if (
+            result_request.status == ResultRequestStatus.FAILED
+            and result_request.product.provider.callback != ProviderCallbackFunction.METFLUX
+        ):
+            raise ValidationError("A failed booking cannot be submitted again. Create another order.")
+        if result_request.status not in [ResultRequestStatus.PENDING, ResultRequestStatus.FAILED]:
+            raise ValidationError("This order cannot be confirmed.")
+        serializer = self.get_serializer(result_request, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return self.send_response(self.get_create_success_message(), status=202)
+
+
+class ResultRequestFilesView(BaseListAPIView, ResultRequestViewMeta):
+    serializer_class = ResultRequestFileSerializer
+    permission_classes = [IsAdminUser | IsAssociateUser]
+
+    def get_queryset(self) -> QuerySet[ResultRequestFile]:
+        return ResultRequestFile.objects.filter(result_request=self.get_result_request()).order_by("-created_at")
 
 
 class ResultRequestRefetchView(

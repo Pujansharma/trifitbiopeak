@@ -45,14 +45,30 @@ urlpatterns = [
         views.ConsultationProgramServiceCancelView.as_view(),
     ),
 
-    # Fetch requests
+    # Order requests: Create a pending order, then confirm to submit to the provider
+    path(
+        "assessment-services/<uuid:pk>/request-report/",
+        views.AssessmentServiceReportRequestView.as_view(),
+    ),
+
+    # Fetch existing provider reports, or list fetch and order requests
     path(
         "assessment-services/<uuid:pk>/result-requests/",
         views.AssessmentServiceResultRequestView.as_view(),
     ),
+
+    # Individual data about the result requests
     path(
         "result-requests/<uuid:pk>/",
         views.ResultRequestDetailView.as_view(),
+    ),
+    path(
+        "result-requests/<uuid:pk>/files/",
+        views.ResultRequestFilesView.as_view(),
+    ),
+    path(
+        "result-requests/<uuid:pk>/confirm-order/",
+        views.ResultRequestConfirmOrderView.as_view(),
     ),
     path(
         "result-requests/<uuid:pk>/refetch/",

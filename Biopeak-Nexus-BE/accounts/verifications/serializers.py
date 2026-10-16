@@ -6,7 +6,6 @@ from core.utils.authentication import perform_login_for_user
 from core.utils.fields import PhoneNumberSerializerField
 from core.utils.serializers import BaseSerializer
 from .models import PhoneVerification
-from .utils import code_valid
 from .utils.helper import verify_otp, generate_otp_for_phone
 
 User = get_user_model()
@@ -50,10 +49,11 @@ class LoginOTPSerializer(BaseSerializer):
         otp = attrs.get("otp")
         instance = PhoneVerification.objects.filter(
             phone__iexact=phone,
-            expires_at__gte=timezone.localtime(),
             purpose=PhoneVerification.PURPOSE_LOGIN,
         ).first()
-        if not instance:
+        if not instance or (instance.is_system and not instance.is_active):
+            raise serializers.ValidationError({"otp": ["OTP is expired or invalid."]})
+        if not instance.is_system and instance.expires_at < timezone.localtime():
             raise serializers.ValidationError({"otp": ["OTP is expired or invalid."]})
         is_valid = verify_otp(instance, otp)
         user = User.objects.filter(phone=instance.phone, is_active=True).first()
@@ -96,30 +96,17 @@ class VerifyOTPSerializer(BaseSerializer):
         instance = PhoneVerification.objects.filter(
             phone__iexact=phone,
             purpose=purpose,
-            expires_at__gte=timezone.localtime(),
             is_active=True,
         ).first()
 
         if not instance:
             raise serializers.ValidationError({"otp": ["OTP is expired or invalid."]})
+        if not instance.is_system and instance.expires_at < timezone.localtime():
+            raise serializers.ValidationError({"otp": ["OTP is expired or invalid."]})
 
-        is_valid = code_valid(
-            secret=instance.secret, counter=instance.counter, code=otp
-        )
+        is_valid = verify_otp(instance, otp)
         if not is_valid:
             raise serializers.ValidationError({"otp": ["OTP is incorrect."]})
-
-        if purpose == PhoneVerification.PURPOSE_REGISTER:
-            # Mark as verified but keep alive for CustomerRegistrationSerializer
-            PhoneVerification.objects.filter(pk=instance.pk).update(
-                verified_at=timezone.now(),
-                secret=None,
-                counter=0,
-                retry_count=0,
-            )
-        else:
-            # For non-registration purposes, deactivate fully
-            verify_otp(instance, otp)
 
         attrs["instance"] = instance
         return attrs

@@ -8,8 +8,10 @@ from programs.services.utils.constants import (
     ServiceCategory,
     ServiceDocumentCategory,
     ServiceDocumentType,
+    RequestResultType,
     ResultRequestStatus,
-    ServiceResultMode,
+    ResultType,
+    ServiceReportComponent,
 )
 
 
@@ -36,6 +38,27 @@ class Service(BaseUUIDModel):
                 name="uniq_service_name",
             )
         ]
+
+    def __str__(self):
+        return f"{self.pk}"
+
+
+class ServiceCareTemplate(BaseUUIDModel):
+    """
+    Optional per-service Meta WhatsApp care templates (keyed by service id).
+    Pre: after appointment confirmed WhatsApp settles. Post: on completed.
+    """
+
+    service = models.OneToOneField(
+        Service,
+        on_delete=models.CASCADE,
+        related_name="care_template",
+    )
+    pre_template_name = models.CharField(max_length=128, blank=True, default="")
+    post_template_name = models.CharField(max_length=128, blank=True, default="")
+
+    class Meta:
+        ordering = ["-created_at"]
 
     def __str__(self):
         return f"{self.pk}"
@@ -158,6 +181,12 @@ class ResultRequest(BaseUUIDModel):
     )
     data = models.JSONField(default=dict, blank=True)
     profile_data = models.JSONField(default=dict, blank=True)
+    request_type = models.CharField(
+        choices=RequestResultType,
+        default=RequestResultType.FETCH,
+        editable=False,
+        db_index=True,
+    )
     status = models.CharField(
         choices=ResultRequestStatus,
         default=ResultRequestStatus.QUEUED,
@@ -168,6 +197,8 @@ class ResultRequest(BaseUUIDModel):
     failure_detail = models.TextField(default="", blank=True, editable=False)
     started_at = models.DateTimeField(null=True, blank=True, editable=False)
     completed_at = models.DateTimeField(null=True, blank=True, editable=False)
+    is_submitted = models.BooleanField(default=False, editable=False)
+    consent_file = models.FileField(upload_to="booking-consents/", null=True, blank=True)
     created_by = models.ForeignKey(
         "users.User",
         on_delete=models.SET_NULL,
@@ -181,6 +212,28 @@ class ResultRequest(BaseUUIDModel):
 
     def __str__(self):
         return f"{self.pk}"
+
+
+class ResultRequestFile(BaseUUIDModel):
+    result_request = models.ForeignKey(
+        ResultRequest, on_delete=models.CASCADE, related_name="files",
+    )
+    field_name = models.CharField(max_length=50)
+    file = models.FileField(upload_to="result-request-files/")
+    filename = models.CharField(max_length=255, editable=False)
+    content_type = models.CharField(max_length=127, editable=False)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["result_request", "field_name"],
+                name="unique_result_request_file_field",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.result_request.pk}: {self.field_name}"
 
 
 class ServiceResult(BaseUUIDModel):
@@ -212,7 +265,7 @@ class ServiceResult(BaseUUIDModel):
     )
 
     result_mode = models.CharField(
-        choices=ServiceResultMode, default=ServiceResultMode.UPLOAD, editable=False
+        choices=ResultType, default=ResultType.UPLOAD, editable=False
     )
 
     document_type = models.CharField(
@@ -255,6 +308,9 @@ class ServiceDocument(BaseUUIDModel):
     file_hash = models.TextField(editable=False)
 
     document_category = models.CharField(choices=ServiceDocumentCategory)
+    report_component = models.CharField(
+        max_length=32, choices=ServiceReportComponent, null=True, blank=True, default=None,
+    )
 
     class Meta:
         ordering = ["-created_at"]

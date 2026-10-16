@@ -2,6 +2,8 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
 
+from accounts.centers.models import Center
+from accounts.centers.serializers import MinimumCenterSerializer
 from accounts.users.serializers import BaseUserSerializer
 from core.utils.serializers import BaseModelSerializer
 from programs.models import TherapyProgramService, Program
@@ -11,11 +13,30 @@ from programs.services.serializers import (
     BaseServiceSerializerMeta,
 )
 from programs.services.utils.constants import ServiceCategory
+from appointments.utils.redemption import (
+    get_open_appointment_for_program_service,
+    has_remaining_therapy_sessions,
+    therapy_sessions_remaining,
+    try_complete_open_appointment_for_single_redeem,
+)
 from programs.services.utils.db import (
     update_service_center_count,
     redeem_program_service,
 )
 from programs.utils.db import cancel_program_service
+
+
+class TherapyServiceCenterSerializer(MinimumCenterSerializer):
+    is_available = serializers.BooleanField(read_only=True, default=False)
+
+    class Meta:
+        model = Center
+        fields = [
+            "id",
+            "code",
+            "name",
+            "is_available",
+        ]
 
 
 class TherapyServiceSerializer(BaseServiceSerializerMeta, BaseModelSerializer):
@@ -46,6 +67,13 @@ class TherapyServiceSerializer(BaseServiceSerializerMeta, BaseModelSerializer):
             "created_by",
         ]
         read_only_fields = ["service_category"]
+
+    def get_centers(self, instance: Service):
+        assignments = instance.center_assignments.all()[:3]
+        centers = [assignment.center for assignment in assignments]
+        return TherapyServiceCenterSerializer(
+            centers, many=True, context=self.context
+        ).data
 
     def create(self, validated_data):
         add_centers = validated_data.pop("add_centers", [])
@@ -179,19 +207,46 @@ class TherapyServiceRedeemSerializer(BaseModelSerializer):
                 "This service is not available at the given center."
             )
 
-        remaining = (
-                therapy_program_service.sessions_count
-                - therapy_program_service.sessions_used
-        )
-        if remaining <= 0:
+        if not has_remaining_therapy_sessions(therapy_program_service):
             raise serializers.ValidationError("No sessions remaining for this service.")
 
-        quantity_map = {self.SINGLE: 1, self.ALL: remaining}
+        if redemption_type == self.ALL:
+            if get_open_appointment_for_program_service(program_service.pk) is not None:
+                raise serializers.ValidationError(
+                    "An open appointment exists for this service. "
+                    "Complete or cancel it before redeeming all sessions."
+                )
+
+        remaining = therapy_sessions_remaining(therapy_program_service)
+        if remaining is None:
+            if redemption_type == self.ALL:
+                raise serializers.ValidationError(
+                    "Cannot redeem all sessions for an unlimited service."
+                )
+            quantity = 1
+        else:
+            quantity_map = {self.SINGLE: 1, self.ALL: remaining}
+            quantity = quantity_map[redemption_type]
+
+        if redemption_type == self.SINGLE:
+            outcome, _appointment = try_complete_open_appointment_for_single_redeem(
+                program_service.pk,
+                redeemed_by,
+            )
+            if outcome == "completed":
+                therapy_program_service.refresh_from_db(fields=["sessions_used"])
+                return therapy_program_service
+            if outcome == "failed":
+                raise serializers.ValidationError(
+                    "The open appointment could not be completed. "
+                    "It may have been cancelled."
+                )
+
         redeem_program_service(
             program_service.pk,
             center_id,
             redeemed_by,
-            quantity_map[redemption_type],
+            quantity,
             redeemed_date,
         )
 
