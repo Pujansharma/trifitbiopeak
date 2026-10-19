@@ -4,6 +4,9 @@ from django.utils import timezone
 
 from wearables.models import RookMemberIdentity, WearableConnection, RookWebhookReceipt, WearableConnectionEvent
 from wearables.services.connections import record_connection_event
+from wearables.services import connections as connection_service
+from wearables.services.ingestion import json_digest, receipt_payload
+from wearables.services.analytics import invalidate_health_dashboard
 from wearables.services.job_queue import enqueue_health_job
 from wearables.services.lifecycle import valid_transition
 from wearables.services.provenance import canonical_source
@@ -180,11 +183,11 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
     data_source = notification_data_source(payload)
     if not rook_user_id or not data_source:
         return {"accepted": True, "skipped": True, "reason": "missing_identity"}
-    identity = RookMemberIdentity.objects.select_for_update().filter(rook_user_id=rook_user_id).first()
+    identity = RookMemberIdentity.objects.filter(rook_user_id=rook_user_id).first()
     if identity is None:
         return {"accepted": True, "skipped": True, "reason": "unknown_user"}
     connection = (
-        WearableConnection.objects.select_for_update()
+        WearableConnection.objects
         .filter(
             customer_profile=identity.customer_profile,
             data_source=data_source,
@@ -195,7 +198,6 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
         return {"accepted": True, "skipped": True, "reason": "unknown_connection"}
     # Audit webhook notifications idempotently, independently of ROOK data
     # document receipts. A provider retry must not repeat connection events.
-    from wearables.services.ingestion import json_digest, receipt_payload
     receipt, created = RookWebhookReceipt.objects.get_or_create(
         receipt_key=json_digest(["notification", payload]),
         defaults={
@@ -210,6 +212,7 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
     if not created:
         return {"accepted": True, "duplicate": True, "connectionId": str(connection.pk)}
     previous_status = connection.status
+    previous_authorization = connection.authorization_status
     text = notification_text(payload)
     event_datetime = notification_action_datetime(payload)
     if stale_rook_notification(
@@ -234,8 +237,7 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
         if pending_state and pending_state.previous_status in {
             ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED,
         }:
-            from wearables.services.connections import authorization_confirmed
-            authorization_confirmed(connection, was_reconnect=True)
+            connection_service.authorization_confirmed(connection, was_reconnect=True)
             resumed = True
     if not resumed:
         apply_notification_state(connection, text)
@@ -249,8 +251,26 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
     elif connection.last_error_code != "provider_account_closed":
         connection.last_error_code = ""
         connection.last_error_detail = ""
-    connection.save()
-    from wearables.services.analytics import invalidate_health_dashboard
+    updates = {
+        "status": connection.status,
+        "authorization_status": connection.authorization_status,
+        "permission_status": connection.permission_status,
+        "import_status": connection.import_status,
+        "connected_at": connection.connected_at,
+        "disconnected_at": connection.disconnected_at,
+        "import_started_at": connection.import_started_at,
+        "last_webhook_received_at": connection.last_webhook_received_at,
+        "last_error_code": connection.last_error_code,
+        "last_error_detail": connection.last_error_detail,
+        "updated_at": timezone.now(),
+    }
+    changed = WearableConnection.objects.filter(
+        pk=connection.pk,
+        status=(connection.status if resumed else previous_status),
+        authorization_status=(connection.authorization_status if resumed else previous_authorization),
+    ).update(**updates)
+    if not changed:
+        return {"accepted": True, "skipped": True, "reason": "concurrent_state_change"}
     invalidate_health_dashboard(connection.customer_profile)
     record_connection_event(
         connection,

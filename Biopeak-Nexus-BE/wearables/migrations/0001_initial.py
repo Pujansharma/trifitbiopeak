@@ -5,12 +5,23 @@ from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import migrations, models
 from django.utils.translation import gettext_lazy as _
-from wearables.utils.constants import (
-    AuthorizationStatus, ConfidenceLevel, ConnectionMethod, ConnectionStatus,
-    ConsentStatus, DocumentStatus, HealthDomain, HealthJobStatus, HealthJobType,
-    HistoricalImportStatus, PermissionStatus, PreferredUnits, WearableSource,
-    ALGORITHM_VERSION,
-)
+# Frozen migration snapshot: never import live application TextChoices or
+# algorithm defaults. Future changes to runtime enums must not change the
+# meaning of an already-applied database migration.
+FROZEN_WEARABLESOURCE_CHOICES = [('Apple Health', 'Apple Health'), ('Health Connect', 'Health Connect'), ('Samsung Health', 'Samsung Health'), ('Garmin', 'Garmin'), ('Fitbit', 'Fitbit'), ('Oura', 'Oura'), ('Polar', 'Polar'), ('Withings', 'Withings'), ('Whoop', 'Whoop'), ('Dexcom', 'Dexcom'), ('Strava', 'Strava')]
+FROZEN_CONNECTIONMETHOD_CHOICES = [('api', 'API authorization'), ('sdk', 'Native SDK')]
+FROZEN_CONNECTIONSTATUS_CHOICES = [('never_connected', 'Never connected'), ('connecting', 'Connecting'), ('authorizing', 'Authorizing'), ('permission_denied', 'Permission denied'), ('connected_importing', 'Connected — importing'), ('connected_active', 'Connected — active'), ('connected_partial', 'Connected — partial'), ('connected_idle', 'Connected — idle'), ('authorization_expired', 'Authorization expired'), ('disconnected', 'Disconnected'), ('reconnected', 'Reconnected'), ('historical_reimport', 'Historical re-import'), ('provider_error', 'Provider error')]
+FROZEN_AUTHORIZATIONSTATUS_CHOICES = [('not_started', 'Not started'), ('pending', 'Pending'), ('authorized', 'Authorized'), ('denied', 'Denied'), ('expired', 'Expired'), ('revoked', 'Revoked'), ('error', 'Error')]
+FROZEN_PERMISSIONSTATUS_CHOICES = [('unknown', 'Unknown'), ('not_determined', 'Not determined'), ('granted', 'Granted'), ('limited', 'Limited'), ('denied', 'Denied')]
+FROZEN_HISTORICALIMPORTSTATUS_CHOICES = [('not_started', 'Not started'), ('running', 'Running'), ('partial', 'Partial'), ('completed', 'Completed'), ('failed', 'Failed')]
+FROZEN_HEALTHDOMAIN_CHOICES = [('sleep', 'Sleep'), ('activity', 'Activity'), ('heart', 'Heart'), ('recovery', 'Recovery'), ('body', 'Body'), ('workouts', 'Workouts')]
+FROZEN_CONFIDENCELEVEL_CHOICES = [('high', 'High'), ('medium', 'Medium'), ('low', 'Low'), ('unknown', 'Unknown')]
+FROZEN_DOCUMENTSTATUS_CHOICES = [('received', 'Received'), ('queued', 'Queued'), ('processed', 'Processed'), ('duplicate', 'Duplicate'), ('rejected', 'Rejected'), ('failed', 'Failed')]
+FROZEN_HEALTHJOBTYPE_CHOICES = [('normalize_document', 'Normalize document'), ('refresh_analytics', 'Refresh analytics'), ('refresh_connection', 'Refresh connection'), ('revoke_connection', 'Revoke connection'), ('recovery_pull', 'ROOK recovery pull'), ('freshness_check', 'Freshness check'), ('remap_timezone', 'Remap member local dates')]
+FROZEN_HEALTHJOBSTATUS_CHOICES = [('pending', 'Pending'), ('running', 'Running'), ('completed', 'Completed'), ('failed', 'Failed')]
+FROZEN_CONSENTSTATUS_CHOICES = [('granted', 'Granted'), ('revoked', 'Revoked')]
+FROZEN_PREFERREDUNITS_CHOICES = [('metric', 'Metric'), ('imperial', 'Imperial')]
+
 
 
 class Migration(migrations.Migration):
@@ -33,11 +44,11 @@ class Migration(migrations.Migration):
                     related_name="rook_identity",
                 )),
             ("rook_user_id", models.CharField(max_length=50, unique=True)),
-            ("timezone_name", models.CharField(max_length=64, default=settings.TIME_ZONE)),
+            ("timezone_name", models.CharField(max_length=64, default='Asia/Kolkata')),
             ("preferred_units", models.CharField(
                     max_length=16,
-                    choices=PreferredUnits,
-                    default=PreferredUnits.METRIC,
+                    choices=FROZEN_PREFERREDUNITS_CHOICES,
+                    default='metric',
                 )),
             ],
             options={"ordering": ["-created_at"]},
@@ -63,8 +74,8 @@ class Migration(migrations.Migration):
                 )),
             ("status", models.CharField(
                     max_length=16,
-                    choices=ConsentStatus,
-                    default=ConsentStatus.GRANTED,
+                    choices=FROZEN_CONSENTSTATUS_CHOICES,
+                    default='granted',
                 )),
             ("version", models.CharField(max_length=32)),
             ("purpose", models.CharField(
@@ -95,27 +106,27 @@ class Migration(migrations.Migration):
                     on_delete=models.CASCADE,
                     related_name="connections",
                 )),
-            ("data_source", models.CharField(max_length=32, choices=WearableSource)),
-            ("connection_method", models.CharField(max_length=8, choices=ConnectionMethod)),
+            ("data_source", models.CharField(max_length=32, choices=FROZEN_WEARABLESOURCE_CHOICES)),
+            ("connection_method", models.CharField(max_length=8, choices=FROZEN_CONNECTIONMETHOD_CHOICES)),
             ("status", models.CharField(
                     max_length=32,
-                    choices=ConnectionStatus,
-                    default=ConnectionStatus.NEVER_CONNECTED,
+                    choices=FROZEN_CONNECTIONSTATUS_CHOICES,
+                    default='never_connected',
                 )),
             ("authorization_status", models.CharField(
                     max_length=24,
-                    choices=AuthorizationStatus,
-                    default=AuthorizationStatus.NOT_STARTED,
+                    choices=FROZEN_AUTHORIZATIONSTATUS_CHOICES,
+                    default='not_started',
                 )),
             ("permission_status", models.CharField(
                     max_length=24,
-                    choices=PermissionStatus,
-                    default=PermissionStatus.UNKNOWN,
+                    choices=FROZEN_PERMISSIONSTATUS_CHOICES,
+                    default='unknown',
                 )),
             ("import_status", models.CharField(
                     max_length=24,
-                    choices=HistoricalImportStatus,
-                    default=HistoricalImportStatus.NOT_STARTED,
+                    choices=FROZEN_HISTORICALIMPORTSTATUS_CHOICES,
+                    default='not_started',
                 )),
             ("capabilities", models.JSONField(default=list, blank=True)),
             ("historical_days_requested", models.PositiveSmallIntegerField(default=29)),
@@ -190,8 +201,8 @@ class Migration(migrations.Migration):
             ("payload", models.JSONField(default=dict)),
             ("status", models.CharField(
                     max_length=16,
-                    choices=DocumentStatus,
-                    default=DocumentStatus.RECEIVED,
+                    choices=FROZEN_DOCUMENTSTATUS_CHOICES,
+                    default='received',
                 )),
             ("received_at", models.DateTimeField()),
             ("processed_at", models.DateTimeField(null=True, blank=True)),
@@ -218,8 +229,8 @@ class Migration(migrations.Migration):
             ("signature_valid", models.BooleanField(default=False)),
             ("status", models.CharField(
                     max_length=16,
-                    choices=DocumentStatus,
-                    default=DocumentStatus.RECEIVED,
+                    choices=FROZEN_DOCUMENTSTATUS_CHOICES,
+                    default='received',
                 )),
             ("reason", models.CharField(max_length=128, blank=True)),
             ("payload", models.JSONField(default=dict, blank=True)),
@@ -252,7 +263,7 @@ class Migration(migrations.Migration):
                     related_name="observations",
                 )),
             ("observation_identity", models.CharField(max_length=64, unique=True)),
-            ("domain", models.CharField(max_length=16, choices=HealthDomain, db_index=True)),
+            ("domain", models.CharField(max_length=16, choices=FROZEN_HEALTHDOMAIN_CHOICES, db_index=True)),
             ("metric", models.CharField(max_length=128, db_index=True)),
             ("field_path", models.CharField(max_length=512)),
             ("observed_at", models.DateTimeField(db_index=True)),
@@ -282,7 +293,7 @@ class Migration(migrations.Migration):
                     on_delete=models.CASCADE,
                     related_name="health_daily_summaries",
                 )),
-            ("domain", models.CharField(max_length=16, choices=HealthDomain)),
+            ("domain", models.CharField(max_length=16, choices=FROZEN_HEALTHDOMAIN_CHOICES)),
             ("metric", models.CharField(max_length=128)),
             ("local_date", models.DateField()),
             ("source_key", models.CharField(max_length=64, blank=True)),
@@ -311,14 +322,14 @@ class Migration(migrations.Migration):
                     on_delete=models.CASCADE,
                     related_name="health_domain_snapshots",
                 )),
-            ("domain", models.CharField(max_length=16, choices=HealthDomain)),
+            ("domain", models.CharField(max_length=16, choices=FROZEN_HEALTHDOMAIN_CHOICES)),
             ("state", models.CharField(max_length=32)),
             ("card", models.JSONField(default=dict, encoder=DjangoJSONEncoder)),
-            ("algorithm_version", models.CharField(max_length=32, default=ALGORITHM_VERSION)),
+            ("algorithm_version", models.CharField(max_length=32, default='wearables-v1.2')),
             ("confidence", models.CharField(
                     max_length=16,
-                    choices=ConfidenceLevel,
-                    default=ConfidenceLevel.UNKNOWN,
+                    choices=FROZEN_CONFIDENCELEVEL_CHOICES,
+                    default='unknown',
                 )),
             ("generated_at", models.DateTimeField()),
             ],
@@ -352,11 +363,11 @@ class Migration(migrations.Migration):
                     on_delete=models.CASCADE,
                     related_name="processing_jobs",
                 )),
-            ("job_type", models.CharField(max_length=32, choices=HealthJobType)),
+            ("job_type", models.CharField(max_length=32, choices=FROZEN_HEALTHJOBTYPE_CHOICES)),
             ("status", models.CharField(
                     max_length=16,
-                    choices=HealthJobStatus,
-                    default=HealthJobStatus.PENDING,
+                    choices=FROZEN_HEALTHJOBSTATUS_CHOICES,
+                    default='pending',
                 )),
             ("idempotency_key", models.CharField(max_length=128, unique=True)),
             ("payload", models.JSONField(default=dict, blank=True)),

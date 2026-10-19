@@ -58,8 +58,13 @@ def rook_readiness_checks() -> list[tuple[str, str, str]]:
             if callback and validate_rook_callback(callback):
                 checks.append(("INFO", "ROOK_CALLBACK_URL", "Valid URL format. Register it in ROOK and verify external HTTPS access."))
         if any(source in NATIVE_WEARABLE_SOURCES for source in sources):
-            if not getattr(settings, "ROOK_SDK_CLIENT_UUID", "") or not getattr(settings, "ROOK_SDK_SECRET", ""):
+            sdk_secret = getattr(settings, "ROOK_SDK_SECRET", "")
+            if not getattr(settings, "ROOK_SDK_CLIENT_UUID", "") or not sdk_secret:
                 checks.append(("ERROR", "ROOK_SDK_CLIENT_UUID / ROOK_SDK_SECRET", "Native SDK provisioned but SDK credentials are missing."))
+            if sdk_secret and sdk_secret == getattr(settings, "ROOK_SECRET_KEY", ""):
+                checks.append(("ERROR", "ROOK_SDK_SECRET", "Mobile SDK credential MUST differ from server-side ROOK_SECRET_KEY."))
+            if not getattr(settings, "ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC", False):
+                checks.append(("ERROR", "ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC", "Confirm with ROOK that this dedicated SDK secret is a distributable mobile credential, then explicitly approve exposure."))
     if not getattr(settings, "ROOK_WEBHOOK_HASH_KEY", ""):
         checks.append(("ERROR", "ROOK_WEBHOOK_HASH_KEY", "Webhook hash key absent. Signed ingestion cannot be verified."))
     else:

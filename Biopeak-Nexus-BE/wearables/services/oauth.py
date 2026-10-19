@@ -16,6 +16,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from wearables.models import WearableConnectionEvent
+from wearables.models import WearableConnection
+from wearables.services import connections as connection_service
 from wearables.services.client import RookClient, RookConfigurationError, RookServiceError
 from wearables.utils.constants import AuthorizationStatus, ConnectionStatus
 
@@ -100,23 +102,20 @@ def _cancel_pending_connection(connection, *, reason: str, prior_status: str = "
     if connection.status not in (ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING):
         return
     if prior_status in (ConnectionStatus.ACTIVE, ConnectionStatus.PARTIAL, ConnectionStatus.IDLE):
-        from wearables.services.connections import save_connection_transition
-        save_connection_transition(
+        connection_service.save_connection_transition(
             connection, status=prior_status, authorization_status=AuthorizationStatus.AUTHORIZED,
             event_type="oauth_reauthorization_cancelled", detail=reason,
         )
         return
     if prior_status in (ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED):
-        from wearables.services.connections import save_connection_transition
-        save_connection_transition(
+        connection_service.save_connection_transition(
             connection, status=prior_status,
             authorization_status=(AuthorizationStatus.REVOKED if prior_status == ConnectionStatus.DISCONNECTED
                                   else AuthorizationStatus.EXPIRED),
             event_type="oauth_reconnection_cancelled", detail=reason,
         )
         return
-    from wearables.services.connections import save_connection_transition
-    save_connection_transition(
+    connection_service.save_connection_transition(
         connection,
         status=ConnectionStatus.NEVER_CONNECTED,
         authorization_status=AuthorizationStatus.DENIED,
@@ -124,6 +123,15 @@ def _cancel_pending_connection(connection, *, reason: str, prior_status: str = "
         detail=reason,
     )
 
+
+
+def claim_oauth_state(event: WearableConnectionEvent, new_type: str) -> None:
+    updated = WearableConnectionEvent.objects.filter(
+        pk=event.pk, event_type="oauth_state_pending",
+    ).update(event_type=new_type, updated_at=timezone.now())
+    if not updated:
+        raise OAuthStateError("Authorization state was already used by another request.")
+    event.event_type = new_type
 
 def complete_oauth_callback(
     state_token: str, *, rook_client_uuid: str, rook_user_id: str, cancelled: bool = False
@@ -139,7 +147,7 @@ def complete_oauth_callback(
         raise OAuthStateError("ROOK client identity does not match.")
     with transaction.atomic():
         event = (
-            WearableConnectionEvent.objects.select_for_update()
+            WearableConnectionEvent.objects
             .select_related("connection__identity")
             .filter(event_type="oauth_state_pending", payload__nonceDigest=digest)
             .first()
@@ -153,13 +161,11 @@ def complete_oauth_callback(
         age = timezone.now() - event.created_at
         max_age = timedelta(minutes=max(1, getattr(settings, "ROOK_OAUTH_TIMEOUT_MINUTES", 15)))
         if age > max_age:
-            event.event_type = "oauth_state_expired"
-            event.save(update_fields=["event_type", "updated_at"])
+            claim_oauth_state(event, "oauth_state_expired")
             _cancel_pending_connection(connection, reason="ROOK authorization expired.", prior_status=event.previous_status)
             return "expired"
         if cancelled:
-            event.event_type = "oauth_state_cancelled"
-            event.save(update_fields=["event_type", "updated_at"])
+            claim_oauth_state(event, "oauth_state_cancelled")
             _cancel_pending_connection(connection, reason="Member cancelled authorization.", prior_status=event.previous_status)
             return "cancelled"
         # The browser path is never proof of authorization. ROOK is authoritative.
@@ -173,15 +179,18 @@ def complete_oauth_callback(
         # the connection transition and recovery job must commit together with
         # consuming the one-time callback state. Otherwise a transient database
         # error can burn the callback while the UI remains "Authorizing".
-        from wearables.services.connections import authorization_confirmed
-        from wearables.models import WearableConnection
 
-        connection = WearableConnection.objects.select_for_update().get(pk=connection.pk)
+        # Only one return handler can claim this one-time state. If the DB
+        # transition fails the surrounding atomic transaction restores pending.
+        claim_oauth_state(event, "oauth_state_verified")
+        connection = WearableConnection.objects.filter(pk=connection.pk).first()
+        if connection is None:
+            raise OAuthStateError("Wearable connection no longer exists.")
         if connection.status in {ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING}:
             was_reconnect = event.previous_status in {
                 ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED,
             }
-            authorization_confirmed(
+            connection_service.authorization_confirmed(
                 connection, was_reconnect=was_reconnect,
                 actor_user=event.actor_user, correlation_id=event.correlation_id,
             )
@@ -193,8 +202,6 @@ def complete_oauth_callback(
             return "cancelled"
         # A status poll may have completed the grant first; that is already a
         # success, and this callback must not trigger another historical import.
-        event.event_type = "oauth_state_verified"
-        event.save(update_fields=["event_type", "updated_at"])
         return "authorized"
 
 

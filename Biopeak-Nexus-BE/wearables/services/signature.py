@@ -4,31 +4,29 @@ import hmac
 from django.conf import settings
 
 
+def _walk_metadata_datetime(node) -> str:
+    """Recursively locate the unmodified ROOK metadata timestamp."""
+    if isinstance(node, dict):
+        metadata = node.get("metadata")
+        if isinstance(metadata, dict):
+            value = metadata.get("datetime_string")
+            if isinstance(value, str) and value:
+                return value
+        for value in node.values():
+            found = _walk_metadata_datetime(value)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _walk_metadata_datetime(item)
+            if found:
+                return found
+    return ""
+
+
 def rook_metadata_datetime_string(payload: dict) -> str:
-    """Read ROOK's literal metadata datetime without normalizing timezone/format.
-
-    Real ROOK v2 health documents nest this under a pillar's summary/events.
-    Simple sandbox fixtures use the envelope's `datetime` field instead.
-    """
-    def walk(node):
-        if isinstance(node, dict):
-            metadata = node.get("metadata")
-            if isinstance(metadata, dict):
-                value = metadata.get("datetime_string")
-                if isinstance(value, str) and value:
-                    return value
-            for value in node.values():
-                found = walk(value)
-                if found:
-                    return found
-        elif isinstance(node, list):
-            for item in node:
-                found = walk(item)
-                if found:
-                    return found
-        return ""
-
-    return walk(payload)
+    """Read the original nested ROOK timestamp, not a reformatted instant."""
+    return _walk_metadata_datetime(payload)
 
 
 def signature_message(payload: dict) -> str:

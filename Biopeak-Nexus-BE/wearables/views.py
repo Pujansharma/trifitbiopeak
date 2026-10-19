@@ -26,6 +26,7 @@ from wearables.services.analytics import (
     timeline_payload,
 )
 from wearables.services.client import RookConfigurationError, RookServiceError
+from wearables.services.config import provisioned_sources
 from wearables.services.connections import (
     disconnect_connection,
     record_connection_event,
@@ -193,7 +194,6 @@ class DeviceProviderCatalogueView(WearablesAPIView):
     @extend_schema(responses=OpenApiTypes.OBJECT)
     def get(self, request, *args, **kwargs):
         self.get_customer_profile()
-        from wearables.services.config import provisioned_sources
         provisioned = provisioned_sources()
         providers = []
         for source in WearableSource.values:
@@ -241,13 +241,25 @@ class DeviceSDKConfigView(WearablesAPIView):
         sdk_secret = getattr(settings, "ROOK_SDK_SECRET", "")
         if not client_uuid or not sdk_secret:
             return self.send_response("ROOK mobile SDK is not configured.", status=503)
+        # This endpoint is called by a mobile app and therefore exposes its
+        # response to a potentially compromised handset. A server Basic-auth
+        # key is NEVER an acceptable SDK credential. Exposure requires an
+        # explicit deployment approval of a separate ROOK-issued client key.
+        if (not getattr(settings, "ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC", False)
+                or sdk_secret == getattr(settings, "ROOK_SECRET_KEY", "")):
+            return self.send_response(
+                "ROOK native SDK client credentials are not approved for mobile distribution.",
+                status=503,
+            )
         data = {
             "clientUuid": client_uuid,
             "secret": sdk_secret,
             "environment": getattr(settings, "ROOK_ENVIRONMENT", "sandbox"),
             "rookUserId": identity.rook_user_id,
         }
-        return self.send_response("ROOK mobile SDK configuration retrieved.", data)
+        response = self.send_response("ROOK mobile SDK configuration retrieved.", data)
+        response["Cache-Control"] = "no-store, private"
+        return response
 
 
 class NativeDeviceStatusView(WearablesAPIView):

@@ -6,7 +6,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.db import transaction
-from django.db.models import Avg, Count, Max, Min, Sum
+from django.db.models import Avg, Count, Max, Min, OuterRef, Q, Subquery, Sum
 from django.utils import timezone
 
 from wearables.models import (
@@ -22,6 +22,8 @@ from wearables.services.connections import (
     record_connection_event,
 )
 from wearables.services.job_queue import enqueue_health_job
+from wearables.services.consent import has_active_wearable_consent
+from wearables.services.analytics import invalidate_health_dashboard
 from wearables.services.lifecycle import can_ingest_source, source_permission_for_domain
 from wearables.services.metrics import (
     ExtractedMetric,
@@ -195,9 +197,10 @@ def acceptable_source_connections(*, identity, provenance: dict) -> tuple[list, 
     To guarantee a revoked source cannot contribute, every identified source
     must remain authorized. An unattributed ROOK document is only accepted
     when one eligible connection exists (never guess between two providers).
-    Caller locks the identity row before applying this policy.
+    Concurrent authorization changes are detected by a conditional update
+    on the connection before the webhook transaction can commit.
     """
-    available = list(WearableConnection.objects.select_for_update().filter(
+    available = list(WearableConnection.objects.filter(
         customer_profile=identity.customer_profile,
     ))
     sources = set(provenance["data_sources"]) - {"unspecified"}
@@ -218,7 +221,8 @@ def promote_matching_connections(
     *, identity: RookMemberIdentity,
     connections: list[WearableConnection],
     observed_at: datetime, received_at: datetime,
-) -> None:
+) -> bool:
+    accepted_count = 0
     for connection in connections:
         if not can_ingest_source(connection):
             continue
@@ -247,13 +251,33 @@ def promote_matching_connections(
         if previous_status == ConnectionStatus.PROVIDER_ERROR:
             connection.last_error_code = ""
             connection.last_error_detail = ""
-        connection.save()
+        updates = {
+            "last_webhook_received_at": connection.last_webhook_received_at,
+            "last_successful_sync": connection.last_successful_sync,
+            "connected_at": connection.connected_at,
+            "available_from": connection.available_from,
+            "available_to": connection.available_to,
+            "status": connection.status,
+            "last_error_code": connection.last_error_code,
+            "last_error_detail": connection.last_error_detail,
+            "updated_at": timezone.now(),
+        }
+        changed = WearableConnection.objects.filter(
+            pk=connection.pk, status=previous_status,
+            authorization_status=connection.authorization_status,
+            permission_status=connection.permission_status,
+        ).update(**updates)
+        if not changed:
+            # A concurrent disconnect/revocation takes precedence over data.
+            continue
+        accepted_count += 1
         if previous_status != connection.status:
             record_connection_event(
                 connection, event_type="webhook_data_received",
                 previous_status=previous_status,
                 detail="Authorized source delivered a verified ROOK document.",
             )
+    return accepted_count == len(connections)
 
 
 @transaction.atomic
@@ -291,7 +315,7 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool,
         )
         raise ValueError("ROOK document is missing user_id.")
     identity = (
-        RookMemberIdentity.objects.select_for_update()
+        RookMemberIdentity.objects
         .select_related("customer_profile")
         .filter(rook_user_id=rook_user_id)
         .first()
@@ -308,7 +332,6 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool,
 
     # DPDP: a delayed/replayed webhook must not create new observations after
     # the member has withdrawn all wearable-ingestion consent.
-    from wearables.services.consent import has_active_wearable_consent
     if not has_active_wearable_consent(identity.customer_profile):
         create_receipt(
             receipt_key=receipt_key, payload=payload,
@@ -341,38 +364,10 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool,
         observed_at=observed_at,
         payload=payload,
     )
-    document = (
-        RookHealthDocument.objects.select_for_update()
-        .filter(document_identity=document_identity)
-        .first()
-    )
-    if document is not None and version < document.document_version:
-        create_receipt(
-            receipt_key=receipt_key,
-            payload=payload,
-            signature_valid=signature_valid,
-            status=DocumentStatus.REJECTED,
-            reason="lower_document_version",
-            document=document,
-        )
-        return {"accepted": True, "skipped": True, "reason": "lower_document_version"}
-    if (document is not None and version == document.document_version
-            and document.status != DocumentStatus.REJECTED):
-        reason = "exact_replay" if content_hash == document.content_hash else "same_version_conflict"
-        create_receipt(
-            receipt_key=receipt_key,
-            payload=payload,
-            signature_valid=signature_valid,
-            status=(
-                DocumentStatus.DUPLICATE
-                if reason == "exact_replay"
-                else DocumentStatus.REJECTED
-            ),
-            reason=reason,
-            document=document,
-        )
-        return {"accepted": True, "skipped": True, "reason": reason}
-
+    # The unique document_identity constraint, rather than a row lock on a
+    # different table, serializes two concurrent first-time webhook deliveries.
+    # Django's get_or_create performs its unique-insert race recovery using a
+    # savepoint: an IntegrityError re-fetches the winning row in this txn.
     received_at = timezone.now()
     document_values = {
         "customer_profile": identity.customer_profile,
@@ -392,15 +387,40 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool,
         "processed_at": None,
         "failure_detail": "",
     }
-    if document is None:
-        document = RookHealthDocument.objects.create(
-            document_identity=document_identity,
-            **document_values,
-        )
-    else:
-        for field_name, value in document_values.items():
-            setattr(document, field_name, value)
-        document.save()
+    document, created = RookHealthDocument.objects.get_or_create(
+        document_identity=document_identity,
+        defaults=document_values,
+    )
+    if not created:
+        # Two distinct webhook receipts can race with either the same version
+        # or a newer correction. Never overwrite a newer document version or
+        # queue multiple normalization jobs for a duplicate delivery.
+        if version < document.document_version:
+            reason = "lower_document_version"
+        elif version == document.document_version and document.status != DocumentStatus.REJECTED:
+            reason = "exact_replay" if content_hash == document.content_hash else "same_version_conflict"
+        else:
+            reason = ""
+        if not reason:
+            eligible_document = RookHealthDocument.objects.filter(pk=document.pk).filter(
+                Q(document_version__lt=version)
+                | Q(document_version=version, status=DocumentStatus.REJECTED)
+            )
+            updated = eligible_document.update(**document_values, updated_at=received_at)
+            document.refresh_from_db()
+            if not updated:
+                reason = ("lower_document_version" if version < document.document_version
+                          else "exact_replay" if content_hash == document.content_hash
+                          else "same_version_conflict")
+        if reason:
+            create_receipt(
+                receipt_key=receipt_key, payload=payload,
+                signature_valid=signature_valid,
+                status=(DocumentStatus.DUPLICATE if reason == "exact_replay"
+                        else DocumentStatus.REJECTED),
+                reason=reason, document=document,
+            )
+            return {"accepted": True, "skipped": True, "reason": reason}
     receipt, _ = create_receipt(
         receipt_key=receipt_key,
         payload=payload,
@@ -409,10 +429,15 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool,
         reason="higher_version" if document.receipts.exists() else "accepted",
         document=document,
     )
-    promote_matching_connections(
+    if not promote_matching_connections(
         identity=identity, connections=permitted_connections,
         observed_at=observed_at, received_at=received_at,
-    )
+    ):
+        # The consent/source check raced a disconnect. Roll back the document,
+        # receipt and connection updates together, so no revoked-source raw
+        # payload is retained and no normalization job can be queued.
+        transaction.set_rollback(True)
+        return {"accepted": True, "skipped": True, "reason": "source_state_changed"}
     # Durable DB outbox: create the normalization job in the SAME transaction
     # as the accepted document. If either write fails, both roll back and ROOK
     # can safely retry the webhook; no acknowledged document is left unqueued.
@@ -543,6 +568,23 @@ def rebuild_daily_summaries(
         local_date=local_date,
         domain__in=domains,
     ).delete()
+    # The correlated scalar subquery retrieves the most recent numeric
+    # measurement as part of the grouped aggregate, not as one SQL query per
+    # metric/source/unit. Tie-break on created_at to retain existing behavior.
+    latest_numeric_value = (
+        HealthObservation.objects.filter(
+            customer_profile=customer_profile,
+            local_date=local_date,
+            domain=OuterRef("domain"),
+            metric=OuterRef("metric"),
+            source_key=OuterRef("source_key"),
+            unit=OuterRef("unit"),
+            numeric_value__isnull=False,
+            is_current=True,
+        )
+        .order_by("-observed_at", "-created_at")
+        .values("numeric_value")[:1]
+    )
     grouped = (
         HealthObservation.objects.filter(
             customer_profile=customer_profile,
@@ -560,23 +602,11 @@ def rebuild_daily_summaries(
             total_value=Sum("numeric_value"),
             first_time=Min("observed_at"),
             last_time=Max("observed_at"),
+            latest_value=Subquery(latest_numeric_value),
         )
     )
     summaries = []
     for group in grouped.iterator():
-        latest_observation = (
-            HealthObservation.objects.filter(
-                customer_profile=customer_profile,
-                local_date=local_date,
-                domain=group["domain"],
-                metric=group["metric"],
-                source_key=group["source_key"],
-                numeric_value__isnull=False,
-                is_current=True,
-            )
-            .order_by("-observed_at", "-created_at")
-            .first()
-        )
         summaries.append(
             HealthDailySummary(
                 customer_profile=customer_profile,
@@ -589,9 +619,7 @@ def rebuild_daily_summaries(
                 maximum=group["maximum_value"],
                 average=group["average_value"],
                 total=group["total_value"],
-                latest=(
-                    latest_observation.numeric_value if latest_observation else None
-                ),
+                latest=group["latest_value"],
                 unit=group["unit"],
                 completeness=1.0,
                 first_observed_at=group["first_time"],
@@ -604,14 +632,26 @@ def rebuild_daily_summaries(
 @transaction.atomic
 def normalize_health_document(document_id) -> dict:
     document = (
-        RookHealthDocument.objects.select_for_update()
+        RookHealthDocument.objects
         .select_related("identity", "customer_profile")
-        .get(pk=document_id)
+        .filter(pk=document_id).first()
     )
-    RookMemberIdentity.objects.select_for_update().get(pk=document.identity_id)
+    if document is None:
+        raise ValueError("Health document no longer exists.")
+    if not RookMemberIdentity.objects.filter(pk=document.identity_id).exists():
+        raise ValueError("Wearable identity no longer exists.")
     if document.status == DocumentStatus.PROCESSED:
         return {"documentId": str(document.pk), "alreadyProcessed": True, "domains": []}
-    from wearables.services.consent import has_active_wearable_consent
+    # Reuse RECEIVED as a short-lived, transaction-scoped processing marker.
+    # A crash rolls it back to QUEUED. Higher-version webhooks wait for this
+    # row update before installing a new canonical payload.
+    claimed = RookHealthDocument.objects.filter(
+        pk=document.pk, status=DocumentStatus.QUEUED,
+        document_version=document.document_version,
+    ).update(status=DocumentStatus.RECEIVED, updated_at=timezone.now())
+    if not claimed:
+        return {"skipped": True, "reason": "already_processing_or_not_queued"}
+    document.status = DocumentStatus.RECEIVED
     if not has_active_wearable_consent(document.customer_profile):
         document.status = DocumentStatus.REJECTED
         document.failure_detail = "Member consent withdrawn before normalization."
@@ -708,7 +748,6 @@ def normalize_health_document(document_id) -> dict:
     )
     # Every distinct document has its own analytics work item. A date+version
     # key alone loses a second ROOK pillar delivered on the same day (A03).
-    from wearables.services.analytics import invalidate_health_dashboard
     if affected_domains:
         # Store the refresh work item atomically with the processed document.
         # A post-commit scheduling error must not strand completed ingestion.
@@ -734,27 +773,29 @@ def normalize_health_document(document_id) -> dict:
     }
 
 
-@transaction.atomic
 def remap_member_local_days(customer_profile) -> dict:
-    """Rebuild local-day buckets after timezone travel/change, preserving UTC instants.
+    """Remap local dates in bounded batches, preserving UTC observation instants.
 
-    The raw instant and observation version remain unchanged. Both current and
-    superseded observations retain audit history; only current versions are
-    rolled up into materialized summaries.
+    No transaction spans the entire member history. A concurrent timezone edit
+    is detected between batches, and its own scheduled job can restart safely.
     """
-    identity = RookMemberIdentity.objects.select_for_update().get(
-        customer_profile=customer_profile
-    )
+    identity = RookMemberIdentity.objects.filter(
+        customer_profile=customer_profile,
+    ).first()
+    if identity is None:
+        raise ValueError("Wearable identity no longer exists.")
+    timezone_name = identity.timezone_name
     try:
-        member_zone = ZoneInfo(identity.timezone_name)
+        member_zone = ZoneInfo(timezone_name)
     except ZoneInfoNotFoundError:
         member_zone = ZoneInfo("UTC")
     affected_dates: dict[date, set[str]] = {}
     updated = 0
     batch = []
-    for observation in HealthObservation.objects.filter(
-        customer_profile=customer_profile
-    ).iterator(chunk_size=500):
+    observations = HealthObservation.objects.filter(
+        customer_profile=customer_profile,
+    ).order_by("pk")
+    for observation in observations.iterator(chunk_size=500):
         mapped = observation.observed_at.astimezone(member_zone).date()
         if mapped != observation.local_date:
             if observation.is_current:
@@ -762,16 +803,30 @@ def remap_member_local_days(customer_profile) -> dict:
                 affected_dates.setdefault(mapped, set()).add(observation.domain)
             observation.local_date = mapped
             batch.append(observation)
-            updated += 1
-            if len(batch) >= 500:
+        if len(batch) >= 500:
+            # Refuse to finish an obsolete timezone remap after a newer one.
+            if not RookMemberIdentity.objects.filter(
+                pk=identity.pk, timezone_name=timezone_name,
+            ).exists():
+                raise ValueError("Timezone changed while remapping; retry against latest timezone.")
+            with transaction.atomic():
                 HealthObservation.objects.bulk_update(batch, ["local_date"])
-                batch.clear()
+            updated += len(batch)
+            batch.clear()
     if batch:
-        HealthObservation.objects.bulk_update(batch, ["local_date"])
+        if not RookMemberIdentity.objects.filter(
+            pk=identity.pk, timezone_name=timezone_name,
+        ).exists():
+            raise ValueError("Timezone changed while remapping; retry against latest timezone.")
+        with transaction.atomic():
+            HealthObservation.objects.bulk_update(batch, ["local_date"])
+        updated += len(batch)
+    # Each affected day is consistent on its own, without locking the entire
+    # member's observations. Rebuilding a day always queries the current data.
     for local_date, domains in affected_dates.items():
-        rebuild_daily_summaries(
-            customer_profile=customer_profile, local_date=local_date, domains=domains
-        )
-    from wearables.services.analytics import invalidate_health_dashboard
-    transaction.on_commit(lambda: invalidate_health_dashboard(customer_profile))
+        with transaction.atomic():
+            rebuild_daily_summaries(
+                customer_profile=customer_profile, local_date=local_date, domains=domains,
+            )
+    invalidate_health_dashboard(customer_profile)
     return {"remapped": updated, "affectedDates": len(affected_dates)}

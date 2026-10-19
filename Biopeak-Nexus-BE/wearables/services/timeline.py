@@ -10,6 +10,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from django.conf import settings
 
 from wearables.models import HealthObservation
+from wearables.services import analytics as analytics_service
+from programs.services.models import ServiceResult
+from diagnostics_orders.models import DiagnosticOrderCustomer
+from diagnostics_orders.utils.constants import DiagnosticOrderStatus
 from wearables.utils.constants import HealthCardState
 
 # Classification uses the client's existing clinical result codes; do not
@@ -42,7 +46,6 @@ def _clinical_date_bounds(start_date, end_date, timezone_name):
 
 
 def _wearable_entries(customer_profile, *, start_date, end_date, domain, maximum):
-    from wearables.services.analytics import observation_value
 
     observations = HealthObservation.objects.filter(
         customer_profile=customer_profile, is_current=True
@@ -62,7 +65,7 @@ def _wearable_entries(customer_profile, *, start_date, end_date, domain, maximum
             "sourceType": "wearable",
             "domain": obs.domain,
             "metric": obs.metric,
-            "value": observation_value(obs),
+            "value": analytics_service.observation_value(obs),
             "unit": obs.unit,
             "confidence": obs.confidence,
             "provenance": {
@@ -83,9 +86,6 @@ def _clinical_entries(customer_profile, *, start_date, end_date, maximum, timezo
     Every queryset is scoped through a concrete profile FK. Neither document
     storage paths nor health/lab result data are copied into the timeline.
     """
-    from programs.services.models import ServiceResult
-    from diagnostics_orders.models import DiagnosticOrderCustomer
-    from diagnostics_orders.utils.constants import DiagnosticOrderStatus
 
     lower, upper = _clinical_date_bounds(start_date, end_date, timezone_name)
     results = ServiceResult.objects.filter(

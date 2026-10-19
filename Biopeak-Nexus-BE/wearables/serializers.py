@@ -1,4 +1,6 @@
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from urllib.parse import urlsplit
+from wearables.services.config import preexisting_import_enabled, provisioned_sources
 
 from django.conf import settings
 from rest_framework import serializers
@@ -48,7 +50,6 @@ class DeviceConnectSerializer(BaseSerializer):
         self.max_historical_days = max_days
         # The PRD disables pre-existing ROOK imports by default in production.
         # Operators must explicitly opt in after configuring ROOK's add-on.
-        from wearables.services.config import preexisting_import_enabled, provisioned_sources
         enabled = preexisting_import_enabled()
         self.history_disabled_by_policy = not enabled
         attrs["historical_days"] = min(requested, max_days) if enabled else 0
@@ -70,7 +71,6 @@ class DeviceConnectSerializer(BaseSerializer):
         # In production OAuth is returned through the server-owned stateful
         # callback. Without it, permit mobile redirect hosts explicitly
         # allowlisted by the operator; no untrusted open redirects.
-        from urllib.parse import urlsplit
         parsed = urlsplit(value)
         if len(value) > 50:
             raise serializers.ValidationError("ROOK redirect URLs must be at most 50 characters.")

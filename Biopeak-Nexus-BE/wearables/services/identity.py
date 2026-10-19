@@ -7,6 +7,9 @@ from accounts.customers.models import CustomerProfile
 from accounts.customers.utils.db import get_customer_profile_for_user
 from core.utils.helper import get_request_ip_address, get_request_user_agent
 from wearables.models import RookMemberIdentity, WearableConsent
+from wearables.services.analytics import invalidate_health_dashboard
+from wearables.services.job_queue import enqueue_health_job
+from wearables.utils.constants import HealthJobType
 from wearables.utils.constants import ConsentStatus, PreferredUnits
 
 
@@ -49,11 +52,8 @@ def get_or_create_rook_identity(
     if update_fields:
         update_fields.append("updated_at")
         identity.save(update_fields=update_fields)
-        from wearables.services.analytics import invalidate_health_dashboard
         invalidate_health_dashboard(customer_profile)
         if "timezone_name" in update_fields:
-            from wearables.services.job_queue import enqueue_health_job
-            from wearables.utils.constants import HealthJobType
             # Persist a durable remap job in the same transaction as the
             # member-timezone change. Never rely on an on_commit callback that
             # could fail after the new timezone has already been committed.

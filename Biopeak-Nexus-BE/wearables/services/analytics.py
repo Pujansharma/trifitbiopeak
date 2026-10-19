@@ -5,6 +5,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
 from django.core.cache import caches
+from django.core.cache.backends.dummy import DummyCache
+from django.core.cache.backends.locmem import LocMemCache
 from django.utils import timezone
 
 from wearables.models import (
@@ -56,8 +58,7 @@ def health_cache():
 
 def shared_health_cache_enabled() -> bool:
     """Do not serve cross-worker stale health data from local-memory caches."""
-    from django.core.cache.backends.locmem import LocMemCache
-    return not isinstance(health_cache(), LocMemCache)
+    return not isinstance(health_cache(), (LocMemCache, DummyCache))
 
 
 def invalidate_health_dashboard(customer_profile, *, remove_snapshots: bool = True) -> None:
@@ -876,4 +877,11 @@ def observation_value(observation: HealthObservation) -> dict:
 
 # Composite wearable + existing Biopeak clinical timeline is implemented in an
 # isolated read-only adapter to avoid changing legacy service models.
-from wearables.services.timeline import timeline_payload
+from wearables.services import timeline as timeline_service
+
+
+def timeline_payload(*, customer_profile, start_date, end_date, domain, offset, limit):
+    return timeline_service.timeline_payload(
+        customer_profile=customer_profile, start_date=start_date,
+        end_date=end_date, domain=domain, offset=offset, limit=limit,
+    )

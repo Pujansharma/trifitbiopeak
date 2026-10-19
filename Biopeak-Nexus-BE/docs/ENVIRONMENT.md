@@ -372,7 +372,7 @@ Not in `deploy-aws.yml` (image/service only).
 | Trigger                        | Command                                         | Purpose                                          |
 | ------------------------------ | ----------------------------------------------- | ------------------------------------------------ |
 | SQS wake (on outbox insert)    | `uv run manage.py process_communication_outbox` | First try WhatsApp send + Google Calendar sync   |
-| EventBridge `rate(15 minutes)` | `assets/scripts/sweep_jobs.sh`                  | Reminder enqueue + outbox drain/retry + exception scans + Google watch renewal |
+| EventBridge `rate(15 minutes)` | `assets/scripts/sweep_jobs.sh`                  | Reminder enqueue + outbox drain/retry + exception scans + Google watch renewal + wearable freshness enqueue/health-job processing |
 
 Cap concurrent ECS RunTasks at 1 for the wake consumer. Sweep script:
 
@@ -381,7 +381,27 @@ python manage.py enqueue_appointment_reminders
 python manage.py process_communication_outbox
 python manage.py process_appointment_exception_scans
 python manage.py process_google_calendar_channel_expiry_renewal
+python manage.py enqueue_health_freshness_checks
+python manage.py process_health_jobs --limit 50
 ```
+
+Provision a separate EventBridge Scheduler / ECS RunTask at `rate(15 minutes)` to execute `assets/scripts/sweep_jobs.sh` using the same deployed image, settings and PostgreSQL access as the application. `deploy-aws.yml` only builds/deploys an image and does not configure the scheduler. Configure one concurrent sweep per environment and alert on nonzero exits; the script runs all six commands and propagates failures. Increase schedule frequency or introduce an independently supervised worker if health-normalization latency requirements are shorter than 15 minutes, or if the 50-job limit cannot keep up with incoming ROOK data. A burst of more than 50 jobs will be processed on subsequent sweeps; monitor queue age and backlog.
+
+### ROOK mobile credential security
+
+`/devices/sdk-config/` is a client-visible API. Do not expose `ROOK_SECRET_KEY`, ever. Native SDK credentials must come from a **separate ROOK-issued mobile integration**, never copied from the server Basic-auth secret. The API defaults to HTTP 503 (fail closed) unless `*_ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC=true` **and** the credentials differ. Enable the flag only after ROOK confirms the specific SDK credential is safe for distribution to a mobile app. Confirm ROOK SDK documentation and rotate the separate SDK credential independently of `ROOK_SECRET_KEY`. The API requires a customer session, native connection, and consent and sets `Cache-Control: no-store, private`; the mobile SDK still needs platform entitlements and OS permissions. If ROOK cannot confirm client-distributable secrets, leave the flag false and implement a ROOK-supported short-lived credential exchange instead.
+
+```env
+DEV_ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC=false
+STG_ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC=false
+PRD_ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC=false
+```
+
+### Wearable processing, caching, and validation
+
+Health API read-through caching is disabled (`CACHES["health"]` is DummyCache). It uses DB-backed health snapshots, which are visible across ECS instances; normal legacy `default` cache remains unchanged. No health response should rely on per-process LocMem invalidation. Current DRF wearable throttle scopes use the default LocMem cache and are **per-process only**; configure AWS WAF / API Gateway throttling or a shared Django default cache before general availability.
+
+Historical ROOK recovery can involve 21 upstream requests. Recovery workers use a longer attempt lease sized for configured connect/read timeouts and issue heartbeats while progressing. Monitor delayed jobs and track failed/retryable jobs; `process_health_jobs --limit 50` only runs when the scheduled task is actually provisioned. Test disconnect/reconnect, duplicate concurrent webhooks and timezone remaps on staging PostgreSQL. Verify `ROOK_WEBHOOK_HASH_KEY`, signed webhook deliveries, callback reachability, ROOK provider provisioning, and ROOK native SDK client approval before enabling the feature.
 
 Without the outbox worker/sweep, WhatsApp and Google Calendar rows stay `PENDING`. Without the exception-scan drain, care-team / roster / block writes enqueue scans that never run.
 

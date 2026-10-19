@@ -118,6 +118,8 @@ ROOK_SECRET_KEY = config("DEV_ROOK_SECRET_KEY", default="")
 ROOK_WEBHOOK_HASH_KEY = config("DEV_ROOK_WEBHOOK_HASH_KEY", default="")
 ROOK_SDK_CLIENT_UUID = config("DEV_ROOK_SDK_CLIENT_UUID", default="")
 ROOK_SDK_SECRET = config("DEV_ROOK_SDK_SECRET", default="")
+# Enable only after ROOK confirms SDK secret is designed for public mobile use.
+ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC = config("DEV_ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC", default=False, cast=bool)
 ROOK_HISTORICAL_DAYS = config("DEV_ROOK_HISTORICAL_DAYS", default=7, cast=int)
 ROOK_PREEXISTING_ENABLED = config(
     "DEV_ROOK_PREEXISTING_ENABLED", default=True, cast=bool
