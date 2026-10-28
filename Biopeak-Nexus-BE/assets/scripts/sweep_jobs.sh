@@ -1,9 +1,6 @@
 #!/bin/bash
 set -uo pipefail
 
-# EventBridge ECS scheduled task (every 15 minutes). One run drains bounded
-# health jobs; repeated runs pick up backlog. Prevent overlapping sweeps at
-# the scheduler/ECS level and alert on nonzero task exit codes.
 reminder_exit=0
 outbox_exit=0
 scan_exit=0

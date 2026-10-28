@@ -395,11 +395,13 @@ Week = Mon–Sun containing `start`. Month = calendar month.
 
 ```json
 {
-  "appointments": [ /* list items */ ],
+  "appointments": [ /* list items, plus created_by_type */ ],
   "truncated": false,
   "total_count": 12
 }
 ```
+
+Each appointment on this list also has `created_by_type`: `"customer"`, `"staff"` (`admin`, `associate`, or superuser), or `null` when unset at booking (older rows, or an account type that does not map). Deleting the booking user does not clear it. Staff booking a customer is `"staff"`. Other appointment payloads do not include this key.
 
 Week/month and unscoped `search` (no `start`) hard-cap **500** via `LIMIT 501` (no full-table `COUNT(*)`). `truncated: true` if more than 500; `total_count` = returned row count (≤500). Day window is uncapped and still uses exact `count()`. Windowed lists stay chronological (`start` ascending); unscoped search is newest first.
 

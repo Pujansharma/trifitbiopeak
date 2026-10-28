@@ -57,8 +57,12 @@ urlpatterns = [
     path("app/", include("integrations.communications.urls")),
     path("webhooks/", include("webhooks.urls")),
     path("pre-consultation/", include("pre_consultation.urls")),
+
       # Phase 1 wearable endpoints
     path("r/", include("wearables.callback_urls")),
     path("api/v1/devices/", include("wearables.device_urls")),
     path("api/v1/health/", include("wearables.health_urls")),
+
+    path("compliance/", include("compliance.urls")),
+
 ]

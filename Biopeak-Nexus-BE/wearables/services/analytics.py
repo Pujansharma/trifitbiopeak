@@ -874,9 +874,6 @@ def observation_value(observation: HealthObservation) -> dict:
         return {"type": "boolean", "value": observation.boolean_value}
     return {"type": "unavailable"}
 
-
-# Composite wearable + existing Biopeak clinical timeline is implemented in an
-# isolated read-only adapter to avoid changing legacy service models.
 from wearables.services import timeline as timeline_service
 
 

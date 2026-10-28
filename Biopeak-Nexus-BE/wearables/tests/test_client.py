@@ -25,6 +25,7 @@ class RookClientContractTests(TestCase):
 
         self.assertEqual(sources, {"Garmin"})
 
+    @override_settings(ROOK_AUTHORIZATION_ALLOWED_HOSTS=["connect.garmin.com"])
     def test_garmin_url_requires_trusted_https_host(self):
         self.assertEqual(
             validate_authorization_url(

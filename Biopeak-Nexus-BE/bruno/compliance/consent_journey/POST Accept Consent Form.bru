@@ -1,0 +1,43 @@
+meta {
+  name: POST Accept Consent Form
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseURL}}/compliance/consent-journey/accept-consent-form/{{customer_profile_id}}/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "marketing_communications": false,
+    "consent_form_version": "1.0"
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  POST /compliance/consent-journey/accept-consent-form/<uuid:customer_profile_id>/
+
+  Customer JWT only. Profile must belong to authenticated customer.
+
+  Body:
+  - marketing_communications (boolean)
+  - consent_form_version (string) — must match newest ConsentForm by created_at
+
+  Creates 4 customer_consent_history rows in one transaction:
+  - personalised_health_services / service_improvement_research / ai_system_improvement → value true
+  - marketing_communications → payload value
+  - decision_type: initial-confirmation (first time for profile) else re-confirmation
+
+  Success: { detail } only (no data).
+}

@@ -21,6 +21,7 @@ from appointments.utils.codes import generate_appointment_code
 from appointments.utils.calendar import center_local_date
 from appointments.utils.constants import (
     AppointmentAuditAction,
+    AppointmentCreatedByType,
     AppointmentStatus,
     ExceptionResolution,
 )
@@ -323,6 +324,7 @@ def create_appointment_record(
         care_team=care_team,
         notes=validated_data.get("notes"),
         created_by=actor,
+        created_by_type=created_by_type_for_actor(actor),
     )
     create_appointment_associates(
         appointment,
@@ -638,6 +640,23 @@ class AppointmentCareTeamNestedSerializer(BaseSerializer):
     name = serializers.CharField()
 
 
+CREATED_BY_TYPE_BY_ACCOUNT = {
+    UserType.CUSTOMER: AppointmentCreatedByType.CUSTOMER,
+    UserType.ADMIN: AppointmentCreatedByType.STAFF,
+    UserType.ASSOCIATE: AppointmentCreatedByType.STAFF,
+    UserType.SUPERUSER: AppointmentCreatedByType.STAFF,
+}
+
+
+def created_by_type_for_actor(actor):
+    if actor is None:
+        return None
+    account = getattr(actor, "account", None)
+    if account is None:
+        return None
+    return CREATED_BY_TYPE_BY_ACCOUNT.get(account.account_type)
+
+
 class AppointmentListSerializer(BaseSerializer):
     id = serializers.UUIDField(source="pk")
     code = serializers.CharField()
@@ -660,6 +679,10 @@ class AppointmentListSerializer(BaseSerializer):
     center = MinimumCenterSerializer()
     notes = serializers.CharField(allow_null=True)
     google_meet_link = serializers.URLField(allow_null=True)
+
+
+class AppointmentCalendarListSerializer(AppointmentListSerializer):
+    created_by_type = serializers.CharField(allow_null=True)
 
 
 class AppointmentDetailSerializer(AppointmentListSerializer):

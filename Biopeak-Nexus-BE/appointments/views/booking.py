@@ -22,6 +22,7 @@ from appointments.permissions import (
 )
 from appointments.serializers.booking import (
     AppointmentBookSerializer,
+    AppointmentCalendarListSerializer,
     AppointmentCancelSerializer,
     AppointmentDetailSerializer,
     AppointmentLifecycleSerializer,
@@ -397,7 +398,7 @@ class AppointmentBookView(AppointmentBookingMixin, BaseGenericAPIView):
 
 
 class AppointmentListView(AppointmentBookingMixin, BaseListAPIView):
-    serializer_class = AppointmentListSerializer
+    serializer_class = AppointmentCalendarListSerializer
     pagination_class = None
 
     def get_queryset(self):

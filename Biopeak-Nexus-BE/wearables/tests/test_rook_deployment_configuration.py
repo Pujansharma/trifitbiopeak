@@ -47,6 +47,7 @@ class RookDeploymentConfigurationTests(SimpleTestCase):
         ROOK_CLIENT_UUID="testing-uuid",
         ROOK_SECRET_KEY="testing-secret",
         ROOK_WEBHOOK_HASH_KEY="testing-hash",
+        ROOK_AUTHORIZATION_ALLOWED_HOSTS=["connect.garmin.com"],
         ROOK_CALLBACK_URL="https://bpk.example/r",
         ROOK_ALLOW_UNSIGNED_WEBHOOKS=False,
     )

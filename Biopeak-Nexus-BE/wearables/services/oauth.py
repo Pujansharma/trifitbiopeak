@@ -136,52 +136,65 @@ def claim_oauth_state(event: WearableConnectionEvent, new_type: str) -> None:
 def complete_oauth_callback(
     state_token: str, *, rook_client_uuid: str, rook_user_id: str, cancelled: bool = False
 ) -> str:
-    """Consume an opaque path state only after a ROOK server-side auth check.
+    """Verify the ROOK grant without holding a database transaction open.
 
-    Verify *both* ROOK-appended path identifiers against server settings and
-    the member's stored ROOK identity before querying the authorization API.
+    The state is read twice: first to validate identities before the upstream
+    request, then again inside a short atomic block to detect expired, used,
+    cancelled or superseded callbacks. Only the local claim and connection
+    transition occur inside that transaction.
     """
     digest = _decode_state(state_token)
     configured_client_uuid = str(getattr(settings, "ROOK_CLIENT_UUID", ""))
     if not configured_client_uuid or not hmac.compare_digest(configured_client_uuid, str(rook_client_uuid)):
         raise OAuthStateError("ROOK client identity does not match.")
-    with transaction.atomic():
-        event = (
-            WearableConnectionEvent.objects
-            .select_related("connection__identity")
-            .filter(event_type="oauth_state_pending", payload__nonceDigest=digest)
-            .first()
+
+    pending_events = WearableConnectionEvent.objects.select_related("connection__identity")
+    event = pending_events.filter(
+        event_type="oauth_state_pending", payload__nonceDigest=digest,
+    ).first()
+    if event is None:
+        raise OAuthStateError("Authorization state is unknown or already used.")
+    if not hmac.compare_digest(event.connection.identity.rook_user_id, str(rook_user_id)):
+        raise OAuthStateError("ROOK member identity does not match.")
+
+    max_age = timedelta(minutes=max(1, getattr(settings, "ROOK_OAUTH_TIMEOUT_MINUTES", 15)))
+    should_verify_upstream = not cancelled and (timezone.now() - event.created_at <= max_age)
+    authorized_sources = set()
+    if should_verify_upstream:
+        # Network I/O must be outside transaction.atomic(): ROOK can reach the
+        # read timeout and must never keep a database transaction open.
+        authorized_sources = RookClient().get_authorized_sources(
+            rook_user_id=event.connection.identity.rook_user_id,
         )
+
+    with transaction.atomic():
+        # Refresh all mutable callback/connection state after the network call.
+        event = pending_events.filter(
+            event_type="oauth_state_pending", payload__nonceDigest=digest,
+        ).first()
         if event is None:
             raise OAuthStateError("Authorization state is unknown or already used.")
         connection = event.connection
-        expected_rook_user_id = connection.identity.rook_user_id
-        if not hmac.compare_digest(expected_rook_user_id, str(rook_user_id)):
+        if not hmac.compare_digest(connection.identity.rook_user_id, str(rook_user_id)):
             raise OAuthStateError("ROOK member identity does not match.")
-        age = timezone.now() - event.created_at
-        max_age = timedelta(minutes=max(1, getattr(settings, "ROOK_OAUTH_TIMEOUT_MINUTES", 15)))
-        if age > max_age:
+        if timezone.now() - event.created_at > max_age:
             claim_oauth_state(event, "oauth_state_expired")
-            _cancel_pending_connection(connection, reason="ROOK authorization expired.", prior_status=event.previous_status)
+            _cancel_pending_connection(
+                connection, reason="ROOK authorization expired.", prior_status=event.previous_status,
+            )
             return "expired"
         if cancelled:
             claim_oauth_state(event, "oauth_state_cancelled")
-            _cancel_pending_connection(connection, reason="Member cancelled authorization.", prior_status=event.previous_status)
+            _cancel_pending_connection(
+                connection, reason="Member cancelled authorization.", prior_status=event.previous_status,
+            )
             return "cancelled"
-        # The browser path is never proof of authorization. ROOK is authoritative.
-        authorized = RookClient().get_authorized_sources(
-            rook_user_id=expected_rook_user_id
-        )
-        if connection.data_source not in authorized:
+        if connection.data_source not in authorized_sources:
             # ROOK may be eventually consistent: status-polling remains available.
             return "pending"
-        # A verified upstream grant is not enough to finish the local attempt:
-        # the connection transition and recovery job must commit together with
-        # consuming the one-time callback state. Otherwise a transient database
-        # error can burn the callback while the UI remains "Authorizing".
 
-        # Only one return handler can claim this one-time state. If the DB
-        # transition fails the surrounding atomic transaction restores pending.
+        # One-time state consumption and the connection transition commit (or
+        # roll back) together; a concurrent callback cannot claim the same row.
         claim_oauth_state(event, "oauth_state_verified")
         connection = WearableConnection.objects.filter(pk=connection.pk).first()
         if connection is None:
@@ -195,13 +208,11 @@ def complete_oauth_callback(
                 actor_user=event.actor_user, correlation_id=event.correlation_id,
             )
         elif connection.authorization_status != AuthorizationStatus.AUTHORIZED:
-            # Disconnect/cancellation raced the external ROOK check. Never
-            # override the local member's explicit revocation with a late page.
+            # Late callbacks may not reauthorize an explicitly disconnected
+            # provider or override a newer connection transition.
             event.event_type = "oauth_state_superseded"
             event.save(update_fields=["event_type", "updated_at"])
             return "cancelled"
-        # A status poll may have completed the grant first; that is already a
-        # success, and this callback must not trigger another historical import.
         return "authorized"
 
 

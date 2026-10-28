@@ -178,6 +178,11 @@ class PreferredUnits(models.TextChoices):
     IMPERIAL = "imperial", "Imperial"
 
 
+# Shared limits for the job queue and the public health timeline.
+HEALTH_MAXIMUM_JOB_ATTEMPTS = 3
+HEALTH_TIMELINE_MAXIMUM_OFFSET = 1000
+HEALTH_TIMELINE_MAXIMUM_LIMIT = 200
+
 ALGORITHM_VERSION = "wearables-v1.2"
 
 HEADLINE_METRICS = {

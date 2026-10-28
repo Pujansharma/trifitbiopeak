@@ -8,6 +8,8 @@ from rest_framework import serializers
 from core.utils.serializers import BaseSerializer
 from wearables.utils.constants import (
     HEALTH_DOMAIN_ORDER,
+    HEALTH_TIMELINE_MAXIMUM_LIMIT,
+    HEALTH_TIMELINE_MAXIMUM_OFFSET,
     NATIVE_WEARABLE_SOURCES,
     HistoricalImportStatus,
     PermissionStatus,
@@ -146,8 +148,12 @@ class TimelineQuerySerializer(BaseSerializer):
         choices=[(domain, domain) for domain in HEALTH_DOMAIN_ORDER],
         required=False,
     )
-    offset = serializers.IntegerField(min_value=0, default=0)
-    limit = serializers.IntegerField(min_value=1, max_value=200, default=50)
+    offset = serializers.IntegerField(
+        min_value=0, max_value=HEALTH_TIMELINE_MAXIMUM_OFFSET, default=0,
+    )
+    limit = serializers.IntegerField(
+        min_value=1, max_value=HEALTH_TIMELINE_MAXIMUM_LIMIT, default=50,
+    )
 
     def validate(self, attributes):
         start = attributes.get("start")

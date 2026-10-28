@@ -14,7 +14,9 @@ from wearables.services import analytics as analytics_service
 from programs.services.models import ServiceResult
 from diagnostics_orders.models import DiagnosticOrderCustomer
 from diagnostics_orders.utils.constants import DiagnosticOrderStatus
-from wearables.utils.constants import HealthCardState
+from wearables.utils.constants import (
+    HEALTH_TIMELINE_MAXIMUM_LIMIT, HEALTH_TIMELINE_MAXIMUM_OFFSET, HealthCardState,
+)
 
 # Classification uses the client's existing clinical result codes; do not
 # assume other assessment report types represent blood diagnostics.
@@ -177,6 +179,12 @@ def _timeline_gaps(*, customer_profile, start_date, end_date, domain) -> list[di
 
 def timeline_payload(*, customer_profile, start_date: date | None, end_date: date | None,
                      domain: str | None, offset: int, limit: int) -> dict:
+    # Serializers validate public requests. Enforce the same bounds here so
+    # internal callers cannot accidentally materialize an unbounded page.
+    if not 0 <= offset <= HEALTH_TIMELINE_MAXIMUM_OFFSET:
+        raise ValueError("Timeline offset exceeds the supported maximum.")
+    if not 1 <= limit <= HEALTH_TIMELINE_MAXIMUM_LIMIT:
+        raise ValueError("Timeline limit exceeds the supported maximum.")
     maximum = offset + limit + 1
     items = _wearable_entries(
         customer_profile,

@@ -9,6 +9,7 @@ from accounts.customers.models import CustomerProfile
 from accounts.utils import get_user_model
 from appointments.utils.constants import (
     AppointmentAuditAction,
+    AppointmentCreatedByType,
     AppointmentStatus,
     AvailabilityOrigin,
     ExceptionResolution,
@@ -479,6 +480,11 @@ class Appointment(BaseUUIDModel):
         blank=True,
         related_name="created_appointments",
     )
+    created_by_type = models.CharField(
+        max_length=16,
+        null=True,
+        blank=True,
+    )
 
     class Meta:
         ordering = ["-start_datetime"]
@@ -507,6 +513,11 @@ class Appointment(BaseUUIDModel):
                     status__in=_BUSY_STATUS_VALUES,
                 ),
                 name="uniq_open_appt_per_ps",
+            ),
+            models.CheckConstraint(
+                condition=Q(created_by_type__isnull=True)
+                | Q(created_by_type__in=AppointmentCreatedByType.values),
+                name="appointment_created_by_type_valid",
             ),
             models.CheckConstraint(
                 condition=Q(end_datetime__gt=F("start_datetime")),

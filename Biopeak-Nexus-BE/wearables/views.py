@@ -38,7 +38,7 @@ from wearables.services.connections import (
 from wearables.services.identity import resolve_customer_profile
 from wearables.services.oauth import complete_oauth_callback, OAuthStateError
 from wearables.services.consent import has_active_wearable_consent, revoke_wearable_consent
-from wearables.services.job_queue import enqueue_health_job
+from wearables.services.job_queue import enqueue_or_reuse_recovery_job
 from wearables.utils.constants import (HEALTH_DOMAIN_ORDER, ConnectionMethod, ConnectionStatus,
     HealthJobType, HistoricalImportStatus, WearableSource, NATIVE_WEARABLE_SOURCES)
 
@@ -228,6 +228,14 @@ class DeviceSDKConfigView(WearablesAPIView):
                 customer_profile=customer_profile,
                 connection_method=ConnectionMethod.SDK,
             )
+            # A disconnected/expired native connection must not remain a
+            # credential-distribution prerequisite just because its row exists.
+            .exclude(status__in=[
+                ConnectionStatus.NEVER_CONNECTED,
+                ConnectionStatus.DISCONNECTED,
+                ConnectionStatus.AUTHORIZATION_EXPIRED,
+                ConnectionStatus.PERMISSION_DENIED,
+            ])
             .first()
         )
         if native_connection is None:
@@ -378,25 +386,25 @@ class DeviceRetrySyncView(WearablesAPIView):
             self.raise_bad_request("This provider account is closed. Connect a different provider.")
         if connection.connection_method == ConnectionMethod.SDK:
             self.raise_bad_request("Re-run the ROOK native SDK sync on the member's device.")
-        connection.import_status = HistoricalImportStatus.RUNNING
-        connection.save(update_fields=["import_status", "updated_at"])
-        job = enqueue_health_job(
-            job_type=HealthJobType.RECOVERY_PULL,
-            idempotency_key=f"manual-recovery:{connection.pk}:{uuid.uuid4()}",
-            customer_profile=customer_profile,
-            connection=connection,
+        job, created = enqueue_or_reuse_recovery_job(
+            connection=connection, customer_profile=customer_profile, manual=True,
         )
-        record_connection_event(
-            connection,
-            event_type="manual_sync_requested",
-            previous_status=connection.status,
-            actor_user=request.user,
-            correlation_id=self.correlation_id(),
-            detail="Member requested another ROOK API recovery attempt.",
-        )
+        if job is None:
+            self.raise_bad_request("Device connection changed. Refresh device status and retry.")
+        if created:
+            record_connection_event(
+                connection,
+                event_type="manual_sync_requested",
+                previous_status=connection.status,
+                actor_user=request.user,
+                correlation_id=self.correlation_id(),
+                detail="Member requested another ROOK API recovery attempt.",
+            )
+        connection.refresh_from_db()
         return self.send_response(
-            "ROOK sync retry queued.",
-            {"jobId": str(job.pk), "queued": True, "connection": serialize_connection(connection)},
+            "ROOK sync retry queued." if created else "ROOK sync is already queued.",
+            {"jobId": str(job.pk), "queued": True, "alreadyQueued": not created,
+             "connection": serialize_connection(connection)},
             status=202,
         )
 

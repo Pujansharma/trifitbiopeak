@@ -1,0 +1,30 @@
+meta {
+  name: GET Latest Consent Form
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseURL}}/compliance/consent-journey/latest-consent-form/
+  body: none
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  GET /compliance/consent-journey/latest-consent-form/
+
+  Customer JWT only.
+  Returns newest ConsentForm by created_at:
+  - consent_form_url
+  - consent_form_version
+
+  404 if none uploaded.
+}

@@ -11,7 +11,7 @@ from wearables.services.job_processor import (
 from wearables.services.oauth import expire_oauth_attempts
 from wearables.models import WearableConnection
 from wearables.utils.constants import ConnectionStatus
-from wearables.services.job_queue import enqueue_health_job
+from wearables.services.job_queue import enqueue_health_job, enqueue_or_reuse_recovery_job
 from wearables.utils.constants import HealthJobType
 
 
@@ -45,13 +45,11 @@ class Command(BaseCommand):
             count += 1
         recovery_count = 0
         for connection in connections_requiring_recovery_pull().iterator():
-            enqueue_health_job(
-                job_type=HealthJobType.RECOVERY_PULL,
-                idempotency_key=f"recovery:{connection.pk}:{date_key}",
-                customer_profile=connection.customer_profile,
-                connection=connection,
+            job, created = enqueue_or_reuse_recovery_job(
+                connection=connection, customer_profile=connection.customer_profile,
             )
-            recovery_count += 1
+            if job is not None and created:
+                recovery_count += 1
         recovery = enqueue_orphaned_normalization_jobs()
         self.stdout.write(
             self.style.SUCCESS(

@@ -1,0 +1,133 @@
+meta {
+  name: POST Upload Consent Form
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseURL}}/compliance/consent-journey/upload-consent-form/
+  body: multipartForm
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+}
+
+body:multipart-form {
+  consent_form: @file(Diet_Plan_95_to_85kg.pdf)
+  version: 1.0
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}
+
+docs {
+  POST /compliance/consent-journey/upload-consent-form/
+
+  multipart/form-data:
+  - consent_form (file, required) — PDF only (any size); stored via FileField (S3 in staging/prod)
+  - version (string, required, unique, max 50) — e.g. "1.0"; must be unique across ConsentForm
+  
+  Server stores SHA-256 of the PDF bytes as ConsentForm.consent_form_hash (write-once on upload).
+  Hash is never accepted from the client and never returned in any API response.
+  
+  Admin JWT only (IsAdminUser).
+  
+  Sample request fields:
+  - consent_form = Biopeak_Consent_Terms.pdf (or any PDF under bruno/)
+  - version = "1.0"
+  
+  Success detail: "Consent form uploaded."
+  Non-PDF → 400 consent_form: "Consent form must be a PDF file."
+  Duplicate version → 400 version: "A consent form with this version already exists."
+}
+
+example {
+  name: 201 Uploaded
+
+  request: {
+    url: {{baseURL}}/compliance/consent-journey/upload-consent-form/
+    method: POST
+    mode: multipart
+    headers: {
+      Accept: application/json
+    }
+
+    body:multipart-form: {
+      consent_form: @file(Diet_Plan_95_to_85kg.pdf)
+      version: 1.0
+    }
+  }
+
+  response: {
+    headers: {
+      Content-Type: application/json
+    }
+
+    status: {
+      code: 201
+      text: Created
+    }
+
+    body: {
+      type: json
+      content: '''
+        {
+          "detail": "Consent form uploaded.",
+          "data": {
+            "id": "019ce5de-9b83-c033-6007-cd18543deeeb",
+            "consent_form": "https://cdn.example/media/compliance/consent-forms/Diet_Plan_95_to_85kg.pdf",
+            "version": "1.0",
+            "created_at": "2026-10-17T00:00:00.000000Z",
+            "updated_at": "2026-10-17T00:00:00.000000Z"
+          }
+        }
+      '''
+    }
+  }
+}
+
+example {
+  name: 400 Duplicate version
+
+  request: {
+    url: {{baseURL}}/compliance/consent-journey/upload-consent-form/
+    method: POST
+    mode: multipart
+    headers: {
+      Accept: application/json
+    }
+
+    body:multipart-form: {
+      consent_form: @file(Diet_Plan_95_to_85kg.pdf)
+      version: 1.0
+    }
+  }
+
+  response: {
+    headers: {
+      Content-Type: application/json
+    }
+
+    status: {
+      code: 400
+      text: Bad Request
+    }
+
+    body: {
+      type: json
+      content: '''
+        {
+          "detail": {
+            "version": [
+              "A consent form with this version already exists."
+            ]
+          }
+        }
+      '''
+    }
+  }
+}

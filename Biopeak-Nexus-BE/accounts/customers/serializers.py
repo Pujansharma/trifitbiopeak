@@ -40,6 +40,10 @@ from accounts.users.utils.helper import calculate_age
 from accounts.utils.constants import UserType
 from accounts.utils.db import get_user_account_type
 from accounts.utils.helper import dedupe_id_dicts, dedupe_ids
+from compliance.consent_journey.serializers import (
+    ConsentGivenListSerializer,
+    resolve_is_latest_consent_given,
+)
 from core.utils.fields import PhoneNumberSerializerField
 from core.utils.serializers import BaseModelSerializer, BaseSerializer
 from integrations.metsights.utils.profiles import get_or_create_metsights_profile
@@ -89,9 +93,11 @@ class BaseCustomerProfileSerializer(BaseModelSerializer):
         source="customer.contact_email", read_only=True
     )
     phone = PhoneNumberSerializerField(source="customer.user.phone", read_only=True)
+    is_latest_consent_given = serializers.SerializerMethodField()
 
     class Meta:
         model = CustomerProfile
+        list_serializer_class = ConsentGivenListSerializer
         fields = [
             "id",
             "contact_email",
@@ -106,9 +112,13 @@ class BaseCustomerProfileSerializer(BaseModelSerializer):
             "is_onboarding_sent",
             "is_onboarding_completed",
             "is_converted",
+            "is_latest_consent_given",
             "created_at",
             "updated_at",
         ]
+
+    def get_is_latest_consent_given(self, instance):
+        return resolve_is_latest_consent_given(self, instance)
 
 
 class CustomerProfileWithCenterSerializer(BaseCustomerProfileSerializer):
@@ -116,6 +126,7 @@ class CustomerProfileWithCenterSerializer(BaseCustomerProfileSerializer):
 
     class Meta:
         model = CustomerProfile
+        list_serializer_class = ConsentGivenListSerializer
         fields = [
             "id",
             "contact_email",
@@ -144,11 +155,13 @@ class CustomerProfileSerializer(BaseModelSerializer):
     phone = PhoneNumberSerializerField(source="customer.user.phone", required=False)
     age = serializers.SerializerMethodField()
     created_by = BaseUserSerializer(read_only=True)
+    is_latest_consent_given = serializers.SerializerMethodField()
 
     home_center = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = CustomerProfile
+        list_serializer_class = ConsentGivenListSerializer
         fields = [
             "id",
             "contact_email",
@@ -163,6 +176,7 @@ class CustomerProfileSerializer(BaseModelSerializer):
             "is_onboarding_sent",
             "is_onboarding_completed",
             "is_active",
+            "is_latest_consent_given",
             "created_at",
             "updated_at",
             "created_by",
@@ -177,6 +191,9 @@ class CustomerProfileSerializer(BaseModelSerializer):
         if date_of_birth > timezone.localdate():
             return None
         return calculate_age(date_of_birth)
+
+    def get_is_latest_consent_given(self, instance):
+        return resolve_is_latest_consent_given(self, instance)
 
     def get_home_center(self, instance):
         assignments = getattr(instance, "primary_center_assignments", None)

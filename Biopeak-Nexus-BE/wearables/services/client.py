@@ -54,13 +54,17 @@ def validate_authorization_url(data_source: str, value: Any) -> str | None:
         or invalid_port
     ):
         raise RookServiceError("ROOK returned an unsafe authorization URL.")
-    if data_source == "Garmin":
-        if parsed.hostname != "connect.garmin.com":
-            raise RookServiceError("ROOK returned an untrusted Garmin URL.")
-        return value
-    configured_hosts = getattr(settings, "ROOK_AUTHORIZATION_ALLOWED_HOSTS", [])
-    if configured_hosts and parsed.hostname not in configured_hosts:
+    # ROOK/provider redirects are untrusted input. Never accept arbitrary
+    # HTTPS origins when the deployment forgot to configure its allowlist.
+    configured_hosts = getattr(settings, "ROOK_AUTHORIZATION_ALLOWED_HOSTS", []) or []
+    if isinstance(configured_hosts, str):
+        configured_hosts = configured_hosts.split(",")
+    trusted_hosts = {str(host).strip().lower() for host in configured_hosts if str(host).strip()}
+    if not trusted_hosts or parsed.hostname not in trusted_hosts:
         raise RookServiceError("ROOK returned an untrusted authorization host.")
+    # Keep Garmin's additional provider-specific host pinning.
+    if data_source == "Garmin" and parsed.hostname != "connect.garmin.com":
+        raise RookServiceError("ROOK returned an untrusted Garmin URL.")
     return value
 
 

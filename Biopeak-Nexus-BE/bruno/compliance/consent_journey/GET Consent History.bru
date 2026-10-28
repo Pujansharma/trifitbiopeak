@@ -1,0 +1,40 @@
+meta {
+  name: GET Consent History
+  type: http
+  seq: 6
+}
+
+get {
+  url: {{baseURL}}/compliance/consent-journey/consent-history/{{customer_profile_id}}/
+  body: none
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  GET /compliance/consent-journey/consent-history/<uuid:customer_profile_id>/
+
+  Customer JWT only. Profile must belong to authenticated customer.
+
+  Full consent history for the profile, newest → oldest.
+  Flat history rows only — no nested consent_form object.
+  Not paginated — returns entire list.
+
+  {
+    detail,
+    data: [
+      {
+        id, name, value, consent_form_version, decision_type, created_at
+      },
+      ...
+    ]
+  }
+  Empty data[] if none. name / decision_type / consent_form_version = stored codes.
+}

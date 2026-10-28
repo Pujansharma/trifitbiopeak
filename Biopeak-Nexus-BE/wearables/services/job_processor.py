@@ -29,9 +29,12 @@ from wearables.utils.constants import (
     HealthJobStatus,
     HealthJobType,
     HistoricalImportStatus,
+    HEALTH_MAXIMUM_JOB_ATTEMPTS,
 )
 
-MAXIMUM_JOB_ATTEMPTS = 3
+MAXIMUM_JOB_ATTEMPTS = HEALTH_MAXIMUM_JOB_ATTEMPTS
+# Do not let 21-call recovery pulls monopolize a scheduled sweep.
+MAXIMUM_RECOVERY_PULLS_PER_SWEEP = 1
 STALE_JOB_MINUTES = 15
 # A 7-day API recovery can make up to 21 sequential HTTP calls, followed by
 # local normalization. An independent, long lease and request-level heartbeat
@@ -396,15 +399,37 @@ def process_health_job(job: HealthProcessingJob) -> dict:
 
 def process_pending_health_jobs(*, limit: int = 50) -> list[dict]:
     reset_stale_health_jobs()
-    job_ids = list(
-        HealthProcessingJob.objects.filter(
-            status__in=[HealthJobStatus.PENDING, HealthJobStatus.FAILED],
-            scheduled_at__lte=timezone.now(),
-            attempt_count__lt=MAXIMUM_JOB_ATTEMPTS,
-        )
-        .order_by("scheduled_at")
+    if limit <= 0:
+        return []
+    ready_jobs = HealthProcessingJob.objects.filter(
+        status__in=[HealthJobStatus.PENDING, HealthJobStatus.FAILED],
+        scheduled_at__lte=timezone.now(),
+        attempt_count__lt=MAXIMUM_JOB_ATTEMPTS,
+    )
+    # Always prioritize accepted webhook normalization, even under a large
+    # freshness backlog. If normalization does not fill the sweep, reserve at
+    # most one slot for recovery so hourly freshness jobs cannot starve it.
+    normalization_job_ids = list(
+        ready_jobs.filter(job_type=HealthJobType.NORMALIZE_DOCUMENT)
+        .order_by("scheduled_at", "pk")
         .values_list("pk", flat=True)[:limit]
     )
+    remaining_slots = limit - len(normalization_job_ids)
+    recovery_slots = min(MAXIMUM_RECOVERY_PULLS_PER_SWEEP, remaining_slots)
+    recovery_job_ids = list(
+        ready_jobs.filter(job_type=HealthJobType.RECOVERY_PULL)
+        .order_by("scheduled_at", "pk")
+        .values_list("pk", flat=True)[:recovery_slots]
+    ) if recovery_slots else []
+    other_slots = remaining_slots - len(recovery_job_ids)
+    other_job_ids = list(
+        ready_jobs.exclude(job_type__in=[
+            HealthJobType.NORMALIZE_DOCUMENT, HealthJobType.RECOVERY_PULL,
+        ])
+        .order_by("scheduled_at", "pk")
+        .values_list("pk", flat=True)[:other_slots]
+    ) if other_slots else []
+    job_ids = normalization_job_ids + other_job_ids + recovery_job_ids
     results = []
     handled_errors = (
         RookServiceError,

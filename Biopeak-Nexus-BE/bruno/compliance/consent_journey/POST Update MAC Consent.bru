@@ -1,0 +1,43 @@
+meta {
+  name: POST Update MAC Consent
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseURL}}/compliance/consent-journey/update-MAC-consent/{{customer_profile_id}}/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "value": false,
+    "consent_form_version": "1.0"
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  POST /compliance/consent-journey/update-MAC-consent/<uuid:customer_profile_id>/
+
+  Customer JWT only. Profile must belong to authenticated customer.
+
+  Body:
+  - value (boolean)
+  - consent_form_version (string) — must be newest ConsentForm AND
+    profile must already have a marketing_communications row for it
+
+  Appends one customer_consent_history row:
+  - consent_name = marketing_communications
+  - decision_type = re-confirmation
+
+  Success: { detail } only (no data).
+}

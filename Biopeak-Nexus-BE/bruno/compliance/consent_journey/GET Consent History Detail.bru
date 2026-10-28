@@ -1,0 +1,33 @@
+meta {
+  name: GET Consent History Detail
+  type: http
+  seq: 7
+}
+
+get {
+  url: {{baseURL}}/compliance/consent-journey/consent-history/{{customer_profile_id}}/consent/{{consent_id}}/
+  body: none
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  GET /compliance/consent-journey/consent-history/<uuid:customer_profile_id>/consent/<uuid:consent_id>/
+
+  Customer JWT only. Profile must belong to authenticated customer.
+  consent_id = CustomerConsentHistory UUID.
+
+  Expanded detail (nested consent_form). List endpoint stays flat.
+  data: {
+    id, name, value, decision_type, created_at,
+    consent_form: { id, version, consent_form_url, created_at }
+  }
+  404 if not found / not owned.
+}

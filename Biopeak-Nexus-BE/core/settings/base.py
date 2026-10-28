@@ -58,7 +58,12 @@ INSTALLED_APPS = [
     "webhooks.whatsapp",
     "webhooks.sms",
     "pre_consultation",
+
      "wearables",
+
+    "compliance",
+    "compliance.consent_journey",
+
 ]
 
 AUTH_USER_MODEL = "users.User"
@@ -213,9 +218,14 @@ SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 # cache until a genuinely shared Redis/Memcached service is deployed. The
 # existing default cache is unchanged for unrelated legacy features; wearable
 # DRF throttles using it are per-worker safeguards, not the production WAF.
+
+
 CACHES = {
-    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"},
-    "health": {"BACKEND": "django.core.cache.backends.dummy.DummyCache"},
+    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "biopeak-default",
+    },
+    "health": {"BACKEND": "django.core.cache.backends.dummy.DummyCache",
+    },
 }
 HEALTH_DASHBOARD_CACHE_SECONDS = config("HEALTH_DASHBOARD_CACHE_SECONDS", default=60, cast=int)
 HEALTH_MIN_BASELINE_DAYS = config("HEALTH_MIN_BASELINE_DAYS", default=7, cast=int)

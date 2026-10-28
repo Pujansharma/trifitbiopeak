@@ -6,6 +6,8 @@ This command cannot certify that provisioning or webhooks are enabled upstream.
 from urllib.parse import urlsplit
 
 from django.conf import settings
+from django.core.cache import caches
+from django.core.cache.backends.locmem import LocMemCache
 from django.core.management.base import BaseCommand, CommandError
 
 from wearables.services.config import provisioned_sources
@@ -35,6 +37,14 @@ def rook_readiness_checks() -> list[tuple[str, str, str]]:
     checks: list[tuple[str, str, str]] = []
     if not getattr(settings, "WEARABLES_ENABLED", False):
         checks.append(("WARN", "WEARABLES_ENABLED", "Feature is disabled in this environment."))
+    elif isinstance(caches["default"], LocMemCache):
+        # Health dashboard caching uses DB snapshots, but ScopedRateThrottle
+        # still uses Django's default cache. Local memory is per worker.
+        checks.append((
+            "WARN", "WEARABLE_EDGE_RATE_LIMIT",
+            "Default-cache API throttling is per worker. Before general availability, "
+            "enable shared throttling or enforce limits at WAF/API Gateway.",
+        ))
     sources = provisioned_sources()
     if not sources:
         checks.append(("ERROR", "ROOK_PROVISIONED_SOURCES", "Set environment-prefixed provisioned provider names; ROOK must approve them."))
@@ -46,6 +56,14 @@ def rook_readiness_checks() -> list[tuple[str, str, str]]:
         if "Strava" in sources:
             checks.append(("WARN", "ROOK_PROVISIONED_SOURCES", "Strava is not supported by the current ROOK authorizer route."))
         if any(source not in NATIVE_WEARABLE_SOURCES for source in sources):
+            trusted_hosts = getattr(settings, "ROOK_AUTHORIZATION_ALLOWED_HOSTS", []) or []
+            if isinstance(trusted_hosts, str):
+                trusted_hosts = trusted_hosts.split(",")
+            trusted_hosts = {str(host).strip().lower() for host in trusted_hosts if str(host).strip()}
+            if not trusted_hosts:
+                checks.append(("ERROR", "ROOK_AUTHORIZATION_ALLOWED_HOSTS", "Set exact trusted HTTPS authorization hosts; empty lists are rejected."))
+            elif "Garmin" in sources and "connect.garmin.com" not in trusted_hosts:
+                checks.append(("ERROR", "ROOK_AUTHORIZATION_ALLOWED_HOSTS", "Garmin requires connect.garmin.com in the trusted host list."))
             if not getattr(settings, "ROOK_CLIENT_UUID", ""):
                 checks.append(("ERROR", "ROOK_CLIENT_UUID", "Missing ROOK API client UUID."))
             if not getattr(settings, "ROOK_SECRET_KEY", ""):

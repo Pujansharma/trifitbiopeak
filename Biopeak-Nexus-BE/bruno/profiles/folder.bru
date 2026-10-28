@@ -10,4 +10,8 @@ docs {
   Customer profile routes under /profiles/.
   Detail PATCH: profiles/PATCH Profile.bru — admin/associate may set
   is_onboarding_sent / is_onboarding_completed (list serializers keep completed read-only).
+
+  List/detail + v2 nested customer_profile expose
+  is_latest_consent_given (bool): true when profile's latest
+  consent-history set (all consent names, same version) matches newest ConsentForm.
 }

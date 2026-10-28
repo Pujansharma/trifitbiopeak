@@ -10,6 +10,11 @@ BUSY_APPOINTMENT_STATUSES = frozenset(
 )
 
 
+class AppointmentCreatedByType(models.TextChoices):
+    CUSTOMER = "customer", "Customer"
+    STAFF = "staff", "Staff"
+
+
 class AppointmentStatus(models.TextChoices):
     CONFIRMED = "confirmed", "Confirmed"
     CHECKED_IN = "checked_in", "Checked In"

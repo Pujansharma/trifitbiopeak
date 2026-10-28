@@ -39,4 +39,5 @@ docs {
   search: customer name/email/phone, appointment code, service name. Omit start for all-history
   matches (newest first, also capped 500). search + start = windowed. Never send empty search=.
   List items include nested center {id, code, name}.
+  created_by_type: "customer" | "staff" | null. null = unset at book time (legacy or unmapped account). Deleting the booker does not clear it. Staff walk-in for a customer is "staff".
 }

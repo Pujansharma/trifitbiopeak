@@ -5,6 +5,7 @@ uv run python manage.py test wearables.tests.test_pr_review_12_fixes
 """
 import ast
 from datetime import date, datetime, timedelta, timezone as utc_timezone
+from unittest.mock import patch
 
 from django.conf import settings
 from django.db import connection
@@ -249,7 +250,16 @@ class ReviewDatabaseTests(TestCase):
         ])
         self.identity.timezone_name = "Asia/Kolkata"
         self.identity.save(update_fields=["timezone_name", "updated_at"])
-        result = remap_member_local_days(self.profile)
+        # More than 500 observations must be committed in separate small
+        # transactions rather than a single long history-wide transaction.
+        original_bulk_update = HealthObservation.objects.bulk_update
+        with patch.object(
+            HealthObservation.objects, "bulk_update", wraps=original_bulk_update,
+        ) as bulk_update:
+            result = remap_member_local_days(self.profile)
+        self.assertEqual(
+            [len(call.args[0]) for call in bulk_update.call_args_list], [500, 10],
+        )
         self.assertEqual(result["remapped"], 510)
         self.assertEqual(HealthObservation.objects.filter(local_date=date(2026, 10, 9)).count(), 510)
         self.assertEqual(HealthObservation.objects.filter(observed_at=instant).count(), 510)
