@@ -22,7 +22,7 @@ Status: **Health dashboard issue addressed in code; production-wide API throttli
 
 - `CACHES['health']` uses Django `DummyCache` in `core/settings/base.py`, so there is no cross-request process-local health cache.
 - `wearables/services/analytics.py` uses `HealthDomainSnapshot` database rows as shared read-through snapshots, invalidated when data changes. Tests cover that the local/dummy cache is not considered shared.
-- `CACHES['default']` remains legacy `LocMemCache` for unrelated existing features. DRF's `ScopedRateThrottle` uses the default cache, so limits are **per worker** rather than a global guarantee. This is **not production-complete on multi-worker ECS until a shared throttle backend or WAF/API Gateway rules are confirmed**. The config check now emits a `WEARABLE_EDGE_RATE_LIMIT` warning when using a local default cache.
+- **Updated 2026-10-29:** Local development retains `LocMemCache`, but staging and production now require `STG_REDIS_URL` / `PRD_REDIS_URL` and configure Django `CACHES['default']` as shared `RedisCache` when wearables are enabled. Starting with a missing URL fails closed. `CACHES['health']` remains `DummyCache` and PostgreSQL snapshots remain authoritative. WAF is an additional coarse cap, not a replacement for shared DRF counters. The actual ElastiCache endpoint, cross-worker tests and credentials must be configured by deployment.
 - Do not claim one global request limit until infrastructure engineering has confirmed the deployed WAF/API Gateway/shared cache behavior and tested it using several ECS tasks.
 
 ## 3. Local-date timezone remapping (P2)

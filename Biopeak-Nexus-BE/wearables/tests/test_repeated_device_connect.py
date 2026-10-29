@@ -24,7 +24,10 @@ from wearables.services.identity import get_or_create_rook_identity
 from wearables.utils.constants import AuthorizationStatus, ConnectionStatus
 
 
-@override_settings(ROOK_CALLBACK_URL="https://api.example.org/r")
+@override_settings(
+    ROOK_CALLBACK_URL="https://api.example.org/r",
+    ROOK_AUTHORIZATION_ALLOWED_HOSTS=["connect.garmin.com"],
+)
 class RepeatedDeviceConnectTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(email="phase1-retry@example.com")
@@ -95,7 +98,7 @@ class RepeatedDeviceConnectTests(TestCase):
             connection=connection, event_type="oauth_state_authorizer_failed",
         ).count(), 1)
 
-    @patch("wearables.services.connections.enqueue_health_job")
+    @patch("wearables.services.connections.enqueue_or_reuse_recovery_job")
     @patch("wearables.services.connections.RookClient.get_authorized_sources", return_value={"Garmin"})
     @patch("wearables.services.connections.RookClient.get_authorizer")
     def test_repeated_reconnect_preserves_reimport_origin(self, authorizer, sources, enqueue):

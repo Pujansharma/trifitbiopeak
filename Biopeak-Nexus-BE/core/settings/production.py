@@ -1,4 +1,5 @@
 from corsheaders.defaults import default_headers
+from django.core.exceptions import ImproperlyConfigured
 
 from core.settings.base import *
 
@@ -189,3 +190,24 @@ ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS = config(
 HEALTH_TREND_MINIMUM_OBSERVATIONS = config("PRD_HEALTH_TREND_MINIMUM_OBSERVATIONS", default=7, cast=int)
 HEALTH_HISTORICAL_GAP_DAYS = config("PRD_HEALTH_HISTORICAL_GAP_DAYS", default=7, cast=int)
 TIMELINE_INCLUDE_LEGACY_RESULTS = config("PRD_TIMELINE_INCLUDE_LEGACY_RESULTS", default=True, cast=bool)
+
+
+# Shared default cache ensures ScopedRateThrottle counts span all ECS tasks.
+# The independent "health" cache remains DummyCache: health snapshots are in DB.
+# A missing Redis URL must fail closed when wearables are enabled, rather than
+# silently releasing per-worker throttles into a production-like environment.
+_shared_redis_url = config("PRD_REDIS_URL", default="").strip()
+if _shared_redis_url:
+    if not _shared_redis_url.startswith(("redis://", "rediss://")):
+        raise ImproperlyConfigured("PRD_REDIS_URL must use redis:// or rediss://.")
+    CACHES["default"] = {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": _shared_redis_url,
+        "KEY_PREFIX": "biopeak:prod",
+        "TIMEOUT": 300,
+    }
+elif WEARABLES_ENABLED:
+    raise ImproperlyConfigured(
+        "PRD_REDIS_URL is required for shared wearable API throttling. "
+        "Configure the approved ElastiCache Redis endpoint before enabling wearables."
+    )

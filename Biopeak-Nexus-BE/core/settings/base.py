@@ -216,16 +216,12 @@ SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 # Health data must never be cached per process on multi-ECS deployments.
 # A DummyCache ensures DB-backed HealthDomainSnapshot is the only cross-request
 # cache until a genuinely shared Redis/Memcached service is deployed. The
-# existing default cache is unchanged for unrelated legacy features; wearable
-# DRF throttles using it are per-worker safeguards, not the production WAF.
-
-
+# base default LocMemCache is for local development only; staging/production
+# replace default with shared Redis when wearables are enabled. WAF complements
+# Redis but cannot replace shared ScopedRateThrottle counters.
 CACHES = {
-    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-        "LOCATION": "biopeak-default",
-    },
-    "health": {"BACKEND": "django.core.cache.backends.dummy.DummyCache",
-    },
+    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"},
+    "health": {"BACKEND": "django.core.cache.backends.dummy.DummyCache"},
 }
 HEALTH_DASHBOARD_CACHE_SECONDS = config("HEALTH_DASHBOARD_CACHE_SECONDS", default=60, cast=int)
 HEALTH_MIN_BASELINE_DAYS = config("HEALTH_MIN_BASELINE_DAYS", default=7, cast=int)

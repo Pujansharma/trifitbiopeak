@@ -38,12 +38,13 @@ def rook_readiness_checks() -> list[tuple[str, str, str]]:
     if not getattr(settings, "WEARABLES_ENABLED", False):
         checks.append(("WARN", "WEARABLES_ENABLED", "Feature is disabled in this environment."))
     elif isinstance(caches["default"], LocMemCache):
-        # Health dashboard caching uses DB snapshots, but ScopedRateThrottle
-        # still uses Django's default cache. Local memory is per worker.
+        # ScopedRateThrottle always uses the default Django cache; WAF cannot
+        # coordinate its counters across ECS tasks.
+        production_like = settings.SETTINGS_MODULE.endswith((".production", ".staging"))
         checks.append((
-            "WARN", "WEARABLE_EDGE_RATE_LIMIT",
-            "Default-cache API throttling is per worker. Before general availability, "
-            "enable shared throttling or enforce limits at WAF/API Gateway.",
+            "ERROR" if production_like else "WARN", "WEARABLE_EDGE_RATE_LIMIT",
+            "Django default-cache throttling is per worker. Configure shared "
+            "ElastiCache Redis for default; WAF is only an additional edge cap.",
         ))
     sources = provisioned_sources()
     if not sources:
@@ -77,7 +78,16 @@ def rook_readiness_checks() -> list[tuple[str, str, str]]:
                 checks.append(("INFO", "ROOK_CALLBACK_URL", "Valid URL format. Register it in ROOK and verify external HTTPS access."))
         if any(source in NATIVE_WEARABLE_SOURCES for source in sources):
             sdk_secret = getattr(settings, "ROOK_SDK_SECRET", "")
-            if not getattr(settings, "ROOK_SDK_CLIENT_UUID", "") or not sdk_secret:
+            sdk_client_uuid = getattr(settings, "ROOK_SDK_CLIENT_UUID", "").strip()
+            api_client_uuid = getattr(settings, "ROOK_CLIENT_UUID", "").strip()
+            # SDK uploads must land in the same ROOK client as server-side
+            # authorizers/webhooks; otherwise rookUserId alone cannot join them.
+            if sdk_client_uuid and api_client_uuid and sdk_client_uuid != api_client_uuid:
+                checks.append((
+                    "ERROR", "ROOK_SDK_CLIENT_UUID",
+                    "Mobile SDK and server API client UUIDs differ; use the same ROOK Client/environment for unified user data.",
+                ))
+            if not sdk_client_uuid or not sdk_secret:
                 checks.append(("ERROR", "ROOK_SDK_CLIENT_UUID / ROOK_SDK_SECRET", "Native SDK provisioned but SDK credentials are missing."))
             if sdk_secret and sdk_secret == getattr(settings, "ROOK_SECRET_KEY", ""):
                 checks.append(("ERROR", "ROOK_SDK_SECRET", "Mobile SDK credential MUST differ from server-side ROOK_SECRET_KEY."))

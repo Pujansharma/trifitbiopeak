@@ -227,6 +227,9 @@ class DeviceSDKConfigView(WearablesAPIView):
             .filter(
                 customer_profile=customer_profile,
                 connection_method=ConnectionMethod.SDK,
+                # A stale connection must not distribute SDK credentials when
+                # its provider is no longer provisioned in this deployment.
+                data_source__in=(provisioned_sources() or set()) & NATIVE_WEARABLE_SOURCES,
             )
             # A disconnected/expired native connection must not remain a
             # credential-distribution prerequisite just because its row exists.
@@ -252,7 +255,8 @@ class DeviceSDKConfigView(WearablesAPIView):
         # This endpoint is called by a mobile app and therefore exposes its
         # response to a potentially compromised handset. A server Basic-auth
         # key is NEVER an acceptable SDK credential. Exposure requires an
-        # explicit deployment approval of a separate ROOK-issued client key.
+        # explicit deployment approval of the SDK Secret Word registered in
+        # ROOK Portal SDK Authentication (NOT the ROOK API Secret Key).
         if (not getattr(settings, "ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC", False)
                 or sdk_secret == getattr(settings, "ROOK_SECRET_KEY", "")):
             return self.send_response(

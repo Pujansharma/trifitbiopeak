@@ -1,0 +1,77 @@
+name: Biopeak backend quality checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    name: Python syntax (whole repository)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+      - name: Parse all Python source files
+        run: python assets/scripts/check_python_syntax.py
+
+  django-postgresql:
+    name: Django and PostgreSQL regression suite
+    needs: syntax
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: biopeak_ci
+          POSTGRES_USER: biopeak_ci
+          POSTGRES_PASSWORD: ci_password_not_for_production
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U biopeak_ci -d biopeak_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DJANGO_SETTINGS_MODULE: core.settings.development
+      SECRET_KEY: 'ci-only-development-key-not-for-production'
+      DEV_DB_NAME: biopeak_ci
+      DEV_DB_USER: biopeak_ci
+      DEV_DB_PASSWORD: ci_password_not_for_production
+      DEV_DB_HOST: 127.0.0.1
+      DEV_DB_PORT: '5432'
+      DEV_WEARABLES_ENABLED: 'true'
+      DEV_ROOK_ENVIRONMENT: sandbox
+      DEV_ROOK_AUTHORIZATION_ALLOWED_HOSTS: connect.garmin.com
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+      - uses: astral-sh/setup-uv@v10.0.0
+      - name: Check lockfile is consistent with pyproject
+        run: uv lock --check
+      - name: Install exactly locked dependencies
+        run: uv sync --frozen
+      - name: Django system checks
+        run: uv run python manage.py check
+      - name: PR143 reviewer regressions
+        run: >-
+          uv run python manage.py test
+          wearables.tests.test_pr143_queue_redis_followup
+          wearables.tests.test_pr143_followup_fixes
+          wearables.tests.test_older_pr143_security_cache_remap
+          wearables.tests.test_reconnect_authorization_host
+          wearables.tests.test_repeated_device_connect
+          --verbosity 2
+      - name: Complete wearables test suite
+        run: uv run python manage.py test wearables.tests --verbosity 2
+      - name: Complete Django regression suite
+        run: uv run python manage.py test --verbosity 1

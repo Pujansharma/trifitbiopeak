@@ -352,3 +352,14 @@ Canonical: [`docs/google-calendar-integration.md`](google-calendar-integration.m
 ## 2026-10-22 — Appointment created_by_type
 
 - Only `GET /centers/<id>/appointments/` (`AppointmentCalendarListSerializer`). Stored `Appointment.created_by_type` (`varchar(16)`, null): `customer` | `staff`. No `choices` — `BaseSerializer` would emit the label (`Staff`/`Customer`). Set in `create_appointment_record` from the actor account (`admin`/`associate`/`superuser` → `staff`). Null = unset at create (legacy / unmapped account), not cleared when `created_by` is set null. Not on detail, book, reschedule, customer list, or exceptions. No join. Do not call `get_user_account_type()` (that `get_or_create`s). Check constraint `appointment_created_by_type_valid`. **User `makemigrations`**. Backfill in DBeaver, not a data migration.
+
+## 2026-10-28 — ROOK API-source reconnect host validation
+
+- ROOK `/authorizer` may return `authorized=true` with no URL for an existing grant; after revoke it returns an HTTPS URL. Missing `ROOK_AUTHORIZATION_ALLOWED_HOSTS` can therefore appear to break **only reconnect**. Keep the P1 exact-host allowlist fail-closed, including Garmin's `connect.garmin.com` pin; do not accept all HTTPS hosts.
+- Validate trusted-host configuration before changing API connection state. Log only the rejected hostname, never the full authorization URL/query. On authorizer failure during reconnect, preserve the disconnected/expired origin so retry and historical re-import remain correct.
+
+## 2026-10-29 - PR #143 freshness/recovery/Redis review follow-up
+
+- Hourly freshness enqueue now coalesces open profile jobs and reuses one stable `freshness:<profile>` key after completion; oldest-due profiles first, max 25 queued per scheduler sweep by default (CLI cap 50). Retryable FAILED jobs remain open until the existing retry path finishes.
+- API authorization, notifications, manual retry, and hourly scheduler all use `enqueue_or_reuse_recovery_job`. Never overwrite `import_started_at` when an open recovery job owns it; the shared helper claims a new generation only when no open job exists.
+- Staging/production wearables require a shared ElastiCache Redis URL (`STG_REDIS_URL` / `PRD_REDIS_URL`) for `CACHES['default']`; `health` stays `DummyCache` backed by DB snapshots. Missing URLs fail startup only if wearables are enabled. AWS WAF is supplementary, not a substitute for shared DRF throttle counters.

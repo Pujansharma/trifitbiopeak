@@ -1,22 +1,26 @@
 from django.conf import settings
 from django.core.management.base import BaseCommand
-from django.utils import timezone
 
 from accounts.customers.models import CustomerProfile
 from wearables.services.job_processor import (
     connections_requiring_recovery_pull,
     enqueue_orphaned_normalization_jobs,
-    profiles_requiring_freshness_check,
+    eligible_freshness_profiles,
 )
 from wearables.services.oauth import expire_oauth_attempts
 from wearables.models import WearableConnection
 from wearables.utils.constants import ConnectionStatus
-from wearables.services.job_queue import enqueue_health_job, enqueue_or_reuse_recovery_job
-from wearables.utils.constants import HealthJobType
+from wearables.services.job_queue import enqueue_or_reuse_freshness_job, enqueue_or_reuse_recovery_job
 
 
 class Command(BaseCommand):
-    help = "Enqueue dashboard freshness checks for active wearable profiles."
+    help = "Enqueue bounded dashboard freshness checks for active wearable profiles."
+
+    def add_arguments(self, parser) -> None:
+        parser.add_argument(
+            "--freshness-limit", type=int, default=25,
+            help="Maximum new or requeued freshness jobs per sweep (default: 25).",
+        )
 
     def handle(self, *args, **options):
         if not getattr(settings, "WEARABLES_ENABLED", True):
@@ -30,19 +34,14 @@ class Command(BaseCommand):
         expired_count = 0
         for profile in CustomerProfile.objects.filter(pk__in=pending_profile_ids).iterator():
             expired_count += expire_oauth_attempts(profile)
-        profile_ids = list(profiles_requiring_freshness_check())
-        profiles = CustomerProfile.objects.filter(pk__in=profile_ids)
-        # Re-check every scheduler hour; a daily idempotency key would suppress
-        # all later freshness and recovery checks even after new data arrives.
-        date_key = timezone.now().strftime("%Y-%m-%dT%H")
+        # A stable per-profile key is reused after completion instead of
+        # inserting another row every hour. Only oldest eligible profiles are
+        # selected; open and recently attempted jobs are skipped in SQL.
         count = 0
-        for customer_profile in profiles.iterator():
-            enqueue_health_job(
-                job_type=HealthJobType.FRESHNESS_CHECK,
-                idempotency_key=f"freshness:{customer_profile.pk}:{date_key}",
-                customer_profile=customer_profile,
-            )
-            count += 1
+        freshness_limit = max(0, min(options["freshness_limit"], 50))
+        for customer_profile in eligible_freshness_profiles(limit=freshness_limit).iterator():
+            _, queued = enqueue_or_reuse_freshness_job(customer_profile=customer_profile)
+            count += int(queued)
         recovery_count = 0
         for connection in connections_requiring_recovery_pull().iterator():
             job, created = enqueue_or_reuse_recovery_job(

@@ -34,6 +34,36 @@ def authorized_source_names(payload: Any) -> set[str]:
     }
 
 
+def configured_authorization_hosts() -> set[str]:
+    """Exact, deployment-approved authorizer hosts (never implicit trust)."""
+    configured_hosts = getattr(settings, "ROOK_AUTHORIZATION_ALLOWED_HOSTS", []) or []
+    if isinstance(configured_hosts, str):
+        configured_hosts = configured_hosts.split(",")
+    return {
+        str(host).strip().lower()
+        for host in configured_hosts
+        if str(host).strip()
+    }
+
+
+def require_authorization_hosts(data_source: str) -> set[str]:
+    """Fail before changing a connection if OAuth hosts are misconfigured."""
+    trusted_hosts = configured_authorization_hosts()
+    if not trusted_hosts:
+        raise RookServiceError(
+            "ROOK_AUTHORIZATION_ALLOWED_HOSTS is not configured; "
+            "untrusted authorization host blocked.",
+            status_code=503,
+        )
+    if data_source == "Garmin" and "connect.garmin.com" not in trusted_hosts:
+        raise RookServiceError(
+            "Garmin authorization requires connect.garmin.com in "
+            "ROOK_AUTHORIZATION_ALLOWED_HOSTS.",
+            status_code=503,
+        )
+    return trusted_hosts
+
+
 def validate_authorization_url(data_source: str, value: Any) -> str | None:
     if not value:
         return None
@@ -56,14 +86,19 @@ def validate_authorization_url(data_source: str, value: Any) -> str | None:
         raise RookServiceError("ROOK returned an unsafe authorization URL.")
     # ROOK/provider redirects are untrusted input. Never accept arbitrary
     # HTTPS origins when the deployment forgot to configure its allowlist.
-    configured_hosts = getattr(settings, "ROOK_AUTHORIZATION_ALLOWED_HOSTS", []) or []
-    if isinstance(configured_hosts, str):
-        configured_hosts = configured_hosts.split(",")
-    trusted_hosts = {str(host).strip().lower() for host in configured_hosts if str(host).strip()}
-    if not trusted_hosts or parsed.hostname not in trusted_hosts:
+    trusted_hosts = require_authorization_hosts(data_source)
+    if parsed.hostname not in trusted_hosts:
+        # Log only the hostname, not the full URL (which may contain OAuth codes).
+        logger.warning(
+            f"ROOK authorizer rejected hostname {parsed.hostname!r} "
+            f"for {data_source}; verify the provider before changing the allowlist."
+        )
         raise RookServiceError("ROOK returned an untrusted authorization host.")
     # Keep Garmin's additional provider-specific host pinning.
     if data_source == "Garmin" and parsed.hostname != "connect.garmin.com":
+        logger.warning(
+            f"ROOK Garmin authorizer rejected hostname {parsed.hostname!r}."
+        )
         raise RookServiceError("ROOK returned an untrusted Garmin URL.")
     return value
 

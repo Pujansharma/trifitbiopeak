@@ -14,12 +14,13 @@ from wearables.services.client import (
     RookClient,
     RookConfigurationError,
     RookServiceError,
+    require_authorization_hosts,
 )
 from wearables.services.identity import (
     get_or_create_rook_identity,
     record_wearable_consent,
 )
-from wearables.services.job_queue import enqueue_health_job
+from wearables.services.job_queue import enqueue_health_job, enqueue_or_reuse_recovery_job
 from wearables.services.analytics import invalidate_health_dashboard
 from wearables.services import oauth as oauth_service
 from wearables.services.lifecycle import valid_transition
@@ -194,12 +195,13 @@ def authorization_confirmed(
     """
     now = timezone.now()
     connection.connected_at = connection.connected_at or now
-    connection.import_started_at = now
+    # An open recovery owns import_started_at. Do not invalidate that
+    # generation when a second authorization confirmation arrives.
     connection.disconnected_at = None
     connection.last_error_code = ""
     connection.last_error_detail = ""
     connection.save(update_fields=[
-        "connected_at", "import_started_at", "disconnected_at", "last_error_code",
+        "connected_at", "disconnected_at", "last_error_code",
         "last_error_detail", "updated_at",
     ])
     if was_reconnect:
@@ -218,11 +220,11 @@ def authorization_confirmed(
         actor_user=actor_user, correlation_id=correlation_id,
     )
     if connection.connection_method == ConnectionMethod.API:
-        enqueue_health_job(
-            job_type=HealthJobType.RECOVERY_PULL,
-            idempotency_key=f"authorization-recovery:{connection.pk}:{now.isoformat()}",
-            customer_profile=connection.customer_profile,
-            connection=connection,
+        # Reauthorization is an explicit retry, but must reuse a RUNNING or
+        # PENDING pull without changing its import generation marker.
+        enqueue_or_reuse_recovery_job(
+            connection=connection, customer_profile=connection.customer_profile,
+            manual=True,
         )
     return connection
 
@@ -233,7 +235,15 @@ def connection_attempt_origin(connection: WearableConnection) -> str:
     A repeated Connect tap must not turn a reconnect into a first-time link,
     even if the connection is already ``authorizing``.
     """
-    if connection.status not in {ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING}:
+    if connection.status not in {
+        ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING,
+        ConnectionStatus.PROVIDER_ERROR,
+    }:
+        return connection.status
+    if connection.status == ConnectionStatus.PROVIDER_ERROR and not (
+        connection.authorization_status == AuthorizationStatus.ERROR
+        and connection.last_error_code == "rook_authorizer_failed"
+    ):
         return connection.status
     request_event = (
         WearableConnectionEvent.objects.filter(
@@ -258,6 +268,10 @@ def start_connection(
     correlation_id: str = "",
 ) -> dict:
     data_source = validated_data["data_source"]
+    # A missing allowlist should not change a disconnected connection into
+    # provider_error; no ROOK URL can be safely returned until configured.
+    if data_source in API_WEARABLE_SOURCES:
+        require_authorization_hosts(data_source)
     connection = prepare_connection(
         request=request,
         customer_profile=customer_profile,
@@ -360,12 +374,22 @@ def start_connection(
             update_fields=["last_error_code", "last_error_detail", "updated_at"]
         )
         if not pending_authorization and connection.status != ConnectionStatus.DISCONNECTED:
+            # Failed *re*-authorization must remain disconnected. Otherwise a
+            # later retry starts from provider_error and forgets its reimport
+            # origin. This does not authorize the source or reopen ingestion.
+            restored_authorization = {
+                ConnectionStatus.DISCONNECTED: AuthorizationStatus.REVOKED,
+                ConnectionStatus.AUTHORIZATION_EXPIRED: AuthorizationStatus.EXPIRED,
+            }
             save_connection_transition(
                 connection,
-                status=ConnectionStatus.PROVIDER_ERROR,
-                authorization_status=AuthorizationStatus.ERROR,
+                status=(origin_status if was_reconnect else ConnectionStatus.PROVIDER_ERROR),
+                authorization_status=restored_authorization.get(
+                    origin_status, AuthorizationStatus.ERROR,
+                ),
                 actor_user=request.user,
-                event_type="authorization_failed",
+                event_type=("reconnection_authorizer_failed" if was_reconnect
+                            else "authorization_failed"),
                 correlation_id=correlation_id,
                 detail=str(error),
             )

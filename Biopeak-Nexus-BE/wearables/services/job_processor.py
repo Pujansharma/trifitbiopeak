@@ -2,9 +2,10 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import DatabaseError
-from django.db.models import F, Q
+from django.db.models import Exists, F, OuterRef, Q, Subquery
 from django.utils import timezone
 
+from accounts.customers.models import CustomerProfile
 from wearables.models import HealthProcessingJob, RookHealthDocument, WearableConnection, WearableConnectionEvent
 from wearables.services.analytics import (refresh_profile_snapshots, member_today, invalidate_health_dashboard)
 from wearables.services.consent import has_active_wearable_consent
@@ -471,26 +472,70 @@ def profiles_requiring_freshness_check():
     )
 
 
+def eligible_freshness_profiles(*, limit: int, now=None):
+    """Select oldest due profiles, skipping open work without scanning in Python.
+
+    Subqueries cover the old hourly keys as well as the new reusable key. An
+    oldest-first ordering prevents early-profile starvation under a per-sweep
+    insertion cap.
+    """
+    now = now or timezone.now()
+    freshness = HealthProcessingJob.objects.filter(
+        customer_profile_id=OuterRef("pk"), job_type=HealthJobType.FRESHNESS_CHECK,
+    )
+    open_work = freshness.filter(
+        Q(status__in=(HealthJobStatus.PENDING, HealthJobStatus.RUNNING))
+        | Q(status=HealthJobStatus.FAILED, attempt_count__lt=MAXIMUM_JOB_ATTEMPTS)
+    )
+    latest = freshness.order_by("-scheduled_at", "-pk")
+    return (
+        CustomerProfile.objects.filter(pk__in=profiles_requiring_freshness_check())
+        .annotate(
+            has_open_freshness=Exists(open_work),
+            last_freshness_at=Subquery(latest.values("scheduled_at")[:1]),
+        )
+        .filter(has_open_freshness=False)
+        .filter(Q(last_freshness_at__isnull=True)
+                | Q(last_freshness_at__lte=now - timedelta(hours=1)))
+        .order_by(F("last_freshness_at").asc(nulls_first=True), "pk")[:max(0, limit)]
+    )
+
+
 def connections_requiring_recovery_pull():
-    delayed_before = timezone.now() - timedelta(
+    now = timezone.now()
+    delayed_before = now - timedelta(
         hours=getattr(settings, "ROOK_SYNC_DELAY_HOURS", 48)
     )
-    return WearableConnection.objects.filter(
-        status__in=[
-            ConnectionStatus.ACTIVE,
-            ConnectionStatus.IDLE,
-            ConnectionStatus.PARTIAL,
-            ConnectionStatus.PROVIDER_ERROR,
-            ConnectionStatus.IMPORTING,
-            ConnectionStatus.HISTORICAL_REIMPORT,
-        ],
-        connection_method=ConnectionMethod.API,
-        authorization_status=AuthorizationStatus.AUTHORIZED,
-    ).filter(
-        Q(last_successful_sync__isnull=True)
-        | Q(last_successful_sync__lt=delayed_before)
-        | Q(import_status__in=[HistoricalImportStatus.RUNNING, HistoricalImportStatus.PARTIAL],
-            import_started_at__lt=timezone.now() - timedelta(hours=4))
+    related_jobs = HealthProcessingJob.objects.filter(
+        connection_id=OuterRef("pk"), job_type=HealthJobType.RECOVERY_PULL,
+    )
+    open_jobs = related_jobs.filter(
+        Q(status__in=(HealthJobStatus.PENDING, HealthJobStatus.RUNNING))
+        | Q(status=HealthJobStatus.FAILED, attempt_count__lt=MAXIMUM_JOB_ATTEMPTS)
+    )
+    recent_jobs = related_jobs.filter(created_at__gte=now - timedelta(hours=1))
+    return (
+        WearableConnection.objects.select_related("customer_profile")
+        .filter(
+            status__in=[
+                ConnectionStatus.ACTIVE,
+                ConnectionStatus.IDLE,
+                ConnectionStatus.PARTIAL,
+                ConnectionStatus.PROVIDER_ERROR,
+                ConnectionStatus.IMPORTING,
+                ConnectionStatus.HISTORICAL_REIMPORT,
+            ],
+            connection_method=ConnectionMethod.API,
+            authorization_status=AuthorizationStatus.AUTHORIZED,
+        )
+        .filter(
+            Q(last_successful_sync__isnull=True)
+            | Q(last_successful_sync__lt=delayed_before)
+            | Q(import_status__in=[HistoricalImportStatus.RUNNING, HistoricalImportStatus.PARTIAL],
+                import_started_at__lt=now - timedelta(hours=4))
+        )
+        .annotate(has_open_recovery=Exists(open_jobs), recently_attempted=Exists(recent_jobs))
+        .filter(has_open_recovery=False, recently_attempted=False)
     )
 
 

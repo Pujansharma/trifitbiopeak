@@ -7,13 +7,12 @@ from wearables.services.connections import record_connection_event
 from wearables.services import connections as connection_service
 from wearables.services.ingestion import json_digest, receipt_payload
 from wearables.services.analytics import invalidate_health_dashboard
-from wearables.services.job_queue import enqueue_health_job
+from wearables.services.job_queue import enqueue_or_reuse_recovery_job
 from wearables.services.lifecycle import valid_transition
 from wearables.services.provenance import canonical_source
 from wearables.utils.constants import (
     AuthorizationStatus,
     ConnectionStatus,
-    HealthJobType,
     HistoricalImportStatus,
     PermissionStatus,
     DocumentStatus,
@@ -289,11 +288,8 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
     if (upstream_import_complete and connection.connection_method == "api"
             and connection.authorization_status == AuthorizationStatus.AUTHORIZED
             and connection.import_status == HistoricalImportStatus.RUNNING):
-        enqueue_health_job(
-            job_type=HealthJobType.RECOVERY_PULL,
-            idempotency_key=f"notification-import-verification:{connection.pk}:{receipt.pk}",
-            customer_profile=connection.customer_profile,
-            connection=connection,
+        enqueue_or_reuse_recovery_job(
+            connection=connection, customer_profile=connection.customer_profile,
         )
     if (
         not resumed
@@ -302,22 +298,12 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
         and previous_status not in {ConnectionStatus.IMPORTING, ConnectionStatus.HISTORICAL_REIMPORT}
         and connection.connection_method == "api"
     ):
-        enqueue_health_job(
-            job_type=HealthJobType.RECOVERY_PULL,
-            idempotency_key=(f"notification-connect-recovery:{connection.pk}:"
-                             f"{timezone.localdate().isoformat()}"),
-            customer_profile=connection.customer_profile,
-            connection=connection,
+        enqueue_or_reuse_recovery_job(
+            connection=connection, customer_profile=connection.customer_profile,
         )
     if connection.status == ConnectionStatus.PROVIDER_ERROR:
-        enqueue_health_job(
-            job_type=HealthJobType.RECOVERY_PULL,
-            idempotency_key=(
-                f"notification-recovery:{connection.pk}:"
-                f"{timezone.localdate().isoformat()}"
-            ),
-            customer_profile=connection.customer_profile,
-            connection=connection,
+        enqueue_or_reuse_recovery_job(
+            connection=connection, customer_profile=connection.customer_profile,
         )
     return {
         "accepted": True,

@@ -39,6 +39,69 @@ def enqueue_health_job(
 
 
 
+def open_freshness_jobs(customer_profile) -> QuerySet[HealthProcessingJob]:
+    """Freshness jobs that have not finished their permitted attempts."""
+    return HealthProcessingJob.objects.filter(
+        customer_profile=customer_profile, job_type=HealthJobType.FRESHNESS_CHECK,
+    ).filter(
+        Q(status__in=(HealthJobStatus.PENDING, HealthJobStatus.RUNNING))
+        | Q(status=HealthJobStatus.FAILED, attempt_count__lt=HEALTH_MAXIMUM_JOB_ATTEMPTS)
+    )
+
+
+def enqueue_or_reuse_freshness_job(
+    *, customer_profile, now=None,
+) -> tuple[HealthProcessingJob | None, bool]:
+    """One in-flight freshness check per profile, one reusable row per profile.
+
+    A permanent idempotency key is safe across concurrent sweep commands: the
+    database unique index arbitrates the first creation; a conditional update
+    arbitrates hourly re-enqueue after completion. Legacy hourly keys remain
+    readable and are allowed to drain before a new check is scheduled.
+    """
+    now = now or timezone.now()
+    existing_open = open_freshness_jobs(customer_profile).order_by("scheduled_at", "pk").first()
+    if existing_open is not None:
+        return existing_open, False
+
+    interval_start = now - timedelta(hours=1)
+    # A pre-upgrade hourly job may have just completed. Do not immediately
+    # replace it with a new fixed-key job before the next hourly interval.
+    if HealthProcessingJob.objects.filter(
+        customer_profile=customer_profile, job_type=HealthJobType.FRESHNESS_CHECK,
+        scheduled_at__gt=interval_start,
+    ).exists():
+        return None, False
+
+    job, created = HealthProcessingJob.objects.get_or_create(
+        idempotency_key=f"freshness:{customer_profile.pk}",
+        defaults={
+            "customer_profile": customer_profile,
+            "job_type": HealthJobType.FRESHNESS_CHECK,
+            "status": HealthJobStatus.PENDING,
+            "scheduled_at": now,
+        },
+    )
+    if created:
+        return job, True
+
+    # A completed (or exhausted) job may be reused; its attempt count must
+    # reset, otherwise the existing worker will never claim a new occurrence.
+    updated = HealthProcessingJob.objects.filter(
+        pk=job.pk,
+        status__in=(HealthJobStatus.COMPLETED, HealthJobStatus.FAILED),
+        scheduled_at__lte=interval_start,
+    ).filter(
+        Q(status=HealthJobStatus.COMPLETED)
+        | Q(attempt_count__gte=HEALTH_MAXIMUM_JOB_ATTEMPTS)
+    ).update(
+        status=HealthJobStatus.PENDING, attempt_count=0,
+        scheduled_at=now, started_at=None, completed_at=None,
+        locked_at=None, failure_detail="", payload={}, updated_at=now,
+    )
+    return job, bool(updated)
+
+
 def open_recovery_jobs(connection: WearableConnection) -> QuerySet[HealthProcessingJob]:
     """Find a pending, running, or retryable failed pull for this provider."""
     return HealthProcessingJob.objects.filter(
