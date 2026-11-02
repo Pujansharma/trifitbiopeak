@@ -1,0 +1,37 @@
+meta {
+  name: GET Appointment Audit Logs
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseURL}}/appointments/{{appointment_id}}/audit-logs/
+  body: none
+  auth: inherit
+}
+
+settings {
+  encodeUrl: true
+  timeout: 30000
+}
+
+docs {
+  Admin or associate. Not center-scoped.
+  Center access is the appointment's center. Newest first.
+  Each row: id, action, note, details, created_at,
+  actor {id, email, full_name} or null.
+  action is past tense on this API only (Created, Checked In, Started,
+  Marked Late, Completed, Marked No Show, Cancelled, Rescheduled,
+  Exception Acknowledged). Stored choice labels stay Create, Check In,
+  and the rest.
+  note is empty except cancel (reason), mark late ("Late by N minutes"),
+  QR complete ("Completed via QR redemption."), and exception acknowledge
+  (source label).
+  details is null except cancel and reschedule.
+  cancel details: {reason} — same text as note.
+  reschedule details: {previous_start, previous_end, start, end}.
+  previous_* is the window before that reschedule.
+  start/end is the window it moved to.
+  Oldest AppointmentHistory row pairs with the oldest reschedule row.
+  A reschedule row with no history row has details null.
+}

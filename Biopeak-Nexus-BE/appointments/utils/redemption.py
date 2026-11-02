@@ -19,6 +19,7 @@ from programs.models import (
     TherapyProgramService,
 )
 from programs.utils.constants import ProgramType, RedemptionType
+from programs.therapy.eligibility import ensure_therapy_service_center, therapy_services_at_center
 
 OPEN_APPOINTMENT_STATUSES = tuple(BUSY_APPOINTMENT_STATUSES)
 OPEN_APPOINTMENT_EXISTS_MESSAGE = (
@@ -49,8 +50,6 @@ def ensure_program_covers_appointment_date(
 
 
 def therapy_sessions_remaining(therapy_program_service):
-    if therapy_program_service.sessions_count == 0:
-        return None
     return (
         therapy_program_service.sessions_count
         - therapy_program_service.sessions_used
@@ -59,8 +58,6 @@ def therapy_sessions_remaining(therapy_program_service):
 
 def has_remaining_therapy_sessions(therapy_program_service):
     remaining = therapy_sessions_remaining(therapy_program_service)
-    if remaining is None:
-        return True
     return remaining > 0
 
 
@@ -114,15 +111,9 @@ def resolve_bookable_therapy_program_service(
         field_name="program_service_id",
     )
 
-    redeemable_at_center = program.redeemable_centers.filter(pk=center.pk).exists()
-    if not redeemable_at_center and program.center.pk != center.pk:
-        raise serializers.ValidationError(
-            {
-                "program_service_id": [
-                    "This program service is not redeemable at this center."
-                ]
-            }
-        )
+    ensure_therapy_service_center(
+        therapy_program_service.program_service, center.pk, field_name="program_service_id"
+    )
 
     if get_open_appointment_for_program_service(program_service_id) is not None:
         raise serializers.ValidationError(
@@ -159,6 +150,7 @@ def ensure_customer_slot_within_therapy_programs(
     service,
     slot_date,
     program_service_id=None,
+    center=None,
 ):
     """
     Slots: appointment day must fall on/before package expiry.
@@ -186,6 +178,12 @@ def ensure_customer_slot_within_therapy_programs(
             slot_date,
             field_name="date",
         )
+        if center is not None:
+            ensure_therapy_service_center(
+                therapy_program_service.program_service, center.pk, field_name="program_service_id"
+            )
+        if not has_remaining_therapy_sessions(therapy_program_service):
+            raise serializers.ValidationError({"program_service_id": [SESSIONS_REMAINING_MESSAGE]})
         return
 
     if not queryset.exists():
@@ -193,8 +191,18 @@ def ensure_customer_slot_within_therapy_programs(
     covers_slot = Q(program_service__program__expires_at__isnull=True) | Q(
         program_service__program__expires_at__gte=slot_date
     )
-    if queryset.filter(covers_slot).exists():
-        return
+    covered_services = queryset.filter(covers_slot)
+    if covered_services.exists():
+        if center is None:
+            return
+        eligible_services = therapy_services_at_center(center.pk).filter(
+            pk__in=covered_services.values("pk")
+        ).filter(sessions_used__lt=F("sessions_count"))
+        if eligible_services.exists():
+            return
+        raise serializers.ValidationError(
+            {"program_service_id": ["No remaining therapy service is redeemable or available at this center."]}
+        )
     earliest = (
         queryset.exclude(program_service__program__expires_at__isnull=True)
         .order_by("program_service__program__expires_at")
@@ -236,13 +244,10 @@ def schedule_appointment_redemption(appointment, redeemed_by):
 
 
 def increment_therapy_sessions_used(program_service_id, quantity):
-    """Burn sessions; no-op when finite and would exceed remaining. Returns TPS rows updated."""
+    """Burn sessions without exceeding the remaining allowance. Returns rows updated."""
     updated = (
         TherapyProgramService.objects.filter(program_service__pk=program_service_id)
-        .filter(
-            Q(sessions_count=0)
-            | Q(sessions_used__lte=F("sessions_count") - quantity)
-        )
+        .filter(sessions_used__lte=F("sessions_count") - quantity)
         .update(sessions_used=F("sessions_used") + quantity)
     )
     if updated != 1:
@@ -282,6 +287,7 @@ def claim_scheduled_redemption_and_burn(history, appointment, redeemed_by):
 
 def create_missing_redeem_history_and_burn(appointment, redeemed_by):
     """Create REDEEM history then burn; on OneToOne race, claim or no-op."""
+    ensure_therapy_service_center(appointment.program_service, appointment.center.pk)
     program_service_pk = appointment.program_service.pk
     therapy_program_service = TherapyProgramService.objects.filter(
         program_service__pk=program_service_pk
@@ -331,6 +337,7 @@ def complete_appointment_redemption(appointment, redeemed_by):
             return history
         if history.redemption_type != RedemptionType.SCHEDULED:
             return history
+        ensure_therapy_service_center(appointment.program_service, appointment.center.pk)
         return claim_scheduled_redemption_and_burn(
             history, appointment, redeemed_by
         )
@@ -364,6 +371,7 @@ def cancel_appointment_redemption(appointment, redeemed_by):
 def force_complete_appointment(appointment, actor):
     """Claim open→COMPLETED; return None if another writer already closed it."""
     if appointment.program_service is not None:
+        ensure_therapy_service_center(appointment.program_service, appointment.center.pk)
         ensure_program_covers_appointment_date(
             appointment.program_service.program,
             center_local_date(appointment.center, appointment.start_datetime),

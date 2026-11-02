@@ -62,6 +62,7 @@ from integrations.communications import (
     schedule_queue_appointment_rescheduled,
 )
 from programs.services.models import Service
+from programs.therapy.eligibility import ensure_therapy_service_center
 
 IDEMPOTENCY_TTL_HOURS = 24
 BOOKING_RESOURCE_KEYS = (
@@ -151,6 +152,7 @@ def apply_program_service_slot_gates(attrs, customer_profile, service):
         service,
         attrs["date"],
         program_service_id=attrs.get("program_service_id"),
+        center=attrs["center"],
     )
     earliest_start, latest_start = customer_slot_bounds()
     attrs["earliest_start"] = earliest_start
@@ -257,6 +259,139 @@ def create_audit_log(appointment, actor, action, note=""):
         action=action,
         note=note,
     )
+
+
+def appointment_audit_actor_name(user):
+    names = [user.first_name, user.last_name]
+    return " ".join(name for name in names if name)
+
+
+def appointment_audit_log_sort_key(log):
+    return (log.created_at, log.pk)
+
+
+def appointment_reschedule_audit_details(appointment, entry, next_entry):
+    start = appointment.start_datetime
+    end = appointment.end_datetime
+    if next_entry is not None:
+        start = next_entry.previous_start_datetime
+        end = next_entry.previous_end_datetime
+    return {
+        "previous_start": entry.previous_start_datetime,
+        "previous_end": entry.previous_end_datetime,
+        "start": start,
+        "end": end,
+    }
+
+
+def appointment_audit_details_by_log(appointment, logs):
+    history_entries = list(
+        appointment.history_entries.order_by("created_at", "pk")
+    )
+    reschedule_logs = sorted(
+        (
+            log
+            for log in logs
+            if log.action == AppointmentAuditAction.RESCHEDULE
+        ),
+        key=appointment_audit_log_sort_key,
+    )
+    pair_count = min(len(reschedule_logs), len(history_entries))
+    following_entries = list(history_entries[1:pair_count + 1])
+    following_entries.extend([None] * (pair_count - len(following_entries)))
+    details_by_log = {
+        log.pk: appointment_reschedule_audit_details(
+            appointment,
+            entry,
+            next_entry,
+        )
+        for log, entry, next_entry in zip(
+            reschedule_logs,
+            history_entries,
+            following_entries,
+        )
+    }
+    details_by_log.update(
+        {
+            log.pk: {"reason": log.note}
+            for log in logs
+            if log.action == AppointmentAuditAction.CANCEL
+        }
+    )
+    return details_by_log
+
+
+class AppointmentAuditActorSerializer(BaseSerializer):
+    id = serializers.UUIDField(source="pk")
+    email = serializers.EmailField(allow_null=True)
+    full_name = serializers.SerializerMethodField()
+
+    def get_full_name(self, obj):
+        return appointment_audit_actor_name(obj)
+
+
+class AppointmentAuditCancelDetailsSerializer(BaseSerializer):
+    reason = serializers.CharField(allow_blank=True)
+
+
+class AppointmentAuditRescheduleDetailsSerializer(BaseSerializer):
+    previous_start = serializers.DateTimeField()
+    previous_end = serializers.DateTimeField()
+    start = serializers.DateTimeField()
+    end = serializers.DateTimeField()
+
+
+AUDIT_DETAILS_SERIALIZERS = {
+    AppointmentAuditAction.CANCEL: AppointmentAuditCancelDetailsSerializer,
+    AppointmentAuditAction.RESCHEDULE: AppointmentAuditRescheduleDetailsSerializer,
+}
+
+AUDIT_ACTION_PAST_LABELS = {
+    AppointmentAuditAction.CREATE: "Created",
+    AppointmentAuditAction.CHECK_IN: "Checked In",
+    AppointmentAuditAction.START: "Started",
+    AppointmentAuditAction.MARK_LATE: "Marked Late",
+    AppointmentAuditAction.COMPLETE: "Completed",
+    AppointmentAuditAction.NO_SHOW: "Marked No Show",
+    AppointmentAuditAction.CANCEL: "Cancelled",
+    AppointmentAuditAction.RESCHEDULE: "Rescheduled",
+    AppointmentAuditAction.EXCEPTION_ACKNOWLEDGE: "Exception Acknowledged",
+}
+
+
+class AppointmentAuditLogSerializer(BaseSerializer):
+    id = serializers.UUIDField(source="pk")
+    action = serializers.SerializerMethodField()
+    note = serializers.CharField(allow_blank=True)
+    details = serializers.SerializerMethodField()
+    created_at = serializers.DateTimeField()
+    actor = AppointmentAuditActorSerializer(allow_null=True)
+
+    def get_action(self, obj):
+        return AUDIT_ACTION_PAST_LABELS[obj.action]
+
+    def audit_details_by_log(self, obj):
+        details_by_log = self.context.get("audit_details_by_log")
+        if details_by_log is not None:
+            return details_by_log
+        logs = [obj]
+        if self.parent is not None:
+            logs = self.parent.instance
+        details_by_log = appointment_audit_details_by_log(
+            self.context["appointment"],
+            logs,
+        )
+        self.context["audit_details_by_log"] = details_by_log
+        return details_by_log
+
+    def get_details(self, obj):
+        serializer_class = AUDIT_DETAILS_SERIALIZERS.get(obj.action)
+        if serializer_class is None:
+            return None
+        details = self.audit_details_by_log(obj).get(obj.pk)
+        if details is None:
+            return None
+        return serializer_class(details).data
 
 
 def create_appointment_associates(
@@ -808,6 +943,9 @@ class AppointmentRescheduleSerializer(AppointmentBookSerializer):
                 {"program_service_id": [PROGRAM_SERVICE_MISMATCH_MESSAGE]}
             )
         attrs["program_service"] = appointment.program_service
+        ensure_therapy_service_center(
+            appointment.program_service, attrs["center"].pk, field_name="program_service_id"
+        )
         ensure_program_covers_appointment_date(
             appointment.program_service.program,
             center_local_date(attrs["center"], attrs["start"]),
@@ -910,6 +1048,9 @@ class AppointmentLifecycleSerializer(BaseSerializer):
         action = self.context["action"]
         validate_transition(appointment.status, action)
         if action == "complete" and appointment.program_service is not None:
+            ensure_therapy_service_center(
+                appointment.program_service, appointment.center.pk, field_name="program_service_id"
+            )
             ensure_program_covers_appointment_date(
                 appointment.program_service.program,
                 center_local_date(appointment.center, appointment.start_datetime),

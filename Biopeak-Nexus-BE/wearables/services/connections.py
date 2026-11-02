@@ -184,6 +184,7 @@ def prepare_connection(
     )
 
 
+@transaction.atomic
 def authorization_confirmed(
     connection: WearableConnection, *, was_reconnect: bool = False,
     actor_user=None, correlation_id: str = "",
@@ -222,10 +223,16 @@ def authorization_confirmed(
     if connection.connection_method == ConnectionMethod.API:
         # Reauthorization is an explicit retry, but must reuse a RUNNING or
         # PENDING pull without changing its import generation marker.
-        enqueue_or_reuse_recovery_job(
+        job, _ = enqueue_or_reuse_recovery_job(
             connection=connection, customer_profile=connection.customer_profile,
             manual=True,
         )
+        if job is None:
+            # Roll back connection fields, transitions and events together.
+            # A (None, False) CAS miss must never leave IMPORTING without work.
+            raise RookServiceError(
+                "Wearable authorization succeeded but recovery could not be queued; retry safely."
+            )
     return connection
 
 

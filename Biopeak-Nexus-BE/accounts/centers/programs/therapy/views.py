@@ -97,8 +97,10 @@ class CenterTherapyProgramsView(BaseListCreateAPIView):
                 Prefetch(
                     "program__program_services",
                     queryset=ProgramService.objects.select_related(
-                        "service", "created_by", "therapy_service"
-                    ),
+                        "program", "service", "created_by", "therapy_service"
+                    ).prefetch_related("therapy_service__redeemable_centers")
+                    .order_by("-created_at", "-pk")[:5],
+                    to_attr="service_preview",
                 ),
                 "program__redeemable_centers",
                 Prefetch(

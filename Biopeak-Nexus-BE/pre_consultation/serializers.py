@@ -9,7 +9,7 @@ from pre_consultation.utils.constants import PreConsultationSessionInterface
 class PreConsultationSessionStartSerializer(serializers.Serializer):
     interface = serializers.ChoiceField(choices=PreConsultationSessionInterface.choices)
     app_version = serializers.CharField(max_length=50)
-    locale = serializers.CharField(max_length=20)
+    locale = serializers.CharField(max_length=255)
     device = serializers.CharField(max_length=255)
 
 

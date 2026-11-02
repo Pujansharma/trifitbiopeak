@@ -116,6 +116,7 @@ class RepeatedDeviceConnectTests(TestCase):
         }
         self.start()
         self.start()
+        enqueue.return_value = (SimpleNamespace(pk="existing-recovery"), False)
         refresh_authorizing_connections(self.profile)
         connection.refresh_from_db()
         self.assertEqual(connection.status, ConnectionStatus.HISTORICAL_REIMPORT)

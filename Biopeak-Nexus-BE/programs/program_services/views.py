@@ -1,13 +1,14 @@
-from django.db.models import Prefetch, QuerySet
+from django.db.models import Exists, OuterRef, Prefetch, Q, QuerySet
 from rest_framework.exceptions import ValidationError
 from rest_framework.mixins import UpdateModelMixin
 from rest_framework.request import Request
 from rest_framework.response import Response
 
 from accounts.centers.models import Center
+from accounts.customers.models import CustomerCenterAssignment
 from accounts.utils.constants import UserType
 from accounts.utils.db import get_user_account_type
-from accounts.utils.permissions import IsAdminUser, IsAssociateUser, IsCustomerUser
+from accounts.utils.permissions import BaseAssociateRBACPermission, IsAdminUser, IsAssociateUser, IsCustomerUser
 from core.utils.exceptions import get_object_or_404
 from core.utils.helper import response_format
 from core.utils.permissions import ReadOnly
@@ -28,7 +29,7 @@ from products.serializers import (
     BaseProductSerializer,
 )
 from products.utils.constants import ProviderCallbackFunction
-from programs.models import ProgramService
+from programs.models import ProgramService, TherapyProgramService
 from programs.program_services.serializers import (
     AssessmentProgramServiceSerializer,
     AssessmentServiceDocumentSerializer,
@@ -36,15 +37,18 @@ from programs.program_services.serializers import (
     AssessmentServiceReportRequestSerializer,
     AssessmentServiceResultRequestSerializer,
     AssessmentServiceResultSerializer,
+    ConsultationProgramServiceSerializer,
     ProgramServiceCancelSerializer,
     ResultRequestCancelSerializer,
     ResultRequestRefetchSerializer,
+    TherapyProgramServiceCentersSerializer,
     TherapyProgramServiceSerializer,
 )
 from programs.program_services.utils.db import (
     delete_service_document,
     delete_service_result,
 )
+from programs.serializers import TherapyServiceAvailableRedeemableCenterSerializer
 from programs.services.models import (
     CenterServiceAssignment,
     ResultRequest,
@@ -58,6 +62,7 @@ from programs.services.utils.constants import (
     ServiceCategory,
     get_module_category_document_types, ResultRequestStatus,
 )
+from programs.utils.constants import ProgramType
 
 
 class ProgramServiceCancelViewMeta(BaseGenericAPIView):
@@ -139,6 +144,122 @@ class AssessmentProgramServiceViewMeta(BaseGenericAPIView):
         return service_documents
 
 
+class AssignedCompositeServiceViewMeta(BaseGenericAPIView):
+    filter_kwargs = {}
+
+    def get_queryset(self):
+        program_services = ProgramService.objects.filter(
+            program__program_type=ProgramType.COMPOSITE,
+            **self.filter_kwargs,
+        ).select_related(
+            "program__composite_program", "program__customer_profile__customer__user",
+            "service", "therapy_service", "consultation_service", "created_by", "cancelled_by",
+        ).prefetch_related("therapy_service__redeemable_centers")
+        if get_user_account_type(self.request.user) == UserType.ASSOCIATE:
+            program_services = program_services.filter(
+                Q(program__center__pk=self.request.center_id)
+                | Q(program__redeemable_centers__pk=self.request.center_id)
+            )
+        return program_services.distinct()
+
+
+class ConsultationProgramServiceDetailView(BaseRetrieveAPIView, AssignedCompositeServiceViewMeta):
+    serializer_class = ConsultationProgramServiceSerializer
+    permission_classes = [IsAdminUser | BaseAssociateRBACPermission]
+    filter_kwargs = {
+        "service__service_category": ServiceCategory.CONSULTATION,
+        "consultation_service__isnull": False,
+    }
+
+
+class TherapyProgramServiceViewMeta(BaseGenericAPIView):
+    filter_kwargs = {}
+
+    def get_therapy_service_queryset(self):
+        filter_kwargs = {}
+        account_type = get_user_account_type(self.request.user)
+        if account_type == UserType.CUSTOMER:
+            filter_kwargs["program_service__program__customer_profile__customer"] = self.request.user.customer
+        return TherapyProgramService.objects.filter(**filter_kwargs).select_related(
+            "program_service__program__customer_profile"
+        )
+
+    def get_therapy_service(self):
+        return get_object_or_404(
+            self.get_therapy_service_queryset(),
+            "Therapy program service not found.",
+            pk=self.kwargs["pk"],
+        )
+
+
+class TherapyProgramServiceRedeemableCentersView(BaseListAPIView, TherapyProgramServiceViewMeta):
+    serializer_class = TherapyProgramServiceCentersSerializer
+    permission_classes = [
+        IsAdminUser | ((IsAssociateUser | IsCustomerUser) & ReadOnly) | BaseAssociateRBACPermission
+    ]
+
+    def get_queryset(self):
+        therapy_service = self.get_therapy_service()
+        can_redeem_subquery = Center.objects.filter(
+            pk=OuterRef("pk"),
+            redeemable_programs=therapy_service.program_service.program,
+        )
+        return Center.objects.filter(
+            redeemable_therapy_services=therapy_service,
+        ).annotate(can_redeem=Exists(can_redeem_subquery)).order_by("-created_at", "-pk")
+
+    def patch(self, request, *args, **kwargs):
+        therapy_service = self.get_therapy_service()
+        serializer = self.get_serializer(therapy_service, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        detail = self.get_update_success_message()
+        return self.send_response(detail, serializer.data)
+
+    def perform_update(self, serializer):
+        serializer.save(therapy_service=serializer.instance)
+
+
+class TherapyProgramServiceAvailableRedeemableCentersView(BaseListAPIView, TherapyProgramServiceViewMeta):
+    serializer_class = TherapyServiceAvailableRedeemableCenterSerializer
+    permission_classes = [IsAdminUser | IsAssociateUser | (IsCustomerUser & ReadOnly)]
+
+    def get_queryset(self):
+        therapy_service = self.get_therapy_service()
+        program = therapy_service.program_service.program
+        filter_kwargs = {}
+        search = Q()
+        search_parameter = self.request.query_params.get("search", "").strip()
+        active_parameter = self.request.query_params.get("active")
+        if active_parameter in ["0", "1"]:
+            filter_kwargs["is_active"] = active_parameter == "1"
+        if search_parameter:
+            search = Q(name__icontains=search_parameter) | Q(code__istartswith=search_parameter)
+
+        program_redeemable_centers = Center.objects.filter(
+            pk=OuterRef("pk"),
+            redeemable_programs=program,
+        )
+        therapy_service_centers = TherapyProgramService.objects.filter(
+            pk=therapy_service.pk,
+            redeemable_centers__pk=OuterRef("pk"),
+        )
+        home_center_assignments = CustomerCenterAssignment.objects.filter(
+            customer_profile=program.customer_profile,
+            center=OuterRef("pk"),
+            is_primary=True,
+        )
+        return (
+            Center.objects.annotate(
+                can_redeem=Exists(program_redeemable_centers),
+                exists=Exists(therapy_service_centers),
+                is_home_center=Exists(home_center_assignments),
+            )
+            .filter(search, can_redeem=True, **filter_kwargs)
+            .order_by("-is_home_center", "-exists", "-created_at", "-pk")
+        )
+
+
 class AssessmentProgramServiceDetailView(BaseRetrieveAPIView):
     serializer_class = AssessmentProgramServiceSerializer
     permission_classes = [IsAdminUser | IsAssociateUser]
@@ -197,9 +318,17 @@ class AssessmentProgramServiceProducts(
         return products
 
 
-class TherapyProgramServiceDetailView(BaseRetrieveAPIView):
+class TherapyProgramServiceDetailView(BaseRetrieveUpdateAPIView):
     serializer_class = TherapyProgramServiceSerializer
     permission_classes = [IsAdminUser | IsAssociateUser | (IsCustomerUser & ReadOnly)]
+
+    def perform_update(self, serializer):
+        serializer.save(updated_by=self.request.user)
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["therapy_center_preview_limit"] = None
+        return context
 
     def get_queryset(self):
         filter_kwargs = {}
@@ -219,6 +348,7 @@ class TherapyProgramServiceDetailView(BaseRetrieveAPIView):
                 "program__therapy_program",
             )
             .prefetch_related(
+                "therapy_service__redeemable_centers",
                 Prefetch(
                     "service__center_assignments",
                     queryset=CenterServiceAssignment.objects.filter(

@@ -1,6 +1,8 @@
-from django.db.models import Prefetch, OuterRef, Exists
+from django.db.models import F, Prefetch, OuterRef, Exists, Q
+from django.utils import timezone
 
 from accounts.centers.models import Center
+from accounts.centers.serializers import MinimumCenterSerializer
 from accounts.customers.models import CustomerCenterAssignment
 from accounts.utils.constants import UserType
 from accounts.utils.db import get_user_account_type
@@ -13,13 +15,18 @@ from core.utils.views.main import (
     BaseListAPIView,
     BaseRetrieveUpdateAPIView,
     BaseCreateAPIView,
+    BaseGenericAPIView,
 )
 from programs.models import ProgramService, TherapyProgram, TherapyProgramService
 from programs.serializers import (
     BaseProgramServiceSerializer,
+    ProgramAvailableRedeemableCenterSerializer,
 )
-from programs.services.models import CenterServiceAssignment
+from programs.services.models import CenterServiceAssignment, Service
+from programs.services.utils.constants import ServiceCategory
+from programs.utils.constants import ProgramType
 from programs.therapy.serializers import (
+    TherapyProgramAvailableServiceSerializer,
     TherapyProgramDetailSerializer,
     TherapyProgramCancelSerializer,
     TherapyProgramRedeemSerializer,
@@ -41,16 +48,15 @@ class TherapyProgramServicesView(BaseListAPIView):
             "program_service__created_by",
             "program_service__program__customer_profile",
             "program_service__service",
-        )
+        ).prefetch_related("redeemable_centers")
         return qs
 
 
-class TherapyProgramDetailView(BaseRetrieveUpdateAPIView):
-    serializer_class = TherapyProgramDetailSerializer
-    permission_classes = [IsAdminUser | IsAssociateUser | (IsCustomerUser & ReadOnly)]
+class TherapyProgramViewMeta(BaseGenericAPIView):
+    filter_kwargs = {}
 
-    def get_queryset(self):
-        filter_kwargs = {}
+    def get_therapy_program_queryset(self):
+        filter_kwargs = {"program__program_type": ProgramType.THERAPY}
         account_type = get_user_account_type(self.request.user)
         if account_type == UserType.CUSTOMER:
             filter_kwargs["program__customer_profile__customer"] = self.request.user.customer
@@ -66,8 +72,10 @@ class TherapyProgramDetailView(BaseRetrieveUpdateAPIView):
                 Prefetch(
                     "program__program_services",
                     queryset=ProgramService.objects.select_related(
-                        "service", "created_by", "therapy_service"
-                    ),
+                        "program", "service", "created_by", "cancelled_by", "therapy_service"
+                    ).prefetch_related("therapy_service__redeemable_centers")
+                    .order_by("-created_at", "-pk")[:5],
+                    to_attr="service_preview",
                 ),
                 "program__redeemable_centers",
                 Prefetch(
@@ -78,6 +86,124 @@ class TherapyProgramDetailView(BaseRetrieveUpdateAPIView):
                     to_attr="primary_center_assignments",
                 ),
             )
+        )
+
+    def get_therapy_program(self):
+        qs = self.get_therapy_program_queryset()
+        return get_object_or_404(
+            qs,
+            "Therapy program not found.",
+            pk=self.kwargs["pk"],
+        )
+
+
+class TherapyProgramDetailView(BaseRetrieveUpdateAPIView, TherapyProgramViewMeta):
+    serializer_class = TherapyProgramDetailSerializer
+    permission_classes = [IsAdminUser | IsAssociateUser | (IsCustomerUser & ReadOnly)]
+
+    def get_queryset(self):
+        return self.get_therapy_program_queryset()
+
+
+class TherapyProgramRedeemableCentersView(BaseListAPIView, TherapyProgramViewMeta):
+    serializer_class = MinimumCenterSerializer
+    permission_classes = [IsAdminUser | IsAssociateUser | (IsCustomerUser & ReadOnly)]
+
+    def get_queryset(self):
+        therapy_program = self.get_therapy_program()
+        return Center.objects.filter(
+            redeemable_programs__therapy_program__pk=therapy_program.pk,
+        ).order_by("-created_at", "-pk")
+
+
+class TherapyProgramAvailableRedeemableCentersView(BaseListAPIView, TherapyProgramViewMeta):
+    serializer_class = ProgramAvailableRedeemableCenterSerializer
+    permission_classes = [IsAdminUser | IsAssociateUser | (IsCustomerUser & ReadOnly)]
+
+    def get_therapy_program_queryset(self):
+        """Preserve ownership scope without loading unrelated detail previews."""
+        return (
+            super().get_therapy_program_queryset()
+            .select_related(None)
+            .select_related("program__customer_profile")
+            .prefetch_related(None)
+        )
+
+    def get_queryset(self):
+        therapy_program = self.get_therapy_program()
+        program = therapy_program.program
+        filter_kwargs = {}
+        search = Q()
+        search_parameter = self.request.query_params.get("search", "").strip()
+        active_parameter = self.request.query_params.get("active")
+        if active_parameter in ["0", "1"]:
+            filter_kwargs["is_active"] = active_parameter == "1"
+        if search_parameter:
+            search = Q(name__icontains=search_parameter) | Q(code__istartswith=search_parameter)
+
+        customer_center_assignments = CustomerCenterAssignment.objects.filter(
+            customer_profile=program.customer_profile,
+            center=OuterRef("pk"),
+        )
+        redeemable_centers = Center.objects.filter(
+            pk=OuterRef("pk"),
+            redeemable_programs=program,
+        )
+        return (
+            Center.objects.filter(Exists(customer_center_assignments), search, **filter_kwargs)
+            .annotate(
+                exists=Exists(redeemable_centers),
+                is_home_center=Exists(customer_center_assignments.filter(is_primary=True)),
+            )
+            .order_by("-is_home_center", "-exists", "-created_at", "-pk")
+        )
+
+
+class TherapyProgramAvailableServicesView(BaseListAPIView, TherapyProgramViewMeta):
+    serializer_class = TherapyProgramAvailableServiceSerializer
+    permission_classes = [IsAdminUser | IsAssociateUser]
+
+    def get_queryset(self):
+        therapy_program = self.get_therapy_program()
+        program = therapy_program.program
+        filter_kwargs = {"service_category": ServiceCategory.THERAPY}
+        search = Q()
+        search_parameter = self.request.query_params.get("search", "").strip()
+        active_parameter = self.request.query_params.get("active")
+        exists_parameter = self.request.query_params.get("exists")
+        if search_parameter:
+            search = Q(name__icontains=search_parameter)
+        if active_parameter in ["0", "1"]:
+            filter_kwargs["is_active"] = active_parameter == "1"
+        if exists_parameter in ["0", "1"]:
+            filter_kwargs["exists"] = exists_parameter == "1"
+
+        center_assignments = CenterServiceAssignment.objects.filter(
+            service=OuterRef("pk"),
+            center__redeemable_programs=program,
+        )
+        program_services = ProgramService.objects.filter(service=OuterRef("pk"))
+        return (
+            Service.objects.annotate(
+                exists=Exists(program_services.filter(program=program)),
+                is_locked=Exists(program_services),
+            )
+            .filter(
+                Q(is_global=True) | Exists(center_assignments),
+                search,
+                **filter_kwargs,
+            )
+            .prefetch_related(
+                Prefetch(
+                    "center_assignments",
+                    queryset=CenterServiceAssignment.objects.filter(
+                        center__redeemable_programs=program,
+                        center__is_active=True,
+                    ).select_related("center"),
+                ),
+            )
+            .select_related("created_by", "care_template")
+            .order_by("-created_at")
         )
 
 
@@ -95,7 +221,17 @@ class TherapyProgramServicesListView(BaseListAPIView):
         if center_id:
             subquery_filter_kwargs["center__pk"] = center_id
         can_redeem_subquery = CenterServiceAssignment.objects.filter(
-            service=OuterRef("service"), is_active=True, **subquery_filter_kwargs
+            Q(center__redeemable_therapy_services__program_service__program__expires_at__isnull=True)
+            | Q(center__redeemable_therapy_services__program_service__program__expires_at__gte=timezone.localdate()),
+            service=OuterRef("service"), is_active=True,
+            center__redeemable_programs__pk=OuterRef("program"),
+            center__redeemable_therapy_services__program_service__pk=OuterRef("pk"),
+            center__redeemable_therapy_services__is_active=True,
+            center__redeemable_therapy_services__program_service__is_active=True,
+            center__redeemable_therapy_services__program_service__program__is_active=True,
+            center__redeemable_therapy_services__program_service__program__therapy_program__is_active=True,
+            center__redeemable_therapy_services__sessions_used__lt=F("center__redeemable_therapy_services__sessions_count"),
+            **subquery_filter_kwargs,
         )
         return (
             ProgramService.objects.filter(
@@ -111,6 +247,7 @@ class TherapyProgramServicesListView(BaseListAPIView):
                 "program__therapy_program",
             )
             .prefetch_related(
+                "therapy_service__redeemable_centers",
                 Prefetch(
                     "service__center_assignments",
                     queryset=CenterServiceAssignment.objects.filter(

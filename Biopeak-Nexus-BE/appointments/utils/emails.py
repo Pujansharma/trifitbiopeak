@@ -1,73 +1,51 @@
 import html
 
-from django.utils import timezone
-
 from appointments.models import Appointment
 from core.utils.constants import AppointmentModes
 
-APPOINTMENT_DATE_FORMAT = "%d %b %Y"
-APPOINTMENT_TIME_FORMAT = "%I:%M %p"
+VIRTUAL_MEETING_NOTE = "Join using the Google Meet link on this invite."
+CONFIRMED_HEADLINE = "A new appointment has been booked."
+RESCHEDULED_HEADLINE = "This appointment has been rescheduled."
 
 
-def get_center_clinic_address(center) -> str:
-    return center.full_address
-
-
-def build_location_note(appointment: Appointment) -> str:
+def build_location_row(appointment: Appointment) -> tuple[str, str]:
     if appointment.modality == AppointmentModes.VIRTUAL:
-        return "This is a virtual appointment. Join using the Google Meet link on the calendar invite.\n\n"
-    clinic_address = html.escape(get_center_clinic_address(appointment.center))
-    return f"<b>Clinic Address:</b> {clinic_address}\n\n"
+        return "Meeting", VIRTUAL_MEETING_NOTE
+    return "Center Address", appointment.center.full_address
 
 
-def build_attendance_note(appointment: Appointment) -> str:
-    if appointment.modality == AppointmentModes.VIRTUAL:
-        return "<b>Note:</b> Please join the meeting on time."
-    return "<b>Note:</b> Please arrive 10 minutes before your scheduled appointment."
+def get_room_label(appointment: Appointment) -> str | None:
+    room = appointment.room
+    if room is None:
+        return None
+    return room.name
 
 
-def get_appointment_date(appointment: Appointment) -> str:
-    return timezone.localtime(appointment.start_datetime).strftime(
-        APPOINTMENT_DATE_FORMAT
+def build_detail_rows(
+    appointment: Appointment, notes: str | None
+) -> list[tuple[str, str | None]]:
+    location_label, location_value = build_location_row(appointment)
+    return [
+        ("Customer", appointment.customer_profile.get_full_name()),
+        ("Service", appointment.service.name),
+        ("Room", get_room_label(appointment)),
+        ("Center", appointment.center.name),
+        (location_label, location_value),
+        ("Notes", notes),
+    ]
+
+
+def render_notes(headline: str, rows: list[tuple[str, str | None]]) -> str:
+    # Rows without a value (no room, no notes, ...) are left out of the invite.
+    details = "\n".join(
+        f"<b>{label}:</b> {html.escape(value)}" for label, value in rows if value
     )
-
-
-def get_appointment_time(appointment: Appointment) -> str:
-    return timezone.localtime(appointment.start_datetime).strftime(
-        APPOINTMENT_TIME_FORMAT
-    )
-
-
-def append_notes(message: str, notes: str | None) -> str:
-    if notes:
-        return f"{message}\n\n{html.escape(notes)}"
-    return message
+    return f"<b>{headline}</b>\n\n{details}"
 
 
 def build_appointment_confirmed_notes(appointment: Appointment, notes: str | None) -> str:
-    patient_name = html.escape(appointment.customer_profile.get_full_name())
-    service_name = html.escape(appointment.service.name)
-    message = (
-        f"Hi <b>{patient_name}</b>,\n"
-        f"Your appointment has been confirmed. Please find the details below:\n\n"
-        f"<b>Service:</b> {service_name}\n"
-        f"{build_location_note(appointment)}"
-        f"We look forward to seeing you.\n\n"
-        f"{build_attendance_note(appointment)}"
-    )
-    return append_notes(message, notes)
+    return render_notes(CONFIRMED_HEADLINE, build_detail_rows(appointment, notes))
 
 
 def build_appointment_rescheduled_notes(appointment: Appointment, notes: str | None) -> str:
-    patient_name = html.escape(appointment.customer_profile.get_full_name())
-    service_name = html.escape(appointment.service.name)
-    message = (
-        f"Hi <b>{patient_name}</b>,\n\n"
-        f"Your appointment has been rescheduled. Please find your updated "
-        f"appointment details below:\n\n"
-        f"<b>Service:</b> {service_name}\n"
-        f"{build_location_note(appointment)}"
-        f"Please refer to the updated date and time.\n\n"
-        f"{build_attendance_note(appointment)}"
-    )
-    return append_notes(message, notes)
+    return render_notes(RESCHEDULED_HEADLINE, build_detail_rows(appointment, notes))

@@ -416,7 +416,17 @@ class HealthProcessingJob(BaseUUIDModel):
 
     class Meta:
         ordering = ["scheduled_at"]
-        indexes = [models.Index(fields=["status", "scheduled_at"], name="w_healthproces_1_idx")]
+        indexes = [
+            models.Index(fields=["status", "scheduled_at"], name="w_healthproces_1_idx"),
+            models.Index(
+                fields=["customer_profile", "job_type", "scheduled_at"],
+                name="w_hjob_profile_type_s_idx",
+            ),
+            models.Index(
+                fields=["connection", "job_type", "created_at"],
+                name="w_hjob_conn_type_c_idx",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.job_type}:{self.status}:{self.idempotency_key}"

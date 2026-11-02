@@ -26,9 +26,11 @@ class BaseModelSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         rep = super().to_representation(instance)
-        for field in self.get_fields():
-            if has_display := getattr(instance, f"get_{field}_display", None):
-                rep[field] = has_display()
+        for field_name, field in self.get_fields().items():
+            if isinstance(field, serializers.SerializerMethodField):
+                continue
+            if has_display := getattr(instance, f"get_{field_name}_display", None):
+                rep[field_name] = has_display()
         return rep
 
 
@@ -52,7 +54,9 @@ class BaseSerializer(serializers.Serializer):
 
     def to_representation(self, instance):
         rep = super().to_representation(instance)
-        for field in self.get_fields():
-            if has_display := getattr(instance, f"get_{field}_display", None):
-                rep[field] = has_display()
+        for field_name, field in self.get_fields().items():
+            if isinstance(field, serializers.SerializerMethodField):
+                continue
+            if has_display := getattr(instance, f"get_{field_name}_display", None):
+                rep[field_name] = has_display()
         return rep

@@ -197,5 +197,6 @@ def export_metsights_reports_for_customer(
         return None
     response_data = export_record_reports(record_id, email)
     logger.info(
-        f"MetSights report export response: record_id={record_id}, accepted={response_data is not None}")
+        f"MetSights report export response: record_id={record_id}, accepted={response_data is not None}"
+    )
     return response_data

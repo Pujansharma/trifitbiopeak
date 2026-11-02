@@ -10,7 +10,8 @@ This ePRD covers these backend routes:
 | Method | Purpose | Endpoint |
 |---|---|---|
 | `GET` | Retrieve an assigned assessment service | `/programs/program-services/assessment-services/:program_service_id/` |
-| `GET` | Retrieve an assigned therapy service | `/programs/program-services/therapy-services/:program_service_id/` |
+| `GET`, `PATCH` | Retrieve an assigned therapy service, add sessions, or update parent flags | `/programs/program-services/therapy-services/:program_service_id/` |
+| `GET`, `PATCH` | List or add assigned therapy-service centers | `/programs/program-services/therapy-services/:program_service_id/redeemable-centers/` |
 | `POST` | Cancel an assigned assessment service | `/programs/program-services/assessment-services/:program_service_id/cancel/` |
 | `POST` | Cancel an assigned therapy service | `/programs/program-services/therapy-services/:program_service_id/cancel/` |
 | `POST` | Cancel an assigned consultation service | `/programs/program-services/consultation-services/:program_service_id/cancel/` |
@@ -37,18 +38,19 @@ All endpoints require a valid JWT:
 Authorization: Bearer <access_token>
 ```
 
-Access is allowed for administrators and associates. Customers cannot use
-these endpoints.
+Access is allowed for administrators and associates. Customers may also read
+their own therapy-service details and assigned center lists, but cannot add centers or sessions or update flags.
 
-`X-Center-ID` is required only for therapy cancellation. The selected center
-must exist. Assessment and consultation cancellation do not require the
-header. The endpoints do not apply center-assignment or feature-level RBAC
-filtering.
+`X-Center-ID` is required for therapy cancellation and for associates adding
+therapy-service centers. Associate center additions require active center RBAC
+access. Administrators do not need this header for center additions. Assessment
+and consultation cancellation do not require the header.
 
-The assessment and therapy ProgramService detail routes remain read-only.
+The assessment ProgramService detail route remains read-only. Therapy detail supports
+session increments and parent-program flag updates for admins and any associates, without a program-center assignment restriction.
 Cancellation uses only the dedicated `POST` routes. Result and document
-mutations remain available only through their dedicated routes. No route in
-this document accepts `PUT`.
+mutations remain available only through their dedicated routes. Use the documented
+`PATCH` operations for updates.
 
 The complete assessment selection, result creation, and file-upload flow is
 specified in `assessment-program-service-result-upload-frontend-eprd.md`.
@@ -213,8 +215,7 @@ The therapy-only fields are sourced from the linked `TherapyProgramService`:
 - `sessions_cancelled` is the number of cancelled sessions;
 - `redeem_code` is the service-level redemption code.
 
-When `sessions_count` is `0`, it means unlimited sessions. The frontend must
-not render it as no sessions available.
+When `sessions_count` is `0`, there are no assigned sessions available.
 
 The backend identifies the endpoint resource by ProgramService category only.
 If legacy or inconsistent data has no linked therapy extension, all four
@@ -231,6 +232,88 @@ therapy-only fields are `null`:
 
 The frontend should show an unavailable-data state for these values rather
 than converting them to zero.
+
+### 5.4 Assigned therapy-service centers
+
+```http
+GET /programs/program-services/therapy-services/:program_service_id/redeemable-centers/
+Authorization: Bearer <access_token>
+```
+
+Returns the service's complete assigned center list with standard `page` and
+`limit` pagination. Each item contains `id`, `code`, `name`, and boolean
+`can_redeem`. The flag checks only membership in the parent program's redeemable
+centers; it does not check expiry, active status, remaining sessions, or current
+catalogue availability. Assigned centers outside the parent program remain in
+the response with `can_redeem: false`.
+
+A missing service, missing therapy extension, or another customer's service
+returns 404. An existing service with no assigned centers returns an empty list.
+
+```http
+PATCH /programs/program-services/therapy-services/:program_service_id/redeemable-centers/
+Authorization: Bearer <access_token>
+X-Center-ID: <selected_center_uuid>
+Content-Type: application/json
+```
+
+```json
+{
+  "add_centers": [
+    {"id": "<center_uuid>"}
+  ]
+}
+```
+
+PATCH supports standalone therapy and composite therapy services. `add_centers`
+is required and must be nonempty. Each selected center must be an active member
+of the parent program's redeemable centers. The program, its type extension,
+the service assignment, and its therapy extension must be active.
+
+Only additions are applied. Existing assignments remain, repeated centers do
+not create duplicate assignments. Only declared serializer fields are processed. All
+selections are validated before any additions. Success is 200 with the therapy
+service ID in `data.id`. Use GET for the updated center list with `can_redeem`.
+
+This route supports GET and PATCH. The previous composite-only POST operation
+is replaced by PATCH with `add_centers`. POST, PUT, and DELETE are not supported.
+
+### 5.5 Add therapy sessions
+
+Use `PATCH <baseURL>/programs/program-services/therapy-services/<program_service_id>/`.
+Supply the positive session increment when changing the allowance. Parent-program flags are optional top-level inputs:
+
+| Name | Required | Example | Notes |
+| --- | --- | --- | --- |
+| `sessions_count` | No | `12` | Adds this many sessions; omission leaves the allowance unchanged. |
+| `is_complimentary` | No | `true` | Updates the shared parent Program; omission retains its value. |
+| `is_credit` | No | `false` | Updates the shared parent Program; omission retains its value. |
+
+```json
+{
+  "sessions_count": 12,
+  "is_complimentary": true,
+  "is_credit": false
+}
+```
+
+An existing total of 6 becomes 18. The response returns the cumulative `sessions_count`
+in the complete detail shape with `detail: "Updated successfully."` and status 200.
+The standalone therapy-program aggregate receives the same increment. Used and cancelled
+sessions are unchanged. Repeating the request adds the quantity again.
+
+Only admins and associates may update. The service assignment, therapy extension, parent
+program, and its therapy/composite extension must be active. The parent expiry must be null
+or on/after today's local date when adding sessions or updating flags. Zero, negative, null, and fractional increments are rejected by the field.
+
+Flags can be updated without adding sessions. They apply to the parent of either standalone or composite therapy
+services and affect every service in that program. Omitted flags are retained, explicit false is applied, both flags
+cannot be true, and non-complimentary programs require an existing price. No receipt is created and credit_received
+does not change. Changed flags are audited with the authenticated user in the same transaction as any increments.
+Responses expose the resulting flags inside program, preserving the existing detail shape.
+
+The complete response example and errors are in
+[Program Service Responsibilities — Add therapy sessions](PRD-009-Program-Service-Responsibilities.md#2-add-therapy-sessions).
 
 ## 6. Field Semantics
 
@@ -439,8 +522,8 @@ ProgramService exists under another category.
   cancellation or therapy redemption.
 - Do not calculate cancellation state solely from nullable cancellation
   fields; use `is_active` as the primary lifecycle flag.
-- Do not derive remaining therapy sessions when `sessions_count` is `0`, since
-  zero represents unlimited sessions.
+- Derive remaining therapy sessions from the assigned allowance and usage;
+  zero assigned sessions provide no redemption allowance.
 - Keep `null` therapy-extension values distinct from numeric zero.
 
 ## 10. Acceptance Criteria
@@ -456,7 +539,7 @@ ProgramService exists under another category.
   cancellation, and audit information.
 - Assessment renders `documents_count`; therapy does not receive that field.
 - Therapy additionally renders session counters and the redemption code.
-- Unlimited therapy sessions are handled when `sessions_count` is `0`.
+- Zero assigned therapy sessions cannot be redeemed.
 - Missing therapy-extension values render as unavailable rather than zero.
 - The UI does not require or send `X-Center-ID` for detail requests.
 - Therapy cancellation sends a selected `X-Center-ID`; assessment and

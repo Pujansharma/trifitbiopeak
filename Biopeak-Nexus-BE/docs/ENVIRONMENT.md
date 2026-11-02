@@ -103,6 +103,14 @@ STG_REDIS_URL=rediss://your-staging-redis-endpoint:6379/0
 PRD_REDIS_URL=rediss://your-production-redis-endpoint:6379/0
 ```
 
+The Django Redis cache passes `socket_connect_timeout=3` and
+`socket_timeout=3` seconds to the Redis client in both staging and production.
+Shared DRF throttle counters therefore have bounded Redis network waits. The
+cache **does not ignore Redis connection errors**: an unreachable Redis service
+will cause protected requests to fail instead of silently bypassing rate limits.
+Monitor ElastiCache availability and verify networking/TLS/auth before GA.
+Keep `CACHES["health"]` on `DummyCache` (dashboard snapshots are stored in DB).
+
 The legacy `DEV_REDIS_HOST`, `STG_REDIS_HOST`, and `PRD_REDIS_HOST` examples
 elsewhere in this file are **not** used by Django's default cache. Configure
 `STG_REDIS_URL` and `PRD_REDIS_URL` instead. A missing URL intentionally stops

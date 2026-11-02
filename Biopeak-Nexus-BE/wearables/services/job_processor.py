@@ -2,7 +2,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import DatabaseError
-from django.db.models import Exists, F, OuterRef, Q, Subquery
+from django.db.models import Case, DateTimeField, Exists, F, OuterRef, Q, Subquery, Value, When
 from django.utils import timezone
 
 from accounts.customers.models import CustomerProfile
@@ -17,7 +17,7 @@ from wearables.services.client import (
 )
 from wearables.services.connections import refresh_authorizing_connections
 from wearables.services.lifecycle import can_ingest_source
-from wearables.services.job_queue import enqueue_health_job
+from wearables.services.job_queue import enqueue_health_job, finished_health_jobs
 from wearables.services.ingestion import (
     ingest_rook_document, normalize_health_document, remap_member_local_days,
 )
@@ -335,6 +335,10 @@ def reset_stale_health_jobs() -> int:
         status=HealthJobStatus.FAILED,
         failure_detail="Worker lease expired.",
         scheduled_at=now,
+        completed_at=Case(
+            When(attempt_count__gte=MAXIMUM_JOB_ATTEMPTS, then=Value(now)),
+            default=F("completed_at"), output_field=DateTimeField(),
+        ),
         locked_at=None,
         updated_at=now,
     )
@@ -378,6 +382,7 @@ def complete_health_job(job: HealthProcessingJob, result: dict) -> None:
 
 
 def fail_health_job(job: HealthProcessingJob, error: Exception) -> None:
+    now = timezone.now()
     retry_delay = timedelta(minutes=5 * max(job.attempt_count, 1))
     HealthProcessingJob.objects.filter(
         pk=job.pk, status=HealthJobStatus.RUNNING,
@@ -385,9 +390,12 @@ def fail_health_job(job: HealthProcessingJob, error: Exception) -> None:
     ).update(
         status=HealthJobStatus.FAILED,
         failure_detail=str(error)[:512],
-        scheduled_at=timezone.now() + retry_delay,
+        scheduled_at=now + retry_delay,
+        # A final failed attempt is also terminal work. Keep its finish time
+        # so the scheduler does not immediately restart an exhausted job.
+        completed_at=(now if job.attempt_count >= MAXIMUM_JOB_ATTEMPTS else None),
         locked_at=None,
-        updated_at=timezone.now(),
+        updated_at=now,
     )
 
 
@@ -487,12 +495,16 @@ def eligible_freshness_profiles(*, limit: int, now=None):
         Q(status__in=(HealthJobStatus.PENDING, HealthJobStatus.RUNNING))
         | Q(status=HealthJobStatus.FAILED, attempt_count__lt=MAXIMUM_JOB_ATTEMPTS)
     )
-    latest = freshness.order_by("-scheduled_at", "-pk")
+    # Timestamp for fairness/cooldown is the terminal finish time. A queued
+    # job can remain pending for hours and must still get its full quiet hour.
+    latest = finished_health_jobs(freshness).filter(
+        completed_at__isnull=False,
+    ).order_by("-completed_at", "-pk")
     return (
         CustomerProfile.objects.filter(pk__in=profiles_requiring_freshness_check())
         .annotate(
             has_open_freshness=Exists(open_work),
-            last_freshness_at=Subquery(latest.values("scheduled_at")[:1]),
+            last_freshness_at=Subquery(latest.values("completed_at")[:1]),
         )
         .filter(has_open_freshness=False)
         .filter(Q(last_freshness_at__isnull=True)
@@ -513,7 +525,9 @@ def connections_requiring_recovery_pull():
         Q(status__in=(HealthJobStatus.PENDING, HealthJobStatus.RUNNING))
         | Q(status=HealthJobStatus.FAILED, attempt_count__lt=MAXIMUM_JOB_ATTEMPTS)
     )
-    recent_jobs = related_jobs.filter(created_at__gte=now - timedelta(hours=1))
+    recent_jobs = finished_health_jobs(related_jobs).filter(
+        completed_at__gt=now - timedelta(hours=1),
+    )
     return (
         WearableConnection.objects.select_related("customer_profile")
         .filter(
@@ -531,8 +545,9 @@ def connections_requiring_recovery_pull():
         .filter(
             Q(last_successful_sync__isnull=True)
             | Q(last_successful_sync__lt=delayed_before)
-            | Q(import_status__in=[HistoricalImportStatus.RUNNING, HistoricalImportStatus.PARTIAL],
-                import_started_at__lt=now - timedelta(hours=4))
+            | (Q(import_status__in=[HistoricalImportStatus.RUNNING, HistoricalImportStatus.PARTIAL])
+               & (Q(import_started_at__isnull=True)
+                  | Q(import_started_at__lt=now - timedelta(hours=4))))
         )
         .annotate(has_open_recovery=Exists(open_jobs), recently_attempted=Exists(recent_jobs))
         .filter(has_open_recovery=False, recently_attempted=False)

@@ -85,12 +85,14 @@ class CustomerProgramViewMeta(BaseGenericAPIView):
     @classmethod
     def get_therapy_program_queryset(cls):
         service_preview = ProgramService.objects.select_related(
+            "program",
             "service",
             "created_by",
             "therapy_service",
             "program__customer_profile__customer__user",
             "program__therapy_program",
         ).prefetch_related(
+            "therapy_service__redeemable_centers",
             Prefetch(
                 "service__center_assignments",
                 queryset=CenterServiceAssignment.objects.filter(
@@ -107,7 +109,7 @@ class CustomerProgramViewMeta(BaseGenericAPIView):
             .prefetch_related(
                 Prefetch(
                     "program__program_services",
-                    queryset=service_preview,
+                    queryset=service_preview.order_by("-created_at", "-pk")[:5],
                     to_attr="service_preview",
                 ),
                 "program__redeemable_centers",
@@ -241,9 +243,10 @@ class CustomerTherapyProgramServicesView(
             TherapyProgramService.objects.filter(
                 program_service__program__therapy_program=therapy_program,
             )
-            .select_related("program_service__service")
+            .select_related("program_service__service", "program_service__program")
             .defer("program_service__data")
             .prefetch_related(
+                "redeemable_centers",
                 Prefetch(
                     "program_service__service__center_assignments",
                     queryset=CenterServiceAssignment.objects.filter(
@@ -330,8 +333,11 @@ class CustomerCompositeProgramServicesView(
     serializer_class = CustomerCompositeProgramServiceListSerializer
 
     def get_filters(self):
+        query_parameters = self.request.query_params.copy()
+        if "category" in query_parameters:
+            query_parameters["service_category"] = query_parameters["category"]
         serializer = CustomerCompositeProgramServiceFilterSerializer(
-            data=self.request.query_params
+            data=query_parameters
         )
         serializer.is_valid(raise_exception=True)
         return serializer.validated_data
@@ -343,10 +349,6 @@ class CustomerCompositeProgramServicesView(
         filter_kwargs = {
             "program__program_type": ProgramType.COMPOSITE,
             "program__customer_profile": customer_profile,
-            "service__service_category__in": [
-                ServiceCategory.ASSESSMENT,
-                ServiceCategory.THERAPY,
-            ],
         }
 
         service_category = filters.get("service_category")

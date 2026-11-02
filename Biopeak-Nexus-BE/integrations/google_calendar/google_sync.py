@@ -27,7 +27,6 @@ STALE_GOOGLE_EVENT_STATUSES = (404, 410)
 def is_google_calendar_configured():
     return bool(getattr(settings, "GOOGLE_CALENDAR_ID", None))
 
-
 def google_calendar_event_id(appointment):
     return appointment.pk.hex
 
@@ -53,12 +52,8 @@ def describe_google_error(error: Exception):
     return str(error) or type(error).__name__
 
 
-def build_attendee_emails(
-    contact_email: str | None, associates: list[Associate], organizer=None
-):
+def build_attendee_emails(associates: list[Associate], organizer=None):
     emails = []
-    if contact_email:
-        emails.append(contact_email)
     organizer_pk = organizer.pk if organizer is not None else None
     for associate in associates:
         if organizer_pk and associate.pk == organizer_pk:
@@ -74,6 +69,7 @@ def load_appointment_for_google_sync(appointment_id):
             "customer_profile__customer",
             "service",
             "center",
+            "room",
         )
         .prefetch_related("associate_links__associate__user")
         .filter(pk=appointment_id)
@@ -143,11 +139,7 @@ def delete_google_event(appointment, organizer, access_token):
     calendar_api.delete_event(
         access_token,
         event_id,
-        participant_emails=build_attendee_emails(
-            appointment.customer_profile.customer.contact_email,
-            associates,
-            organizer,
-        ),
+        participant_emails=build_attendee_emails(associates, organizer),
     )
 
 
@@ -179,11 +171,7 @@ def upsert_google_event(appointment, organizer, access_token):
     has_reschedule_history = appointment_has_reschedule_history(appointment)
     title = google_event_title(has_reschedule_history)
     notes = google_event_notes(appointment, has_reschedule_history)
-    attendee_emails = build_attendee_emails(
-        appointment.customer_profile.customer.contact_email,
-        associates,
-        organizer,
-    )
+    attendee_emails = build_attendee_emails(associates, organizer)
     deterministic_id = google_calendar_event_id(appointment)
     needs_new_meet_link = (
         appointment.modality == AppointmentModes.VIRTUAL

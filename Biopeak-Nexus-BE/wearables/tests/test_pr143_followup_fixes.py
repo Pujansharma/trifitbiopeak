@@ -221,7 +221,9 @@ class FollowupJobTests(TestCase):
             connection=self.provider_connection, customer_profile=self.profile,
         )
         self.assertTrue(created)
-        HealthProcessingJob.objects.filter(pk=first.pk).update(status=HealthJobStatus.COMPLETED)
+        HealthProcessingJob.objects.filter(pk=first.pk).update(
+            status=HealthJobStatus.COMPLETED, completed_at=timezone.now(),
+        )
         another, created = enqueue_or_reuse_recovery_job(
             connection=self.provider_connection, customer_profile=self.profile,
         )

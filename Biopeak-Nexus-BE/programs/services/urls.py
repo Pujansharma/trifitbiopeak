@@ -13,4 +13,5 @@ urlpatterns = [
     # Different services
     path("therapy-services/", include("programs.services.therapy.urls")),
     path("assessment-services/", include("programs.services.assessment.urls")),
+    path("consultation-services/", include("programs.services.consultation.urls")),
 ]

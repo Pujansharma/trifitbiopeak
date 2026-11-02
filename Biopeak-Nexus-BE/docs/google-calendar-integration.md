@@ -112,7 +112,7 @@ All under `integrations/google_calendar/`:
 | `google_sync.py`                                      | Desired-state sync: match Google Calendar to the live `Appointment`. Called from the communication outbox worker (`process_google_outbox_message`), not from the book/cancel/reschedule request. See "Event sync (book/reschedule/cancel)" below.                                                                  |
 | `availability_sync.py`                                | Desired-state sync: match a personal calendar's busy events to that user's `AssociateAvailabilityBlock` rows. Called manually from `/sync/` and automatically from the webhook below. See "Personal calendar connect & availability sync" below.                                                                   |
 | `webhook_channel.py`                                  | Google push-notification channel lifecycle: register (`start_watch_channel`), stop (`stop_watch_channel`), self-heal/renew (`ensure_watch_channel_active`), and match an incoming notification to a connection. See "Personal calendar webhook (push notifications)" below.                                        |
-| `appointments/utils/emails.py` (outside this package) | Builds the formatted event `description` text (`build_appointment_confirmed_notes()`/`build_appointment_rescheduled_notes()`) - patient/service plus a modality-conditional clinic address or Meet-link note. See "Event description" below.                                                                       |
+| `appointments/utils/emails.py` (outside this package) | Builds the formatted event `description` text (`build_appointment_confirmed_notes()`/`build_appointment_rescheduled_notes()`) - staff-facing appointment summary (customer, service, room, center, notes, ...). See "Event description" below.                                                                     |
 
 Connection tokens live on `GoogleCalendarConnection` (`integrations/models.py`,
 1:1 `User`). Mirrored event ids live on `Appointment` - see "Database columns"
@@ -308,7 +308,7 @@ as its own column. An appointment can carry several associates via
 `AppointmentAssociate` (`associate_links`) - a doctor, a health coach, a
 whole `CenterCareTeam` - plus exactly one customer. The invite list is
 always worked out fresh at the moment we call Google (every linked
-associate's login `email` plus the customer's `contact_email`), not copied
+associate's login `email` only - the customer is never invited), not copied
 into a column that could go stale - e.g. if an associate's Google email
 changes later, a stored copy here would still show the wrong one. Who
 _hosts_ the event is a separate question from who's invited, and isn't tied
@@ -373,12 +373,13 @@ disconnect it unless they are `is_active` and also hold `is_admin=True` on
 an active center assignment; a platform `Admin` may disconnect it (see
 "Disconnect" above).
 
-**Attendees are unaffected by this change** - assigned associates (doctor,
-health coach, care team) are invited as ordinary Google Calendar attendees,
-resolved from the appointment's saved `associate_links` at worker time; only
-who _owns and hosts_ the event is the fixed organizer. Attendee list = the
-customer's `contact_email` plus those associates' login `email` (the fixed
-organizer itself is excluded if it is also assigned).
+**Attendees** - only the associates assigned to the appointment (doctor,
+health coach, care team), resolved from the appointment's saved
+`associate_links` at worker time (`build_attendee_emails()`). Attendee list =
+those associates' login `email`; the fixed organizer is left out if it is also
+assigned (it owns the event). The customer is not an attendee, so Google's
+invite / update / cancel emails (`sendUpdates=all` = all attendees) go to
+associates only.
 
 **On book** - worker `insert_event()` with deterministic id, `need_meet_link=True`
 only when `modality` is `virtual`. Title `"Appointment Confirmed"`.
@@ -392,46 +393,64 @@ only when `modality` is `virtual`. Title `"Appointment Confirmed"`.
 
 ## Event description
 
-The Google event's `description` isn't the raw `notes` field a caller
-passes in - it's a formatted message built by
-`appointments/utils/emails.py` (`build_appointment_confirmed_notes()` for
-book, `build_appointment_rescheduled_notes()` for reschedule) and only then
-handed to `sync_*_appointment_with_google()` as `notes`. Both functions
-share the same shape: a greeting with the patient's name, then a
-`<b>Service:</b>` line (Google Calendar's own UI renders a handful of basic
-tags like `<b>` in the description), a location line, a closing note, and
-finally the caller-supplied `notes` text (if any) appended by
-`append_notes()`. There is no date/time line - the event's own start/end
-times already show that on the calendar entry itself.
-`appointments/utils/emails.py` also defines `get_appointment_date()` /
-`get_appointment_time()` helpers, but neither is called from anywhere -
-they were built for a date/time line that isn't in the message.
+The Google event's `description` isn't the raw `notes` field - it's a
+formatted message built by `appointments/utils/emails.py`
+(`build_appointment_confirmed_notes()` for book,
+`build_appointment_rescheduled_notes()` for reschedule). It is a staff-facing
+summary, since only associates receive the invite (see Attendees).
 
-**The location line is modality-conditional** (`build_location_note()`):
+Shape: a bold headline ("A new appointment has been booked." /
+"This appointment has been rescheduled."), then one `<b>Label:</b> value` line
+per detail (`build_detail_rows()` → `render_notes()`):
 
-- `modality == AppointmentModes.VIRTUAL` - shows a one-line "join using the
-  Google Meet link on the calendar invite" note. No clinic address. The
-  actual Meet link isn't inlined into this text (it doesn't exist yet at the
-  point the description is built for a new event) - Google attaches it to
-  the event itself via `conferenceData`/`hangoutLink` (see
-  `need_meet_link`/`add_meet_link` above), and shows it as a join button on
-  the calendar entry.
-- Anything else (`in_person`, `both`) - shows `<b>Clinic Address:</b>`
-  followed by `Center.full_address` (`accounts/centers/models.py`).
+Customer, Service, Room (`name` only), Center, location line, Notes (the
+appointment's `notes`). Book and reschedule share the same rows; only the
+headline differs. Date and time come from the event's own start/end, which
+Google shows on the invite.
 
-`cancel` has no equivalent - `sync_cancelled_appointment_with_google()`
-only calls `delete_event()`, which doesn't touch `description`.
+Rows with no value (no room, no notes, ...) are left out. Google Calendar renders basic tags like `<b>` in the description.
 
-**Every user-controlled piece of this text is HTML-escaped first**
-(`html.escape()`) - patient name, service name, and clinic address in
-`build_appointment_confirmed_notes()`/`build_appointment_rescheduled_notes()`/
-`build_location_note()`, and the caller-supplied `notes` in `append_notes()`.
-Since Google Calendar's UI actually renders a handful of tags (`<b>` among
-them) from `description`, an unescaped patient name like
-`<script>...</script>` or an unescaped `notes` value containing `<b>` could
-otherwise break the intended formatting or inject markup into what everyone
-on the invite sees - only the literal `<b>...</b>` tags this code itself
-writes are meant to render as markup.
+**The location line is modality-conditional** (`build_location_row()`):
+
+- `modality == AppointmentModes.VIRTUAL` - `<b>Meeting:</b>` "Join using the
+  Google Meet link on this invite." The actual Meet link isn't inlined (it
+  doesn't exist yet when the description is built for a new event) - Google
+  attaches it via `conferenceData`/`hangoutLink` and shows a join button.
+- Anything else (`in_person`, `both`) - `<b>Center Address:</b>` followed by
+  `Center.full_address` (`accounts/centers/models.py`).
+
+`cancel` has no equivalent - cancel only calls `delete_event()`, which doesn't
+touch the title or `description`. Google's own "Canceled event" email therefore
+shows the **last** title/description (e.g. "Appointment Confirmed" / "A new
+appointment has been booked."); the "Canceled event" subject is what marks it
+as cancelled.
+
+Example (in person):
+
+```
+<b>A new appointment has been booked.</b>
+
+<b>Customer:</b> Ravi Kumar
+<b>Service:</b> General Consultation
+<b>Room:</b> Consultation Room 1
+<b>Center:</b> Biopeak Bangalore
+<b>Center Address:</b> Biopeak Bangalore, 12 MG Road, Bangalore, Karnataka 560001
+<b>Notes:</b> Bring old reports
+```
+
+Virtual: no Room (unless one was picked), and `<b>Meeting:</b> Join using the
+Google Meet link on this invite.` replaces the Center Address line.
+
+Tests: `integrations/tests/test_google_calendar_outbox.py` - attendee list on
+book/reschedule/cancel (associates only, organizer excluded) and the exact
+description for in-person / virtual / reschedule, empty rows, HTML escaping.
+
+**Every value is HTML-escaped first** (`html.escape()` in `render_notes()`).
+Since Google Calendar's UI renders a handful of tags from `description`, an
+unescaped patient name like `<script>...</script>` or a `notes` value
+containing `<b>` could otherwise break the formatting or inject markup into
+what everyone on the invite sees - only the literal `<b>...</b>` tags this
+code itself writes are meant to render as markup.
 
 ## Rescheduling and Meet links
 

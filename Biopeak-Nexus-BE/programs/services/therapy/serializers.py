@@ -24,6 +24,7 @@ from programs.services.utils.db import (
     redeem_program_service,
 )
 from programs.utils.db import cancel_program_service
+from programs.therapy.eligibility import ensure_therapy_service_center
 
 
 class TherapyServiceCenterSerializer(MinimumCenterSerializer):
@@ -181,6 +182,7 @@ class TherapyServiceRedeemSerializer(BaseModelSerializer):
         redemption_type = validated_data["redemption_type"]
         center_id = validated_data["center_id"]
         redeemed_date = validated_data["redeemed_date"]
+        ensure_therapy_service_center(program_service, center_id)
         if not program_service.is_active:
             raise serializers.ValidationError(
                 "This service has been cancelled and cannot be redeemed."
@@ -218,15 +220,8 @@ class TherapyServiceRedeemSerializer(BaseModelSerializer):
                 )
 
         remaining = therapy_sessions_remaining(therapy_program_service)
-        if remaining is None:
-            if redemption_type == self.ALL:
-                raise serializers.ValidationError(
-                    "Cannot redeem all sessions for an unlimited service."
-                )
-            quantity = 1
-        else:
-            quantity_map = {self.SINGLE: 1, self.ALL: remaining}
-            quantity = quantity_map[redemption_type]
+        quantity_map = {self.SINGLE: 1, self.ALL: remaining}
+        quantity = quantity_map[redemption_type]
 
         if redemption_type == self.SINGLE:
             outcome, _appointment = try_complete_open_appointment_for_single_redeem(

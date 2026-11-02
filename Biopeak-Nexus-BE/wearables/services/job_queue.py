@@ -49,6 +49,19 @@ def open_freshness_jobs(customer_profile) -> QuerySet[HealthProcessingJob]:
     )
 
 
+def finished_health_jobs(jobs: QuerySet[HealthProcessingJob]) -> QuerySet[HealthProcessingJob]:
+    """Successful or exhausted jobs, whose completed_at marks terminal finish.
+
+    A retryable FAILED job is still open work and must not start an hourly
+    cooldown. An exhausted failure is terminal and gets completed_at from
+    fail_health_job (or reset_stale_health_jobs for an expired final lease).
+    """
+    return jobs.filter(
+        Q(status=HealthJobStatus.COMPLETED)
+        | Q(status=HealthJobStatus.FAILED, attempt_count__gte=HEALTH_MAXIMUM_JOB_ATTEMPTS)
+    )
+
+
 def enqueue_or_reuse_freshness_job(
     *, customer_profile, now=None,
 ) -> tuple[HealthProcessingJob | None, bool]:
@@ -65,11 +78,13 @@ def enqueue_or_reuse_freshness_job(
         return existing_open, False
 
     interval_start = now - timedelta(hours=1)
-    # A pre-upgrade hourly job may have just completed. Do not immediately
-    # replace it with a new fixed-key job before the next hourly interval.
-    if HealthProcessingJob.objects.filter(
+    # A job queued hours ago can finish now. Pace from *terminal finish*,
+    # not its scheduled time (old hourly keys included).
+    freshness_jobs = HealthProcessingJob.objects.filter(
         customer_profile=customer_profile, job_type=HealthJobType.FRESHNESS_CHECK,
-        scheduled_at__gt=interval_start,
+    )
+    if finished_health_jobs(freshness_jobs).filter(
+        completed_at__gt=interval_start,
     ).exists():
         return None, False
 
@@ -87,13 +102,10 @@ def enqueue_or_reuse_freshness_job(
 
     # A completed (or exhausted) job may be reused; its attempt count must
     # reset, otherwise the existing worker will never claim a new occurrence.
-    updated = HealthProcessingJob.objects.filter(
-        pk=job.pk,
-        status__in=(HealthJobStatus.COMPLETED, HealthJobStatus.FAILED),
-        scheduled_at__lte=interval_start,
+    updated = finished_health_jobs(
+        HealthProcessingJob.objects.filter(pk=job.pk)
     ).filter(
-        Q(status=HealthJobStatus.COMPLETED)
-        | Q(attempt_count__gte=HEALTH_MAXIMUM_JOB_ATTEMPTS)
+        Q(completed_at__lte=interval_start) | Q(completed_at__isnull=True)
     ).update(
         status=HealthJobStatus.PENDING, attempt_count=0,
         scheduled_at=now, started_at=None, completed_at=None,
@@ -134,13 +146,13 @@ def enqueue_or_reuse_recovery_job(
             return open_job, False
 
         now = timezone.now()
-        # Preserve the scheduler's previous hourly pacing. A recovery that
-        # completed recently must not be recreated by the next 15-minute sweep;
-        # a deliberate manual retry may still start a new attempt.
-        if not manual and HealthProcessingJob.objects.filter(
-            connection=connection, job_type=HealthJobType.RECOVERY_PULL,
-            created_at__gte=now - timedelta(hours=1),
-        ).exists():
+        # Scheduled recovery is hourly *after completion*, not after enqueue.
+        # Manual retries may intentionally bypass this terminal-job cooldown.
+        if not manual and finished_health_jobs(
+            HealthProcessingJob.objects.filter(
+                connection=connection, job_type=HealthJobType.RECOVERY_PULL,
+            )
+        ).filter(completed_at__gt=now - timedelta(hours=1)).exists():
             return None, False
         updates = {"import_started_at": now, "updated_at": now}
         if manual:

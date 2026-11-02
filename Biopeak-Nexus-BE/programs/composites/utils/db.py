@@ -8,6 +8,7 @@ from django.db.models import (
 )
 from django.db.models.functions import Coalesce
 
+from accounts.centers.models import Center
 from programs.composites.models import (
     CompositeServicePrerequisite,
     CompositeTemplate,
@@ -262,7 +263,7 @@ def update_prerequisite_related_service_count(
 def create_therapy_program_services(
         program_service_data: list[dict],
 ) -> None:
-    TherapyProgramService.objects.bulk_create(
+    therapy_services = TherapyProgramService.objects.bulk_create(
         [
             TherapyProgramService(
                 program_service=service_data["program_service"],
@@ -271,6 +272,8 @@ def create_therapy_program_services(
             for service_data in program_service_data
         ]
     )
+    for therapy_service, service_data in zip(therapy_services, program_service_data, strict=True):
+        therapy_service.redeemable_centers.add(*service_data["centers"])
 
 
 def create_assessment_program_services(
@@ -309,14 +312,16 @@ SERVICE_EXTENSION_CREATORS = {
 def create_program_service_extensions(
         program_services: list[ProgramService],
         service_quantities: list[int | None],
+        service_centers: list[list[Center]],
 ):
     services_by_category = {
         service_category: []
         for service_category in SERVICE_EXTENSION_CREATORS
     }
-    for program_service, service_quantity in zip(
+    for program_service, service_quantity, centers in zip(
             program_services,
             service_quantities,
+            service_centers,
             strict=True,
     ):
         services_by_category[
@@ -325,6 +330,7 @@ def create_program_service_extensions(
             {
                 "program_service": program_service,
                 "quantity": service_quantity,
+                "centers": centers,
             }
         )
     for service_category, extension_creator in SERVICE_EXTENSION_CREATORS.items():

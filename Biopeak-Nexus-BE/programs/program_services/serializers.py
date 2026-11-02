@@ -1,9 +1,12 @@
 from pathlib import Path
 
 from django.db import transaction
+from django.db.models import F, Q
 from django.utils import timezone
 from rest_framework import serializers
 
+from accounts.centers.models import Center
+from accounts.centers.serializers import MinimumCenterSerializer
 from accounts.users.serializers import BaseUserSerializer
 from core.utils.serializers import BaseModelSerializer
 from integrations.bugspeaks.utils.webhooks import get_bugspeaks_lifecycle
@@ -17,7 +20,8 @@ from programs.composites.utils.db import (
     update_composite_program_document_counts,
     update_composite_program_results_count,
 )
-from programs.models import ProgramService, TherapyProgramService
+from programs.composites.validators import validate_therapy_service_centers
+from programs.models import ProgramService, TherapyProgram, TherapyProgramService
 from programs.program_services.bookings import start_provider_fetch_task
 from programs.program_services.tasks import (
     get_result_fetch_handler,
@@ -34,7 +38,7 @@ from programs.program_services.utils.helper import generate_file_hash
 from programs.program_services.utils.order_results import PROVIDER_ORDER_REPORT_HANDLERS
 from programs.program_services.utils.report_requests import get_report_request_handler
 from programs.program_services.utils.validation import validate_configured_payload
-from programs.serializers import BaseProgramSerializer
+from programs.serializers import AssignedProgramServiceSerializer, BaseProgramSerializer
 from programs.services.models import ResultRequest, ServiceDocument, ServiceResult
 from programs.services.serializers import (
     BaseServiceDocumentModuleCategorySerializer,
@@ -49,6 +53,9 @@ from programs.services.utils.constants import (
     ServiceDocumentType,
 )
 from programs.utils.db import cancel_program_service
+from programs.utils.constants import ProgramType
+from programs.utils.audit import create_program_audit_log
+from programs.therapy.serializers import TherapyCenterAdditionSerializer
 
 PROVIDER_LIFECYCLE_HANDLERS = {
     (RequestResultType.ORDER, ProviderCallbackFunction.BUGSPEAKS): get_bugspeaks_lifecycle,
@@ -768,6 +775,72 @@ class ProgramServiceCancelSerializer(BaseModelSerializer):
         return program_service
 
 
+class TherapyProgramServiceCentersSerializer(BaseModelSerializer):
+    id = serializers.UUIDField(source="pk", read_only=True)
+    can_redeem = serializers.BooleanField(read_only=True)
+    add_centers = TherapyCenterAdditionSerializer(
+        many=True, write_only=True, allow_empty=False,
+    )
+
+    class Meta:
+        model = Center
+        fields = ["id", "code", "name", "can_redeem", "add_centers"]
+        read_only_fields = ["id", "code", "name", "can_redeem"]
+
+    def update(self, instance: TherapyProgramService, validated_data: dict):
+        therapy_service = validated_data.pop("therapy_service")
+        program_service = therapy_service.program_service
+        program = program_service.program
+        program_extension_names = {
+            ProgramType.THERAPY: "therapy_program",
+            ProgramType.COMPOSITE: "composite_program",
+        }
+        program_extension_name = program_extension_names.get(program.program_type)
+        program_extension = None
+        if program_extension_name:
+            program_extension = getattr(program, program_extension_name, None)
+        if (
+            not program_service.is_active
+            or not therapy_service.is_active
+            or not program.is_active
+            or program_extension is None
+            or not program_extension.is_active
+        ):
+            raise serializers.ValidationError("Cannot add centers to a cancelled or invalid therapy service.")
+        allowed_centers = {}
+        for center in program.redeemable_centers.filter(is_active=True):
+            allowed_centers[center.pk] = center
+        centers = validate_therapy_service_centers(
+            validated_data.get("add_centers", []), allowed_centers, "add_centers",
+        )
+        therapy_service.redeemable_centers.add(*centers)
+        return therapy_service
+
+
+class ConsultationProgramServiceSerializer(BaseModelSerializer):
+    documents_count = serializers.IntegerField(
+        source="consultation_service.documents_count", read_only=True,
+    )
+    program = BaseProgramSerializer(read_only=True)
+    service = BaseServiceSerializer(read_only=True)
+    assignment_type_code = serializers.CharField(source="assignment_type", read_only=True)
+    created_by = BaseUserSerializer(read_only=True)
+    cancelled_by = BaseUserSerializer(read_only=True)
+
+    class Meta:
+        model = ProgramService
+        fields = [
+            "id", "program", "service", "assignment_type", "assignment_type_code",
+            "documents_count",
+            "is_active", "created_date", "created_at", "updated_at", "created_by",
+            "cancellation_reason", "cancelled_by", "cancelled_at", "cancelled_date",
+        ]
+        read_only_fields = [
+            "id", "assignment_type", "is_active", "created_date", "created_at",
+            "updated_at", "cancellation_reason", "cancelled_at", "cancelled_date",
+        ]
+
+
 class AssessmentProgramServiceSerializer(BaseModelSerializer):
     service = BaseServiceSerializer(read_only=True)
     data = serializers.JSONField(read_only=True)
@@ -827,16 +900,24 @@ class AssessmentProgramServiceSerializer(BaseModelSerializer):
 
 class TherapyProgramServiceSerializer(BaseModelSerializer):
     program = BaseProgramSerializer(read_only=True)
-    service = BaseServiceSerializer(read_only=True)
+    is_complimentary = serializers.BooleanField(
+        source="program.is_complimentary", required=False, write_only=True,
+    )
+    is_credit = serializers.BooleanField(
+        source="program.is_credit", required=False, write_only=True,
+    )
+    redeemable_centers = MinimumCenterSerializer(
+        source="therapy_service.redeemable_centers", many=True, read_only=True, default=list,
+    )
+    service = AssignedProgramServiceSerializer(source="*", read_only=True)
     assignment_type_code = serializers.CharField(
         source="assignment_type",
         read_only=True,
     )
     sessions_count = serializers.IntegerField(
         source="therapy_service.sessions_count",
-        read_only=True,
-        default=None,
-        allow_null=True,
+        min_value=1,
+        required=False,
     )
     sessions_used = serializers.IntegerField(
         source="therapy_service.sessions_used",
@@ -867,6 +948,9 @@ class TherapyProgramServiceSerializer(BaseModelSerializer):
             "service",
             "assignment_type",
             "assignment_type_code",
+            "redeemable_centers",
+            "is_complimentary",
+            "is_credit",
             "sessions_count",
             "sessions_used",
             "sessions_cancelled",
@@ -881,6 +965,7 @@ class TherapyProgramServiceSerializer(BaseModelSerializer):
             "cancelled_at",
             "cancelled_date",
         ]
+
         read_only_fields = [
             "id",
             "assignment_type",
@@ -892,3 +977,72 @@ class TherapyProgramServiceSerializer(BaseModelSerializer):
             "cancelled_at",
             "cancelled_date",
         ]
+
+    def update(self, instance: ProgramService, validated_data: dict):
+        """Update parent flags and add sessions in one transaction."""
+        additional_sessions_count = validated_data.get("therapy_service", {}).get("sessions_count")
+        program_data = validated_data.get("program", {})
+        if additional_sessions_count is None and not program_data:
+            return instance
+        program = instance.program
+        if program_data:
+            is_complimentary = program_data.get(
+                "is_complimentary", program.is_complimentary,
+            )
+            is_credit = program_data.get("is_credit", program.is_credit)
+            if is_complimentary and is_credit:
+                raise serializers.ValidationError(
+                    {"is_credit": "A program cannot be both complimentary and credit."}
+                )
+            if not is_complimentary and program.price is None:
+                raise serializers.ValidationError(
+                    {"price": "Price is required when program is not complimentary."}
+                )
+        today = timezone.localdate()
+        now = timezone.localtime()
+        active_program_extension = Q(
+            program_service__program__program_type=ProgramType.THERAPY,
+            program_service__program__therapy_program__is_active=True,
+        ) | Q(
+            program_service__program__program_type=ProgramType.COMPOSITE,
+            program_service__program__composite_program__is_active=True,
+        )
+
+        with transaction.atomic():
+            therapy_services = TherapyProgramService.objects.filter(
+                Q(program_service__program__expires_at__isnull=True)
+                | Q(program_service__program__expires_at__gte=today),
+                active_program_extension,
+                pk=instance.pk,
+                is_active=True,
+                program_service__is_active=True,
+                program_service__program__is_active=True,
+            )
+            if additional_sessions_count is not None:
+                updated_count = therapy_services.update(
+                    sessions_count=F("sessions_count") + additional_sessions_count,
+                    updated_at=now,
+                )
+            else:
+                updated_count = therapy_services.exists()
+            if not updated_count:
+                raise serializers.ValidationError(
+                    "Cannot update an inactive, expired, or invalid therapy service."
+                )
+            if additional_sessions_count is not None and program.program_type == ProgramType.THERAPY:
+                TherapyProgram.objects.filter(program=program).update(
+                    sessions_count=F("sessions_count") + additional_sessions_count,
+                    updated_at=now,
+                )
+                program.therapy_program.refresh_from_db(fields=["sessions_count", "updated_at"])
+            if additional_sessions_count is not None:
+                instance.therapy_service.refresh_from_db(fields=["sessions_count", "updated_at"])
+            if program_data:
+                for field, value in program_data.items():
+                    create_program_audit_log(
+                        program, field, getattr(program, field), value,
+                        validated_data.get("updated_by"),
+                    )
+                    setattr(program, field, value)
+                program.save(update_fields=[*program_data, "updated_at"])
+        return instance

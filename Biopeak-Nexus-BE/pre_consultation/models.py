@@ -50,7 +50,7 @@ class PreConsultationSession(BaseUUIDModel):
         choices=PreConsultationSessionInterface.choices,
     )
     app_version = models.CharField(max_length=50)
-    locale = models.CharField(max_length=20)
+    locale = models.TextField()
     device = models.CharField(max_length=255)
 
     class Meta:

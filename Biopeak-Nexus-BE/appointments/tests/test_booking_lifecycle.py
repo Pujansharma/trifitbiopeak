@@ -6,6 +6,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.fields import DateTimeField
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from accounts.associates.models import (
@@ -20,6 +21,9 @@ from accounts.models import UserAccount
 from accounts.users.models import User
 from accounts.utils.constants import UserType
 from appointments.models import (
+    Appointment,
+    AppointmentAuditLog,
+    AppointmentHistory,
     AssociateLeave,
     AssociateRosterEntry,
     CareTeamAvailabilityBlock,
@@ -35,6 +39,7 @@ from appointments.serializers.booking import (
 )
 from appointments.serializers.care_teams import CenterCareTeamSerializer
 from appointments.utils.constants import (
+    AppointmentAuditAction,
     AppointmentStatus,
     ExceptionResolution,
     ExceptionSourceType,
@@ -59,7 +64,10 @@ from appointments.utils.scheduling import (
     resolve_booking_combo,
 )
 from appointments.utils.transitions import validate_transition
-from appointments.views.booking import AppointmentBookView
+from appointments.views.booking import (
+    AppointmentAuditLogListView,
+    AppointmentBookView,
+)
 from core.utils.constants import AppointmentModes
 from inventory.models import Equipment, EquipmentType, Room, RoomType
 from programs.services.models import (
@@ -69,6 +77,10 @@ from programs.services.models import (
     Service,
 )
 from programs.services.utils.constants import ServiceCategory
+
+def serialized_audit_datetime(value):
+    return DateTimeField().to_representation(value)
+
 
 KOLKATA = ZoneInfo("Asia/Kolkata")
 SLOT_DATE = date(2026, 9, 21)
@@ -1013,6 +1025,200 @@ class LifecycleTests(BookingWorldTests):
         with self.assertRaises(DjangoValidationError) as raised:
             validate_transition(AppointmentStatus.CONFIRMED, "explode")
         self.assertIn("Unknown appointment action", raised.exception.messages[0])
+
+    def test_audit_log_get_returns_newest_first(self):
+        UserAccount.objects.create(
+            user=self.actor,
+            account_type=UserType.ASSOCIATE,
+        )
+        self.actor.first_name = "Life"
+        self.actor.last_name = "Doctor"
+        self.actor.save(update_fields=["first_name", "last_name"])
+        start = timezone.now()
+        end = start + timedelta(minutes=30)
+        appointment = Appointment.objects.create(
+            center=self.center,
+            code="BK-AUDIT-1",
+            customer_profile=self.customer_profile,
+            service=self.service,
+            modality=AppointmentModes.VIRTUAL,
+            start_datetime=start,
+            end_datetime=end,
+            duration_minutes=30,
+            exclusive_start_datetime=start,
+            exclusive_end_datetime=end,
+            status=AppointmentStatus.CANCELLED,
+            cancel_reason="Patient cancelled",
+        )
+        AppointmentAuditLog.objects.create(
+            appointment=appointment,
+            actor=None,
+            action=AppointmentAuditAction.COMPLETE,
+        )
+        AppointmentAuditLog.objects.create(
+            appointment=appointment,
+            actor=self.actor,
+            action=AppointmentAuditAction.CREATE,
+        )
+        AppointmentAuditLog.objects.create(
+            appointment=appointment,
+            actor=self.actor,
+            action=AppointmentAuditAction.CANCEL,
+            note="Patient cancelled",
+        )
+        AppointmentAuditLog.objects.create(
+            appointment=appointment,
+            actor=self.actor,
+            action=AppointmentAuditAction.RESCHEDULE,
+        )
+        factory = APIRequestFactory()
+        request = factory.get(
+            f"/appointments/{appointment.pk}/audit-logs/",
+        )
+        force_authenticate(request, user=self.actor)
+        response = AppointmentAuditLogListView.as_view()(
+            request,
+            pk=appointment.pk,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.data["detail"],
+            "Appointment audit logs retrieved.",
+        )
+        self.assertNotIn("success", response.data)
+        logs = response.data["data"]["audit_logs"]
+        self.assertEqual(
+            [row["action"] for row in logs],
+            [
+                "Rescheduled",
+                "Cancelled",
+                "Created",
+                "Completed",
+            ],
+        )
+        self.assertEqual(logs[1]["note"], "Patient cancelled")
+        self.assertEqual(logs[1]["details"], {"reason": "Patient cancelled"})
+        self.assertIsNone(logs[0]["details"])
+        self.assertEqual(logs[2]["note"], "")
+        self.assertIsNone(logs[2]["details"])
+        self.assertIsNone(logs[3]["actor"])
+        self.assertEqual(logs[1]["actor"]["id"], str(self.actor.pk))
+        self.assertEqual(logs[0]["actor"]["email"], self.actor.email)
+        self.assertEqual(logs[0]["actor"]["full_name"], "Life Doctor")
+        missing_id = uuid4()
+        missing = factory.get(f"/appointments/{missing_id}/audit-logs/")
+        force_authenticate(missing, user=self.actor)
+        missing_response = AppointmentAuditLogListView.as_view()(
+            missing,
+            pk=missing_id,
+        )
+        self.assertEqual(missing_response.status_code, 404)
+        self.assertEqual(missing_response.data["detail"], "Appointment not found.")
+        other_center = Center.objects.create(
+            name="Other Center",
+            code="BK-OTHER",
+            modes=AppointmentModes.BOTH,
+        )
+        other_appointment = Appointment.objects.create(
+            center=other_center,
+            code="BK-AUDIT-2",
+            customer_profile=self.customer_profile,
+            service=self.service,
+            modality=AppointmentModes.VIRTUAL,
+            start_datetime=start,
+            end_datetime=end,
+            duration_minutes=30,
+            exclusive_start_datetime=start,
+            exclusive_end_datetime=end,
+            status=AppointmentStatus.CONFIRMED,
+        )
+        hidden = factory.get(
+            f"/appointments/{other_appointment.pk}/audit-logs/",
+        )
+        force_authenticate(hidden, user=self.actor)
+        hidden_response = AppointmentAuditLogListView.as_view()(
+            hidden,
+            pk=other_appointment.pk,
+        )
+        self.assertEqual(hidden_response.status_code, 404)
+        self.assertEqual(hidden_response.data["detail"], "Appointment not found.")
+
+    def test_audit_log_reschedule_details_pair_history_oldest_first(self):
+        UserAccount.objects.create(
+            user=self.actor,
+            account_type=UserType.ASSOCIATE,
+        )
+        first_start = timezone.now()
+        first_end = first_start + timedelta(minutes=30)
+        second_start = first_start + timedelta(days=1)
+        second_end = second_start + timedelta(minutes=30)
+        current_start = first_start + timedelta(days=2)
+        current_end = current_start + timedelta(minutes=30)
+        appointment = Appointment.objects.create(
+            center=self.center,
+            code="BK-AUDIT-3",
+            customer_profile=self.customer_profile,
+            service=self.service,
+            modality=AppointmentModes.VIRTUAL,
+            start_datetime=current_start,
+            end_datetime=current_end,
+            duration_minutes=30,
+            exclusive_start_datetime=current_start,
+            exclusive_end_datetime=current_end,
+            status=AppointmentStatus.CONFIRMED,
+        )
+        AppointmentHistory.objects.create(
+            appointment=appointment,
+            previous_start_datetime=first_start,
+            previous_end_datetime=first_end,
+            previous_exclusive_start_datetime=first_start,
+            previous_exclusive_end_datetime=first_end,
+            actor=self.actor,
+        )
+        AppointmentAuditLog.objects.create(
+            appointment=appointment,
+            actor=self.actor,
+            action=AppointmentAuditAction.RESCHEDULE,
+        )
+        AppointmentHistory.objects.create(
+            appointment=appointment,
+            previous_start_datetime=second_start,
+            previous_end_datetime=second_end,
+            previous_exclusive_start_datetime=second_start,
+            previous_exclusive_end_datetime=second_end,
+            actor=self.actor,
+        )
+        AppointmentAuditLog.objects.create(
+            appointment=appointment,
+            actor=self.actor,
+            action=AppointmentAuditAction.RESCHEDULE,
+        )
+        factory = APIRequestFactory()
+        request = factory.get(f"/appointments/{appointment.pk}/audit-logs/")
+        force_authenticate(request, user=self.actor)
+        response = AppointmentAuditLogListView.as_view()(
+            request,
+            pk=appointment.pk,
+        )
+        logs = response.data["data"]["audit_logs"]
+        self.assertEqual(
+            logs[0]["details"],
+            {
+                "previous_start": serialized_audit_datetime(second_start),
+                "previous_end": serialized_audit_datetime(second_end),
+                "start": serialized_audit_datetime(current_start),
+                "end": serialized_audit_datetime(current_end),
+            },
+        )
+        self.assertEqual(
+            logs[1]["details"],
+            {
+                "previous_start": serialized_audit_datetime(first_start),
+                "previous_end": serialized_audit_datetime(first_end),
+                "start": serialized_audit_datetime(second_start),
+                "end": serialized_audit_datetime(second_end),
+            },
+        )
 
 
 class ExceptionRaisingTests(BookingWorldTests):

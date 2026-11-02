@@ -30,6 +30,7 @@ from accounts.customers.utils.db import (
     increment_centers_count,
     compute_customer_profile_center_counts,
 )
+from accounts.organizations.utils.constants import FeatureTabOptions
 from accounts.organizations.utils.db import (
     increment_organization_clients_count,
 )
@@ -509,6 +510,16 @@ class CenterCustomerProfileHomeCenterSerializer(BaseModelSerializer):
             )
             profile.data = {**profile.data, "metsights_profile_id": metsights_profile_id}
             profile.save(update_fields=['data'])
+            CustomerProfileFeature.objects.get_or_create(
+                customer_profile=profile,
+                is_stable=True,
+                is_copilot_chat_enabled=True,
+                enabled_tabs=[
+                    FeatureTabOptions.REPORTS,
+                    FeatureTabOptions.ANALYSIS,
+                    FeatureTabOptions.CARE_TEAM
+                ]
+            )
 
         return assignment
 

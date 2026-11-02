@@ -225,8 +225,7 @@ Nullable nested values have these additional rules:
 - `sessions_count`, `sessions_used`, `sessions_cancelled`, and `redeem_code`
   are populated only for therapy services. They are `null` for assessment and
   consultation services.
-- A therapy `sessions_count` value of `0` means unlimited sessions; it does not
-  mean that the service is unavailable.
+- A therapy `sessions_count` value of `0` means no assigned sessions.
 
 User objects use this structure:
 
@@ -819,7 +818,7 @@ response.
   `assignment_type_code` values.
 - Show service name, category, assignment type, session usage, status, and
   redemption eligibility.
-- Distinguish `sessions_count: 0` as Unlimited for therapy services.
+- Render `sessions_count: 0` as no assigned therapy sessions.
 - Hide or mark session and redeem-code fields as not applicable for
   non-therapy services.
 - Use the API's pagination URLs or preserve `page` and `limit` in route/query

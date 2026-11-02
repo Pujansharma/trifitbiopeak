@@ -469,6 +469,7 @@ class Appointment(BaseUUIDModel):
         related_name="booked_appointments",
     )
     notes = models.TextField(null=True, blank=True)
+    legacy_data = models.JSONField(null=True, blank=True)
     google_event_id = models.CharField(
         max_length=255, null=True, blank=True, unique=True
     )

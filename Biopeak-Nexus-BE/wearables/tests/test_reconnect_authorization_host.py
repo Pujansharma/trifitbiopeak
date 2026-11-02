@@ -103,6 +103,7 @@ class ReconnectAuthorizationHostTests(TestCase):
         self.assertEqual(result["authorization_url"], "https://connect.garmin.com/authorize")
         self.connection.refresh_from_db()
         self.assertEqual(self.connection.status, ConnectionStatus.AUTHORIZING)
+        enqueue_job.return_value = (SimpleNamespace(pk="existing-recovery"), False)
         refresh_authorizing_connections(self.profile)
         self.connection.refresh_from_db()
         self.assertEqual(self.connection.status, ConnectionStatus.HISTORICAL_REIMPORT)

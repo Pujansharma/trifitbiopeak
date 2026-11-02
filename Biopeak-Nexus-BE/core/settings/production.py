@@ -205,6 +205,13 @@ if _shared_redis_url:
         "LOCATION": _shared_redis_url,
         "KEY_PREFIX": "biopeak:prod",
         "TIMEOUT": 300,
+        # Bound connection attempts and reads on the request-path DRF throttle.
+        # No ignore_exceptions/fail-open fallback: a Redis outage must not
+        # silently disable shared rate limiting across ECS workers.
+        "OPTIONS": {
+            "socket_connect_timeout": 3,
+            "socket_timeout": 3,
+        },
     }
 elif WEARABLES_ENABLED:
     raise ImproperlyConfigured(

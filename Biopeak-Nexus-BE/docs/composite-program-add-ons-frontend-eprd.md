@@ -306,9 +306,8 @@ Therapy session and redeem-code fields are `null` for assessment occurrences.
 Use the top-level program-service `id`, not `service.id`, as the frontend row
 key and as the identifier for occurrence-specific operations.
 
-For therapy occurrences, `sessions_count: 0` means unlimited sessions. Add-on
-creation still requires a positive `quantity`; the unlimited value can appear
-on existing standalone occurrences.
+For therapy occurrences, `sessions_count: 0` means no assigned sessions.
+Add-on creation requires a positive `quantity`.
 
 Results are ordered newest first.
 

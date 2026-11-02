@@ -7,7 +7,11 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from accounts.centers.models import Center
-from appointments.utils.redemption import increment_therapy_sessions_used
+from appointments.utils.redemption import (
+    get_open_appointment_for_program_service,
+    increment_therapy_sessions_used,
+)
+from programs.therapy.eligibility import ensure_therapy_service_center
 from programs.models import (
     RedemptionHistory,
     TherapyProgram,
@@ -79,7 +83,8 @@ def redeem_program_service(
     center = Center.objects.filter(pk=center_id).first()
     therapy_program_service = TherapyProgramService.objects.filter(
         program_service__pk=program_service_id
-    ).first()
+    ).select_related("program_service__program").first()
+    ensure_therapy_service_center(therapy_program_service.program_service, center_id)
     with transaction.atomic():
         burned = increment_therapy_sessions_used(program_service_id, quantity)
         if burned != 1:
@@ -107,8 +112,8 @@ def redeem_all_program_services(
             program_service__program=program_id,
             program_service__is_active=True,
         )
-        .exclude(sessions_used=F("sessions_count"))
-        .select_related("program_service")
+        .filter(sessions_used__lt=F("sessions_count"))
+        .select_related("program_service__program")
     )
     if not services:
         return 0
@@ -119,6 +124,11 @@ def redeem_all_program_services(
     histories = []
 
     for therapy_program_service in services:
+        ensure_therapy_service_center(therapy_program_service.program_service, center_id)
+        if get_open_appointment_for_program_service(therapy_program_service.pk) is not None:
+            raise serializers.ValidationError(
+                "An open appointment exists for this service. Complete or cancel it before redeeming all sessions."
+            )
         remaining = (
             therapy_program_service.sessions_count
             - therapy_program_service.sessions_used

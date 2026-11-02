@@ -16,7 +16,8 @@ from programs.models import (
     TherapyProgramService,
 )
 from programs.services.utils.constants import ServiceCategory
-from programs.utils.constants import ProgramType, RedemptionType
+from programs.utils.audit import create_program_audit_log
+from programs.utils.constants import RedemptionType
 
 User = get_user_model()
 
@@ -86,7 +87,7 @@ def cancel_all_program_services(
     active_services = list(
         TherapyProgramService.objects.filter(
             program_service__program=program_id, program_service__is_active=True
-        ).select_related("program_service")
+        ).select_related("program_service__program__cancelled_by")
     )
     if not active_services:
         return None
@@ -145,12 +146,18 @@ def cancel_all_program_services(
                 Subquery(sessions_cancelled_subquery), Value(0)
             ),
         )
-        Program.objects.filter(pk=program_id).update(
-            cancelled_by=cancelled_by,
-            cancellation_reason=cancellation_reason,
-            cancelled_at=now,
-            cancelled_date=cancelled_date,
-        )
+        program = active_services[0].program_service.program
+        cancellation_fields = {
+            "cancelled_by": cancelled_by,
+            "cancellation_reason": cancellation_reason,
+            "cancelled_at": now,
+            "cancelled_date": cancelled_date,
+        }
+        for field, value in cancellation_fields.items():
+            create_program_audit_log(
+                program, field, getattr(program, field), value, cancelled_by,
+            )
+        Program.objects.filter(pk=program_id).update(**cancellation_fields)
         increment_service_cancelled_count(program_id, count=len(program_service_ids))
         RedemptionHistory.objects.bulk_create(histories)
     return None
@@ -171,6 +178,7 @@ def cancel_program_service(
         )
         .select_related(
             "program",
+            "program__cancelled_by",
             "service",
         )
         .first()
@@ -225,12 +233,18 @@ def cancel_program_service(
         )
         increment_service_cancelled_count(program_id)
         if not has_other_services:
-            Program.objects.filter(pk=program_id).update(
-                cancelled_by=cancelled_by,
-                cancellation_reason=cancellation_reason,
-                cancelled_at=now,
-                cancelled_date=cancelled_date,
-            )
+            cancellation_fields = {
+                "cancelled_by": cancelled_by,
+                "cancellation_reason": cancellation_reason,
+                "cancelled_at": now,
+                "cancelled_date": cancelled_date,
+            }
+            for field, value in cancellation_fields.items():
+                create_program_audit_log(
+                    program_service.program, field,
+                    getattr(program_service.program, field), value, cancelled_by,
+                )
+            Program.objects.filter(pk=program_id).update(**cancellation_fields)
         if is_therapy_service:
             sessions_cancelled_subquery = (
                 TherapyProgramService.objects.filter(
@@ -250,10 +264,7 @@ def cancel_program_service(
                     Subquery(sessions_cancelled_subquery), Value(0)
                 ),
             )
-        if (
-            is_therapy_service
-            and program_service.program.program_type == ProgramType.THERAPY
-        ):
+        if is_therapy_service:
             RedemptionHistory.objects.create(
                 therapy_program_service=therapy_program_service,
                 redeem_center=center,

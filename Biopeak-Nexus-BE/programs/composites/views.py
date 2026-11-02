@@ -51,6 +51,8 @@ from programs.services.models import (
     CenterServiceAssignment,
     ServiceProductAssignment,
 )
+from programs.services.utils.constants import ServiceCategory
+from programs.therapy.eligibility import composite_therapy_services_for_redemption
 
 
 class CompositeTemplateServiceViewMeta(BaseGenericAPIView):
@@ -197,12 +199,21 @@ class CompositeProgramViewMeta(BaseGenericAPIView):
             "therapy_service",
             "assessment_service",
             "consultation_service",
-        )
+        ).prefetch_related("therapy_service__redeemable_centers")
         center_service_assignment = CenterServiceAssignment.objects.filter(
             **filter_kwargs
         )
         return program_services.annotate(
             can_redeem=Case(
+                When(
+                    service__service_category=ServiceCategory.THERAPY,
+                    then=Exists(
+                        composite_therapy_services_for_redemption(center_identifier).filter(
+                            program_service__pk=OuterRef("pk"),
+                        )
+                    ),
+                ),
+                When(service__service_category=ServiceCategory.CONSULTATION, then=Value(False)),
                 When(service__is_global=True, then=Value(True)),
                 default=Exists(center_service_assignment),
                 output_field=BooleanField(),

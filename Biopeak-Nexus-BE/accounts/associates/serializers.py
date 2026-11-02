@@ -15,6 +15,8 @@ ASSOCIATE_ROLE_NAME_CLASH = "A role with this name already exists at this center
 
 def is_associate_role_center_name_unique_violation(error: IntegrityError) -> bool:
     return ASSOCIATE_ROLE_CENTER_NAME_UNIQUE in str(error)
+
+
 from accounts.associates.utils.constants import AssociateTitle
 from accounts.associates.utils.db import (
     create_associate_user_account,
@@ -53,8 +55,6 @@ from accounts.utils.db import (
 from accounts.verifications.utils.helper import send_registration_code
 from core.utils.fields import PhoneNumberSerializerField
 from core.utils.serializers import BaseModelSerializer, BaseSerializer
-
-
 
 
 def assignment_roles_representation(assignment):
@@ -450,6 +450,19 @@ class AdminAssociateSerializer(
         user_data = validated_data.pop("user", {})
         user_data.pop("phone", None)
         is_active = user_data.get("is_active", False)
+
+        email_data = user_data.pop('email', None)
+        if email_data:
+            email_exists = User.objects.exclude(
+                pk=instance.user.pk
+            ).filter(
+                email__icontains=email_data
+            ).exists()
+            if email_exists:
+                raise serializers.ValidationError({
+                    'email': 'This email is already in use by a staff member'
+                })
+
         for key, value in user_data.items():
             setattr(instance.user, key, value)
         instance.user.save(update_fields=[*user_data.keys(), "updated_at"])
@@ -725,8 +738,8 @@ class AdminAssociateCenterLinkSerializer(BaseSerializer):
             )
 
         affected_center_ids = [
-            center_data["id"] for center_data in add_centers
-        ] + list(remove_center_ids)
+                                  center_data["id"] for center_data in add_centers
+                              ] + list(remove_center_ids)
         refresh_staff_counts(affected_center_ids)
         update_associate_centers_count(associate.pk)
 
@@ -935,7 +948,7 @@ class CenterAssociateSerializer(
 
     def validate(self, attrs):
         if not attrs.get("is_admin", False) and not attrs.get(
-            "is_care_staff", False
+                "is_care_staff", False
         ):
             raise serializers.ValidationError(
                 "At least one of 'is_admin' or 'is_care_staff' must be true."

@@ -11,12 +11,13 @@ from programs.program_services.utils.db import (
     update_all_program_service_results_count,
     update_all_result_documents_count,
 )
+from programs.consultation.utils.db import recompute_all_consultation_counts
 
 
 class Command(BaseCommand):
     help = (
         "Recompute stored fetch, result, and document counts on composite "
-        "programs, program services, and service results."
+        "programs, program services, and service results, including consultation documents."
     )
 
     def handle(self, *args, **options):
@@ -37,6 +38,9 @@ class Command(BaseCommand):
             updated_composite_program_document_counts = (
                 update_all_composite_program_document_counts()
             )
+            consultation_documents, consultation_services, consultation_composites = (
+                recompute_all_consultation_counts()
+            )
 
         self.stdout.write(
             self.style.SUCCESS(
@@ -51,6 +55,9 @@ class Command(BaseCommand):
                 f"result counts for {updated_composite_program_results_count} "
                 f"composite program(s), and document, report, and raw data "
                 f"counts for {updated_composite_program_document_counts} "
-                f"composite program(s)."
+                f"composite program(s), single-file counts for {consultation_documents} "
+                f"consultation document(s), and consultation document/file totals for "
+                f"{consultation_services} consultation service(s) and "
+                f"{consultation_composites} composite program(s)."
             )
         )

@@ -59,12 +59,13 @@ class QueueCoalescingTests(TestCase):
         self.assertEqual(job.idempotency_key, f"freshness:{self.profile.pk}")
         HealthProcessingJob.objects.filter(pk=job.pk).update(
             status=HealthJobStatus.COMPLETED, attempt_count=2,
+            completed_at=timezone.now(),
         )
         call_command("enqueue_health_freshness_checks", verbosity=0)
         job.refresh_from_db()
         self.assertEqual(job.status, HealthJobStatus.COMPLETED)
         HealthProcessingJob.objects.filter(pk=job.pk).update(
-            scheduled_at=timezone.now() - timedelta(hours=2),
+            completed_at=timezone.now() - timedelta(hours=2),
         )
         call_command("enqueue_health_freshness_checks", verbosity=0)
         job.refresh_from_db()
@@ -136,6 +137,7 @@ class QueueCoalescingTests(TestCase):
             status=HealthJobStatus.FAILED,
             attempt_count=HEALTH_MAXIMUM_JOB_ATTEMPTS,
             scheduled_at=timezone.now() - timedelta(hours=2),
+            completed_at=timezone.now() - timedelta(hours=2),
         )
         same, queued = enqueue_or_reuse_freshness_job(customer_profile=self.profile)
         self.assertTrue(queued)
@@ -153,10 +155,12 @@ class QueueCoalescingTests(TestCase):
         )
         self.assertTrue(created)
         self.assertFalse(connections_requiring_recovery_pull().filter(pk=self.connection.pk).exists())
-        HealthProcessingJob.objects.filter(pk=job.pk).update(status=HealthJobStatus.COMPLETED)
+        HealthProcessingJob.objects.filter(pk=job.pk).update(
+            status=HealthJobStatus.COMPLETED, completed_at=timezone.now(),
+        )
         self.assertFalse(connections_requiring_recovery_pull().filter(pk=self.connection.pk).exists())
         HealthProcessingJob.objects.filter(pk=job.pk).update(
-            created_at=timezone.now() - timedelta(hours=2),
+            completed_at=timezone.now() - timedelta(hours=2),
         )
         self.assertTrue(connections_requiring_recovery_pull().filter(pk=self.connection.pk).exists())
 

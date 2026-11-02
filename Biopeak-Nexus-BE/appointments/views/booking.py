@@ -13,7 +13,7 @@ from rest_framework.exceptions import APIException, NotFound
 from accounts.customers.models import CustomerProfile
 from accounts.utils.constants import UserType
 from accounts.utils.db import get_user_account_type
-from accounts.utils.permissions import IsCustomerUser
+from accounts.utils.permissions import IsAdminUser, IsAssociateUser, IsCustomerUser
 from appointments.mixins import CenterAppointmentsMixin
 from appointments.models import Appointment, AppointmentIdempotencyKey
 from appointments.permissions import (
@@ -21,6 +21,7 @@ from appointments.permissions import (
     StaffOrCustomerCenterAppointmentPermission,
 )
 from appointments.serializers.booking import (
+    AppointmentAuditLogSerializer,
     AppointmentBookSerializer,
     AppointmentCalendarListSerializer,
     AppointmentCancelSerializer,
@@ -559,6 +560,41 @@ class AppointmentDetailView(AppointmentBookingMixin, BaseRetrieveAPIView):
         appointment = self.get_object()
         data = AppointmentDetailSerializer(appointment).data
         return self.send_response("Appointment retrieved.", data)
+
+
+def appointment_center_allowed(request, center_id):
+    permission = CenterAppointmentPermission()
+    checks = {
+        UserType.ADMIN: permission._admin_center_allowed,
+        UserType.ASSOCIATE: permission._associate_center_allowed,
+    }
+    check = checks.get(get_user_account_type(request.user))
+    if check is None:
+        return False
+    return check(request, center_id)
+
+
+class AppointmentAuditLogListView(BaseGenericAPIView):
+    permission_classes = [IsAdminUser | IsAssociateUser]
+    serializer_class = AppointmentAuditLogSerializer
+
+    def get(self, request, *args, **kwargs):
+        appointment = get_object_or_404(
+            Appointment.objects.all(),
+            "Appointment not found.",
+            pk=self.kwargs["pk"],
+        )
+        if not appointment_center_allowed(request, appointment.center_id):
+            raise NotFound("Appointment not found.")
+        logs = list(appointment.audit_logs.select_related("actor"))
+        data = {
+            "audit_logs": AppointmentAuditLogSerializer(
+                logs,
+                many=True,
+                context={"appointment": appointment},
+            ).data,
+        }
+        return self.send_response("Appointment audit logs retrieved.", data)
 
 
 class AppointmentLifecycleActionView(AppointmentBookingMixin, BaseGenericAPIView):

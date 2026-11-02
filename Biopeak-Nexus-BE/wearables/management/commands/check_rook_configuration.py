@@ -78,16 +78,7 @@ def rook_readiness_checks() -> list[tuple[str, str, str]]:
                 checks.append(("INFO", "ROOK_CALLBACK_URL", "Valid URL format. Register it in ROOK and verify external HTTPS access."))
         if any(source in NATIVE_WEARABLE_SOURCES for source in sources):
             sdk_secret = getattr(settings, "ROOK_SDK_SECRET", "")
-            sdk_client_uuid = getattr(settings, "ROOK_SDK_CLIENT_UUID", "").strip()
-            api_client_uuid = getattr(settings, "ROOK_CLIENT_UUID", "").strip()
-            # SDK uploads must land in the same ROOK client as server-side
-            # authorizers/webhooks; otherwise rookUserId alone cannot join them.
-            if sdk_client_uuid and api_client_uuid and sdk_client_uuid != api_client_uuid:
-                checks.append((
-                    "ERROR", "ROOK_SDK_CLIENT_UUID",
-                    "Mobile SDK and server API client UUIDs differ; use the same ROOK Client/environment for unified user data.",
-                ))
-            if not sdk_client_uuid or not sdk_secret:
+            if not getattr(settings, "ROOK_SDK_CLIENT_UUID", "") or not sdk_secret:
                 checks.append(("ERROR", "ROOK_SDK_CLIENT_UUID / ROOK_SDK_SECRET", "Native SDK provisioned but SDK credentials are missing."))
             if sdk_secret and sdk_secret == getattr(settings, "ROOK_SECRET_KEY", ""):
                 checks.append(("ERROR", "ROOK_SDK_SECRET", "Mobile SDK credential MUST differ from server-side ROOK_SECRET_KEY."))
