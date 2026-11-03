@@ -1,0 +1,80 @@
+meta {
+  name: POST New Supplement
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseURL}}/supplementation/master/new-supplement/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "brand_name": "Thorne",
+    "product_name": "Basic Nutrients 2/Day {{$timestamp}}",
+    "form": "capsule",
+    "sku": "THN-BN2D-{{$timestamp}}",
+    "manufacturer": "Thorne Research",
+    "raw_material_source_type": "natural",
+    "pack_quantity_info": "60 capsules",
+    "serving_size": "2 capsules",
+    "serving_container": 30,
+    "market_country_code": "US",
+    "product_url": "https://www.thorne.com/products/dp/basic-nutrients-2-day",
+    "active_ingredients": [
+      {
+        "ingredient_name": "Vitamin D3",
+        "serving": 25,
+        "unit": "mcg",
+        "form": "cholecalciferol",
+        "source": "lanolin"
+      },
+      {
+        "ingredient_name": "Zinc",
+        "serving": 15,
+        "unit": "mg",
+        "form": "bisglycinate",
+        "source": ""
+      }
+    ],
+    "dietary_attributes": [
+      "gluten_free",
+      "dairy_free",
+      "soy_free"
+    ],
+    "allergen_information": [
+      {
+        "name": "tree_nuts",
+        "type": "in_facility"
+      }
+    ]
+  }
+}
+
+script:post-response {
+  if (res.getStatus() === 201) {
+    bru.setEnvVar("supplement_id", res.getBody().data.id);
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Create master supplement. Admin + associate.
+  form: capsule|tablet|softgel|powder|liquid|gummy|lozenge|oil|cream|spray|other
+  raw_material_source_type: synthetic|natural|whole food|fermented|blended
+  dietary_attributes multi-select: vegan|vegetarian|gluten_free|dairy_free|soy_free|non_gmo|organic|kosher|halal|nut_free|corn_free|sugar_free
+  allergen name: gluten|dairy|soy|tree_nuts|peanuts|shell_fish|fish|sesame|corn|wheat
+  allergen type: contains|in_facility
+  Unique: SKU; product_name per brand (case-insensitive). Both carry {{$timestamp}} so reruns stay unique.
+  Post-response sets env supplement_id.
+  active_ingredients / dietary_attributes / allergen_information may be [].
+}

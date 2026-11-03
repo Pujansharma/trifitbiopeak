@@ -1,0 +1,38 @@
+meta {
+  name: DELETE Protocol Supplement
+  type: http
+  seq: 19
+}
+
+delete {
+  url: {{baseURL}}/supplementation/protocol-items/{{protocol_item_id}}/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "reason": "Levels normalized on blood panel"
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff delete. Admin + associate. Customer 403. No X-Center-ID.
+  Version must be draft or under_review.
+  Any other status → 400
+  "Supplements can only be changed while the version is draft or under review."
+  Unknown item → 404 "Protocol supplement not found."
+  Body is reason only. reason is required and is stored on the event.
+  The row is deleted. Writes supplement_removed, client_visible false.
+  before is the item payload. after is null.
+  200 detail only: "Supplement removed from protocol version."
+  Env: protocol_item_id.
+}

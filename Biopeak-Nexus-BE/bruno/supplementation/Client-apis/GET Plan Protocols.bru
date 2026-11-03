@@ -1,0 +1,35 @@
+meta {
+  name: GET Plan Protocols
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseURL}}/supplementation/plan/protocols/
+  body: none
+  auth: inherit
+}
+
+headers {
+  X-Customer-Profile-ID: {{customer_profile_id}}
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Customer JWT only. No X-Center-ID.
+  Header X-Customer-Profile-ID must belong to that user.
+  Missing, blank, junk, unknown, another customer's, or inactive profile → 404 Customer profile not found.
+  data.summary counts one stored status per protocol from current_version:
+  active, scheduled, draft, cancelled, expired.
+  Null current_version plus a draft version counts as draft.
+  Lists are active, scheduled, cancelled, expired. Draft is a count only.
+  approved, under_review, superseded, and inactive protocols are omitted.
+  Newest starts_on first.
+  Each list row includes supplements for that version.
+  supplement is id, product_name, brand_name, form.
+  Dose fields include duration. Ordered by product name, then item id.
+  Auth: customer access_token. Env: customer_profile_id.
+}

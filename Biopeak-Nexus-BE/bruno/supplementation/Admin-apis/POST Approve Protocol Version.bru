@@ -1,0 +1,44 @@
+meta {
+  name: POST Approve Protocol Version
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{baseURL}}/supplementation/protocol-versions/{{protocol_version_id}}/approve/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "starts_on": "2026-10-01",
+    "ends_on": "2026-12-15",
+    "approval_notes": ""
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff approve. Admin + associate. No X-Center-ID. 200.
+  Path version must be draft or under_review.
+  Any other status → 400
+  "Protocol version can only be approved while it is draft or under review."
+  Unknown version → 404 "Protocol version not found."
+  starts_on required. ends_on null or omitted stores starts_on plus 90 days.
+  A sent ends_on stays as sent. approval_notes blank stores null.
+  ends_on before starts_on → 400.
+  Zero supplements → 400
+  "Add at least one supplement before approving this version."
+  Other versions of the protocol keep their status.
+  Protocol.current_version stays. Writes approved, client_visible false.
+  Response is detail only. data omitted.
+  Env: protocol_version_id.
+}

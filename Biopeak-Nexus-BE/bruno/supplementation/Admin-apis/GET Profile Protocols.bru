@@ -1,0 +1,30 @@
+meta {
+  name: GET Profile Protocols
+  type: http
+  seq: 8
+}
+
+get {
+  url: {{baseURL}}/supplementation/profiles/{{customer_profile_id}}/protocols/?page=1&limit=10
+  body: none
+  auth: inherit
+}
+
+params:query {
+  page: 1
+  limit: 10
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff protocol list for one profile. Admin + associate. No X-Center-ID.
+  Active profile or 404. Unknown or inactive id → 404.
+  Newest created_at first. Includes draft and under_review.
+  data[] matches GET Protocol: id, name, purpose, current_version_id,
+  versions[] in version_number order with stored status.
+  supplement_count is the ProtocolItem count on that version.
+  Env: customer_profile_id from GET Profiles customer_profile.id.
+}

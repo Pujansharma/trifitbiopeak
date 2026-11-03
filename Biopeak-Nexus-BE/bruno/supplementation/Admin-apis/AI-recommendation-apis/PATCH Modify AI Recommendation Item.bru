@@ -1,0 +1,53 @@
+meta {
+  name: PATCH Modify AI Recommendation Item
+  type: http
+  seq: 6
+}
+
+patch {
+  url: {{baseURL}}/supplementation/ai-recommendation-items/{{ai_recommendation_item_id}}/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "dosage": "2 capsules",
+    "frequency": "daily",
+    "custom_frequency": null,
+    "timing": "with_lunch",
+    "duration": "60 days",
+    "instructions": "Take 2 capsules with lunch.",
+    "reason": "Dose raised after the repeat panel."
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff edit. Admin + associate. No X-Center-ID. 200.
+  Same body as PATCH Edit Protocol Supplement.
+  Allowed while decision is pending or modified.
+  AI dose fields stay. The edited dose is stored on final_*.
+  Decision becomes modified. Accept or reject is still required
+  before draft.
+  reason is required. Blank → 400.
+  frequency custom requires custom_frequency.
+  Any other frequency requires custom_frequency null.
+  timing: before_breakfast, with_breakfast, with_lunch, with_dinner,
+  after_dinner, anytime.
+  Product and rationale stay.
+  data.supplement is {id, product_name, brand_name, form, manufacturer}.
+  form is the stored code.
+  supplement_id is not in data.
+  Already accepted or rejected → 400.
+  Unknown item → 404 "AI recommendation item not found."
+  data is the item. reason is not in data.
+  Env: ai_recommendation_item_id.
+}

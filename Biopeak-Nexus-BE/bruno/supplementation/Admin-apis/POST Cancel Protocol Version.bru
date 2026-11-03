@@ -1,0 +1,40 @@
+meta {
+  name: POST Cancel Protocol Version
+  type: http
+  seq: 16
+}
+
+post {
+  url: {{baseURL}}/supplementation/protocol-versions/{{protocol_version_id}}/cancel/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "reason": "Protocol ended early"
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff cancel. Admin + associate. No X-Center-ID. 200.
+  Path version must be approved, scheduled, or active.
+  Any other status → 400
+  "Protocol version can only be cancelled after it is approved."
+  Unknown version → 404 "Protocol version not found."
+  reason required. Blank or whitespace → 400.
+  Stores cancellation_reason, cancelled_at, and cancelled_by.
+  Protocol.current_version stays. A superseded predecessor stays superseded.
+  Writes cancelled. client_visible false while still approved.
+  client_visible true for scheduled or active.
+  Response is detail only. data omitted.
+  Env: protocol_version_id.
+}

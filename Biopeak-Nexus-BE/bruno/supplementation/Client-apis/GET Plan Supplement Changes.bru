@@ -1,0 +1,31 @@
+meta {
+  name: GET Plan Supplement Changes
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseURL}}/supplementation/plan/supplement-changes/
+  body: none
+  auth: inherit
+}
+
+headers {
+  X-Customer-Profile-ID: {{customer_profile_id}}
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Customer JWT only. No X-Center-ID.
+  Header X-Customer-Profile-ID must belong to that user.
+  Missing, blank, junk, unknown, another customer's, or inactive profile → 404 Customer profile not found.
+  data is one row per protocol with an active or scheduled version.
+  Row: name, status, changes.modified, changes.replaced, changes.added, changes.removed.
+  Diff is that version against supersedes. Active rows first, then scheduled, by name.
+  If both statuses exist, the row uses the active version.
+  replaced pairs a supplement_replaced event and is not also added or removed.
+  Auth: customer access_token. Env: customer_profile_id.
+}

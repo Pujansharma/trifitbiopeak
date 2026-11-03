@@ -1,0 +1,56 @@
+meta {
+  name: POST Queue AI Protocol
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseURL}}/supplementation/profiles/{{customer_profile_id}}/protocols/ai/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "name": "Sleep & Recovery",
+    "purpose": "Faster sleep onset and deeper sleep",
+    "notes": "",
+    "supplement_ids": ["{{supplement_id}}"]
+  }
+}
+
+script:post-response {
+  if (res.getStatus() === 202) {
+    bru.setEnvVar("job_id", res.getBody().data.id);
+  }
+}
+
+tests {
+  test("queues a pending job", function () {
+    expect(res.getStatus()).to.equal(202);
+    expect(res.getBody().data.status).to.equal("pending");
+  });
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff queue. Admin + associate. No X-Center-ID. 202.
+  Does not create the protocol. Writes a job the worker runs.
+  Active profile or 404.
+  name and purpose are required. notes may be blank.
+  supplement_ids must be a non-empty list of active catalogue ids.
+  Empty list, a duplicate id, an unknown id, or an inactive supplement → 400.
+  data: {id, status: "pending"}. id is the job id.
+  GET AI Recommendations shows that job immediately with status "processing".
+  recommendation.id stays null until the worker saves the result and the model.
+  Post-response sets env job_id. Then run `uv run manage.py process_protocol_ai_jobs`
+  (calls Luma).
+  Env: customer_profile_id, supplement_id.
+}

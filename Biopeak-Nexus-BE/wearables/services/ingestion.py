@@ -24,6 +24,7 @@ from wearables.services.connections import (
 from wearables.services.job_queue import enqueue_health_job
 from wearables.services.consent import has_active_wearable_consent
 from wearables.services.analytics import invalidate_health_dashboard
+from wearables.services.client import RookServiceError
 from wearables.services.lifecycle import can_ingest_source, source_permission_for_domain
 from wearables.services.metrics import (
     ExtractedMetric,
@@ -59,6 +60,15 @@ DOCUMENT_TIME_FIELDS = [
     "activity_end_datetime_string",
     "period_start_date_string",
 ]
+
+
+class RookIngestionStateChanged(RookServiceError):
+    """Retryable conflict: source authorization changed during ingestion.
+
+    Raising from the atomic ingestion function rolls back the raw document,
+    receipt and any connection writes. The webhook boundary must return a
+    non-2xx response so ROOK knows the delivery was *not* accepted.
+    """
 
 
 def json_digest(value: Any) -> str:
@@ -433,11 +443,14 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool,
         identity=identity, connections=permitted_connections,
         observed_at=observed_at, received_at=received_at,
     ):
-        # The consent/source check raced a disconnect. Roll back the document,
-        # receipt and connection updates together, so no revoked-source raw
-        # payload is retained and no normalization job can be queued.
-        transaction.set_rollback(True)
-        return {"accepted": True, "skipped": True, "reason": "source_state_changed"}
+        # A disconnect may have raced the initial consent/source check.
+        # Raising rolls back the document, receipt and connection updates.
+        # Never acknowledge this retryable race as accepted to ROOK: a 2xx
+        # response would make the provider permanently discard the delivery.
+        raise RookIngestionStateChanged(
+            "ROOK source authorization changed during ingestion; retry delivery.",
+            status_code=503,
+        )
     # Durable DB outbox: create the normalization job in the SAME transaction
     # as the accepted document. If either write fails, both roll back and ROOK
     # can safely retry the webhook; no acknowledged document is left unqueued.

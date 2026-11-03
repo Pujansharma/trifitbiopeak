@@ -1,0 +1,42 @@
+meta {
+  name: POST Create Draft From AI Recommendation
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{baseURL}}/supplementation/ai-recommendations/{{ai_recommendation_id}}/draft/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {}
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff create the protocol. Admin + associate. No X-Center-ID. 201.
+  Body is empty. No protocol_id. The recommendation already has the profile,
+  name, purpose, notes, and item decisions.
+  Allowed only while status is under_review and every item is accepted
+  or rejected. A pending or modified item → 400
+  "Accept or reject every supplement before creating the draft."
+  Zero accepted items → 400
+  "Accept at least one supplement before creating the draft."
+  A second call → 400
+  "A draft was already created from this recommendation."
+  Unknown id → 404 "AI recommendation not found."
+  Creates a new protocol and draft version 1.
+  Copies accepted items only, using final_*. Rejected items stay off the protocol.
+  Recommendation becomes applied and stores protocol_version_id.
+  data: {protocol_id, new_protocol_version_id, status: "draft"}.
+  Env: ai_recommendation_id.
+}

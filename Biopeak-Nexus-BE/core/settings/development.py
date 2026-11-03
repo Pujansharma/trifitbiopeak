@@ -92,6 +92,11 @@ ADMIN_FRONTEND_URL = config("DEV_ADMIN_FRONTEND_URL", None)
 COMMUNICATION_OUTBOX_WAKE_QUEUE_URL = config(
     "DEV_COMMUNICATION_OUTBOX_WAKE_QUEUE_URL", default=""
 )
+PROTOCOL_AI_WAKE_QUEUE_URL = config(
+    "DEV_PROTOCOL_AI_WAKE_QUEUE_URL", default=""
+)
+LUMA_BASE_URL = config("DEV_LUMA_BASE_URL", default="")
+LUMA_NEXUS_API_KEY = config("DEV_LUMA_NEXUS_API_KEY", default="")
 AWS_REGION = config("AWS_REGION", default=None)
 # WhatsApp Cloud API (communications)
 WHATSAPP_ACCESS_TOKEN = config("WHATSAPP_ACCESS_TOKEN", None)

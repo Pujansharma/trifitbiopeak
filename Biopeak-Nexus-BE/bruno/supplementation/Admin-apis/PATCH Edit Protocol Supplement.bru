@@ -1,0 +1,48 @@
+meta {
+  name: PATCH Edit Protocol Supplement
+  type: http
+  seq: 17
+}
+
+patch {
+  url: {{baseURL}}/supplementation/protocol-items/{{protocol_item_id}}/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "dosage": "2 capsules",
+    "frequency": "daily",
+    "custom_frequency": null,
+    "timing": "with_lunch",
+    "duration": "60 days",
+    "instructions": "Take 2 capsules with lunch.",
+    "reason": "Dose raised after the repeat panel."
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff edit. Admin + associate. Customer 403. No X-Center-ID.
+  Version must be draft or under_review.
+  Any other status → 400
+  "Supplements can only be changed while the version is draft or under review."
+  Unknown item → 404 "Protocol supplement not found."
+  supplement_id and rationale stay.
+  reason is required and is stored on the event, not the item.
+  frequency custom requires custom_frequency.
+  Any other frequency requires custom_frequency null.
+  timing: before_breakfast, with_breakfast, with_lunch, with_dinner,
+  after_dinner, anytime.
+  Writes supplement_modified, client_visible false.
+  200 data is the saved item. reason is not in data.
+  Env: protocol_item_id.
+}

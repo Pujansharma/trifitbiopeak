@@ -58,11 +58,11 @@ INSTALLED_APPS = [
     "webhooks.whatsapp",
     "webhooks.sms",
     "pre_consultation",
-
-     "wearables",
-
+    "wearables",
+    "supplementation",
     "compliance",
     "compliance.consent_journey",
+
 
 ]
 

@@ -1,0 +1,42 @@
+meta {
+  name: POST Publish Protocol Version
+  type: http
+  seq: 13
+}
+
+post {
+  url: {{baseURL}}/supplementation/protocol-versions/{{protocol_version_id}}/publish/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {}
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff publish. Admin + associate. No X-Center-ID. 200.
+  Body is empty.
+  Path version must be approved and have at least one supplement.
+  Any other status → 400
+  "Protocol version can only be published while it is approved."
+  Zero supplements → 400
+  "Add at least one supplement before publishing this version."
+  Unknown version → 404 "Protocol version not found."
+  starts_on after today stores scheduled. starts_on today or earlier stores active.
+  Sets published_at, published_by, and Protocol.current_version.
+  Every other scheduled or active version of this protocol becomes superseded.
+  supersedes points at the previous current_version when that row was superseded.
+  Writes scheduled or published, and superseded, client_visible true.
+  Existing events on this version flip to client_visible true.
+  Response is detail only. data omitted.
+  Env: protocol_version_id (approved version).
+}

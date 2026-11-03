@@ -7,11 +7,12 @@ from wearables.services.connections import record_connection_event
 from wearables.services import connections as connection_service
 from wearables.services.ingestion import json_digest, receipt_payload
 from wearables.services.analytics import invalidate_health_dashboard
-from wearables.services.job_queue import enqueue_or_reuse_recovery_job
+from wearables.services.job_queue import enqueue_or_reuse_recovery_job, open_recovery_jobs
 from wearables.services.lifecycle import valid_transition
 from wearables.services.provenance import canonical_source
 from wearables.utils.constants import (
     AuthorizationStatus,
+    ConnectionMethod,
     ConnectionStatus,
     HistoricalImportStatus,
     PermissionStatus,
@@ -85,6 +86,24 @@ def stale_rook_notification(*, connection, action_datetime, text: str) -> bool:
     return False
 
 
+def set_notification_import_start_if_unclaimed(connection: WearableConnection) -> None:
+    """Never replace the import generation owned by a recovery worker.
+
+    ROOK notifications are advisory; API recovery jobs exclusively claim their
+    own generation. For other connection methods a notification may initialize
+    a missing timestamp only when there is no open recovery job. The later
+    database update compares the old timestamp so a concurrent change cannot
+    be overwritten.
+    """
+    if getattr(connection, "import_started_at", None) is not None:
+        return
+    if getattr(connection, "connection_method", None) == ConnectionMethod.API:
+        return
+    if getattr(connection, "pk", None) and open_recovery_jobs(connection).exists():
+        return
+    connection.import_started_at = timezone.now()
+
+
 def apply_notification_state(connection: WearableConnection, text: str) -> None:
     # A revoked source cannot be reopened by an out-of-order success message.
     # A new explicit device-connect action must first set authorizing state.
@@ -132,7 +151,7 @@ def apply_notification_state(connection: WearableConnection, text: str) -> None:
     if any(token in text for token in ("import started", "historical started")):
         connection.status = ConnectionStatus.IMPORTING
         connection.import_status = HistoricalImportStatus.RUNNING
-        connection.import_started_at = timezone.now()
+        set_notification_import_start_if_unclaimed(connection)
         return
     if any(token in text for token in ("import partial", "historical partial")):
         connection.status = ConnectionStatus.PARTIAL
@@ -154,7 +173,7 @@ def apply_notification_state(connection: WearableConnection, text: str) -> None:
         connection.status = ConnectionStatus.IMPORTING
         connection.authorization_status = AuthorizationStatus.AUTHORIZED
         connection.import_status = HistoricalImportStatus.RUNNING
-        connection.import_started_at = connection.import_started_at or timezone.now()
+        set_notification_import_start_if_unclaimed(connection)
         connection.connected_at = connection.connected_at or timezone.now()
         return
     if any(token in text for token in ("connected", "authorized", "authorization completed", "linked")):
@@ -172,7 +191,7 @@ def apply_notification_state(connection: WearableConnection, text: str) -> None:
         connection.status = ConnectionStatus.IMPORTING
         connection.authorization_status = AuthorizationStatus.AUTHORIZED
         connection.import_status = HistoricalImportStatus.RUNNING
-        connection.import_started_at = connection.import_started_at or timezone.now()
+        set_notification_import_start_if_unclaimed(connection)
         connection.connected_at = connection.connected_at or timezone.now()
 
 
@@ -212,6 +231,7 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
         return {"accepted": True, "duplicate": True, "connectionId": str(connection.pk)}
     previous_status = connection.status
     previous_authorization = connection.authorization_status
+    previous_import_started_at = connection.import_started_at
     text = notification_text(payload)
     event_datetime = notification_action_datetime(payload)
     if stale_rook_notification(
@@ -257,17 +277,22 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
         "import_status": connection.import_status,
         "connected_at": connection.connected_at,
         "disconnected_at": connection.disconnected_at,
-        "import_started_at": connection.import_started_at,
         "last_webhook_received_at": connection.last_webhook_received_at,
         "last_error_code": connection.last_error_code,
         "last_error_detail": connection.last_error_detail,
         "updated_at": timezone.now(),
     }
-    changed = WearableConnection.objects.filter(
-        pk=connection.pk,
-        status=(connection.status if resumed else previous_status),
-        authorization_status=(connection.authorization_status if resumed else previous_authorization),
-    ).update(**updates)
+    filters = {
+        "pk": connection.pk,
+        "status": connection.status if resumed else previous_status,
+        "authorization_status": connection.authorization_status if resumed else previous_authorization,
+    }
+    if not resumed and connection.import_started_at != previous_import_started_at:
+        # Only claim a previously absent marker, with a CAS against the state
+        # read before the notification. Unchanged markers are never written.
+        updates["import_started_at"] = connection.import_started_at
+        filters["import_started_at"] = previous_import_started_at
+    changed = WearableConnection.objects.filter(**filters).update(**updates)
     if not changed:
         return {"accepted": True, "skipped": True, "reason": "concurrent_state_change"}
     invalidate_health_dashboard(connection.customer_profile)

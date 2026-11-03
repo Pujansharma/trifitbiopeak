@@ -1,0 +1,37 @@
+meta {
+  name: GET Protocol Events
+  type: http
+  seq: 11
+}
+
+get {
+  url: {{baseURL}}/supplementation/protocols/{{protocol_id}}/events/?page=1&limit=10
+  body: none
+  auth: inherit
+}
+
+params:query {
+  page: 1
+  limit: 10
+  ~action:
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff audit for one protocol. Admin + associate. No X-Center-ID.
+  Unknown id → 404. Inactive protocol still loads.
+  Subset of GET Profile Events: same row, same order, same page/limit/action.
+  Other protocols and null protocol_id rows are omitted.
+  page, limit (default 10, max 50). Newest created_at first.
+  action: optional stored action code. Junk → 400 "Invalid action."
+  Includes client_visible false.
+  data[]: id, action, reason, client_visible, client_title, change_type, effective_on,
+  protocol_id, protocol_version_id, before, after, created_at.
+  Stored supplement_id in before/after is returned as
+  supplement {id, product_name, brand_name, form}.
+  form is the stored code. Stored JSON keeps supplement_id.
+  Env: protocol_id from GET Profile Protocols id.
+}

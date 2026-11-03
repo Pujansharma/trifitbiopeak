@@ -186,7 +186,12 @@ def process_recovery_pull(job: HealthProcessingJob) -> dict:
         connection.status = (ConnectionStatus.ACTIVE if connection.last_successful_sync else ConnectionStatus.IDLE)
         connection.import_status = HistoricalImportStatus.COMPLETED
         connection.import_completed_at = timezone.now()
-        connection.save(update_fields=["status", "import_status", "import_completed_at", "updated_at"])
+        # This branch can finish after the member disconnects or reauthorizes.
+        # Apply the same session/generation CAS as the actual recovery path;
+        # a stale worker must never restore ACTIVE/IDLE for a revoked source.
+        save_recovery_outcome(connection, fields=[
+            "status", "import_status", "import_completed_at",
+        ])
         invalidate_health_dashboard(connection.customer_profile)
         return {"skipped": True, "reason": "preexisting_import_disabled"}
     for day_offset in range(requested_days):

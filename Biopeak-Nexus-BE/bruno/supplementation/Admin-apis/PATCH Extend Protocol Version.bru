@@ -1,0 +1,42 @@
+meta {
+  name: PATCH Extend Protocol Version
+  type: http
+  seq: 20
+}
+
+patch {
+  url: {{baseURL}}/supplementation/protocol-versions/{{protocol_version_id}}/extend/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "ends_on": "2027-01-15"
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff extend. Admin + associate. No X-Center-ID. 200.
+  Path version must be scheduled or active.
+  Expired, cancelled, and every other status → 400
+  "Protocol version can only be extended while it is scheduled or active."
+  Unknown version → 404 "Protocol version not found."
+  ends_on required.
+  Before starts_on → 400 "ends_on must be on or after starts_on."
+  Before today → 400 "ends_on must be on or after today."
+  Not after the stored ends_on → 400 "ends_on must be after the current end date."
+  Null stored ends_on → 400 "This version has no end date to extend."
+  Status stays. current_version stays. starts_on stays.
+  Writes extended, client_visible true.
+  Response is detail only. data omitted.
+  Env: protocol_version_id.
+}

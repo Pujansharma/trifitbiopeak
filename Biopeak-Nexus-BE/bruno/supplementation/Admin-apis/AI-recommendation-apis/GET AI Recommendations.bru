@@ -1,0 +1,55 @@
+meta {
+  name: GET AI Recommendations
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseURL}}/supplementation/ai-recommendations/?page=1&limit=10
+  body: none
+  auth: inherit
+}
+
+params:query {
+  page: 1
+  limit: 10
+  search:
+  ~recommendation_status: pending
+}
+
+script:post-response {
+  const rows = res.getBody().data || [];
+  const row = rows.find((r) => r.id === bru.getEnvVar("job_id"));
+  if (row && row.recommendation && row.recommendation.id) {
+    bru.setEnvVar("ai_recommendation_id", row.recommendation.id);
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff list. Admin + associate. No X-Center-ID.
+  One row per job, from the moment POST queues it. Newest created_at first.
+  page and limit: default 10, max 50.
+  search: customer first name, last name, full name, or recommendation name.
+  Omit or blank = no search.
+  recommendation_status: processing | failed | pending | completed. Omit = all.
+  Junk → 400 "Invalid recommendation_status."
+  processing: job is pending or the worker is running.
+  failed: job failed. error is the failure text. Otherwise error is null.
+  pending: processing rows, plus saved rows with an item still pending or modified.
+  completed: every item is accepted or rejected.
+  A modified item stays in pending until it is accepted or rejected.
+  Envelope: count, next, previous, data[].
+  data[]: id (job id, same as the 202), customer_profile {id, name, gender, age},
+  recommendation {id, name, total, accepted, modified, rejected},
+  model, error, status (processing | failed | pending | completed), created_at.
+  recommendation.id and model are null until the worker saves the result.
+  total counts every item. modified counts items edited and not yet
+  accepted or rejected. created_at is when the job was queued.
+  Post-response sets env ai_recommendation_id from the row whose id is env job_id,
+  once recommendation.id is present.
+  Detail stays 404 while recommendation.id is null.
+}

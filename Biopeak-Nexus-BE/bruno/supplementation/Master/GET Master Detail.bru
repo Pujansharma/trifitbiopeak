@@ -1,0 +1,25 @@
+meta {
+  name: GET Master Detail
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseURL}}/supplementation/master/{{supplement_id}}/
+  body: none
+  auth: inherit
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  One catalogue product. Admin + associate. No X-Center-ID.
+  Env: supplement_id = product UUID from POST New Supplement or GET Master.
+  Inactive products are returned (`is_active: false`). Unknown id → 404.
+  Choice fields are stored codes (`form`, `raw_material_source_type`, allergen `name`/`type`), not labels.
+  data: id, brand_name, product_name, form, sku, manufacturer, raw_material_source_type,
+  pack_quantity_info, serving_size, serving_container, market_country_code, product_url,
+  dietary_attributes, is_active, active_ingredients, allergen_information [{name, type}].
+}

@@ -1,0 +1,27 @@
+meta {
+  name: GET Protocol
+  type: http
+  seq: 7
+}
+
+get {
+  url: {{baseURL}}/supplementation/protocols/{{protocol_id}}/
+  body: none
+  auth: inherit
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff protocol page. Admin + associate. No X-Center-ID.
+  Unknown id → 404.
+  data: id, name, purpose, current_version_id (null if unset),
+  versions[] in version_number order.
+  Each version: id, version_number, stored status (draft and under_review included),
+  starts_on, ends_on, review_on, supplement_count.
+  name and purpose live on the protocol.
+  supplement_count is the ProtocolItem count on that version.
+  Env: protocol_id.
+}

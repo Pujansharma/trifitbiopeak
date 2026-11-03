@@ -1,0 +1,36 @@
+meta {
+  name: POST Reject AI Recommendation Item
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseURL}}/supplementation/ai-recommendation-items/{{ai_recommendation_item_id}}/reject/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "reason": "Fish allergy."
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff reject. Admin + associate. No X-Center-ID. 200.
+  Allowed while decision is pending or modified.
+  reason is required. Blank → 400.
+  Decision becomes rejected. The supplement is left off the later draft.
+  Already accepted or rejected → 400.
+  Unknown item → 404 "AI recommendation item not found."
+  data: {id, decision: "rejected"}.
+  Env: ai_recommendation_item_id.
+}

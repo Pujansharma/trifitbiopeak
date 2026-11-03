@@ -284,7 +284,7 @@ STG_DEFAULT_FROM_EMAIL=noreply@yourdomain.com
 STG_REDIS_HOST=staging-redis.amazonaws.com:6379
 
 # AWS S3 Storage
-AWS_S3_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+AWS_S3_ACCESS_KEY_ID=<aws-access-key-id>
 AWS_S3_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 AWS_STORAGE_BUCKET_NAME=myproject-staging-media
 AWS_S3_REGION_NAME=us-east-1
@@ -322,7 +322,7 @@ PRD_DEFAULT_FROM_EMAIL=noreply@yourdomain.com
 PRD_REDIS_HOST=production-redis.amazonaws.com:6379
 
 # AWS S3 Storage
-AWS_S3_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+AWS_S3_ACCESS_KEY_ID=<aws-access-key-id>
 AWS_S3_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 AWS_STORAGE_BUCKET_NAME=myproject-production-media
 AWS_S3_REGION_NAME=us-east-1
@@ -396,6 +396,17 @@ AWS_REGION=
 
 Staging / production: `STG_` / `PRD_` prefix on the queue URL. Set `AWS_REGION` in secrets/env to the SQS region (same value you use for AWS; no hardcoded default in code).
 
+## Luma (protocol AI recommendations)
+
+`uv run manage.py process_protocol_ai_jobs` calls Luma's `POST /luma/v1/integrations/nexus/clients/{customer_profile_id}/protocol-recommendation` with `X-API-Key`. If `*_LUMA_BASE_URL` or `*_LUMA_NEXUS_API_KEY` is blank, the job fails with "Luma is not configured." `*_LUMA_NEXUS_API_KEY` must match Luma's own `LUMA_NEXUS_API_KEY`. Wake: optional SQS (`*_PROTOCOL_AI_WAKE_QUEUE_URL`). Unset URL = no-op (local: run the command).
+
+```env
+DEV_LUMA_BASE_URL=http://127.0.0.1:8010
+DEV_LUMA_NEXUS_API_KEY=
+```
+
+Staging / production: `STG_` / `PRD_` prefix.
+
 ## Scheduled jobs (production)
 
 Not in `deploy-aws.yml` (image/service only).
@@ -403,7 +414,7 @@ Not in `deploy-aws.yml` (image/service only).
 | Trigger                        | Command                                         | Purpose                                          |
 | ------------------------------ | ----------------------------------------------- | ------------------------------------------------ |
 | SQS wake (on outbox insert)    | `uv run manage.py process_communication_outbox` | First try WhatsApp send + Google Calendar sync   |
-| EventBridge `rate(15 minutes)` | `assets/scripts/sweep_jobs.sh`                  | Reminder enqueue + outbox drain/retry + exception scans + Google watch renewal |
+| EventBridge `rate(15 minutes)` | `assets/scripts/sweep_jobs.sh`                  | Reminder enqueue + outbox drain + exception scans + Google watch renewal + protocol version sweep + one AI job |
 
 Cap concurrent ECS RunTasks at 1 for the wake consumer. Sweep script:
 
@@ -412,6 +423,8 @@ python manage.py enqueue_appointment_reminders
 python manage.py process_communication_outbox
 python manage.py process_appointment_exception_scans
 python manage.py process_google_calendar_channel_expiry_renewal
+python manage.py sweep_protocol_versions
+python manage.py process_protocol_ai_jobs --limit 1
 ```
 
 Without the outbox worker/sweep, WhatsApp and Google Calendar rows stay `PENDING`. Without the exception-scan drain, care-team / roster / block writes enqueue scans that never run.

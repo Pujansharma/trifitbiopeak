@@ -1,0 +1,33 @@
+meta {
+  name: GET Profiles
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseURL}}/supplementation/profiles/?page=1&limit=10
+  body: none
+  auth: inherit
+}
+
+params:query {
+  page: 1
+  limit: 10
+  search:
+  ~center:
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff client list. Admin + associate. No X-Center-ID. Active profiles only.
+  search: first name, last name, or full name (icontains). Omit or blank = no search.
+  center: center UUID. Omit = all centers. Unknown center = empty page. Junk → 400 "Invalid center."
+  data[]: customer_profile {id, name, gender label, age}, constraints[] (inactive included),
+  last_updated_on (local date, null if no plan rows),
+  protocols.active_protocol | null, coming_up_count, historical_counts.
+  active_protocol.status is the effective status "active".
+  Counts use Protocol.current_version only.
+}

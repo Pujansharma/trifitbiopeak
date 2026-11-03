@@ -1,0 +1,43 @@
+meta {
+  name: POST Create Protocol Version
+  type: http
+  seq: 15
+}
+
+post {
+  url: {{baseURL}}/supplementation/protocols/{{protocol_id}}/versions/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "summary_notes": "Reset after the April panel"
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff next draft. Admin + associate. No X-Center-ID.
+  Unknown protocol → 404. Inactive protocol still loads. 201.
+  Scratch: summary_notes only. No items.
+  Clone: add source_version_id. Same customer profile, else 404
+  "Protocol version not found."
+  Source status must be approved, scheduled, active, superseded, expired,
+  or cancelled. draft or under_review → 400
+  "Protocol version can only be copied once it is approved."
+  summary_notes is optional. Omit it, or send blank, and the column stores null.
+  notes stay null. Dates stay null.
+  New row is draft. version_number is next on this protocol.
+  current_version stays. name and purpose stay on the protocol.
+  Clone copies the source items.
+  data: new_protocol_version_id.
+  Env: protocol_id.
+}

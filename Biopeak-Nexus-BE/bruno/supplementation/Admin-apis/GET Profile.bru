@@ -1,0 +1,26 @@
+meta {
+  name: GET Profile
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{baseURL}}/supplementation/profiles/{{customer_profile_id}}/
+  body: none
+  auth: inherit
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff client page. Admin + associate. No X-Center-ID.
+  Active profile or 404. Unknown id → 404.
+  data: customer_profile {id, name, contact_email, phone, date_of_birth, gender},
+  constraints[] (inactive included), protocol_count (all protocols, active and inactive).
+  No protocols key.
+  contact_email is Customer.contact_email. phone is the account phone.
+  date_of_birth is YYYY-MM-DD or null. gender is Male, Female, Other, or null.
+  Env: customer_profile_id from GET Profiles customer_profile.id.
+}

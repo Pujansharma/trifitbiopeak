@@ -1,0 +1,32 @@
+meta {
+  name: GET Plan Summary
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseURL}}/supplementation/plan/summary/
+  body: none
+  auth: inherit
+}
+
+headers {
+  X-Customer-Profile-ID: {{customer_profile_id}}
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Customer JWT only. No X-Center-ID.
+  Header X-Customer-Profile-ID must belong to that user.
+  Missing, blank, junk, unknown, another customer's, or inactive profile → 404 Customer profile not found.
+  data: active, coming_up, preparing, historical counts.
+  Current version of each active protocol. under_review omitted.
+  In-window scheduled counts as active. preparing is approved plus draft.
+  No current version, with an active draft, counts as preparing.
+  A later draft on a protocol that already has a current version does not add a second count.
+  Empty plan returns zeros.
+  Auth: customer access_token. Env: customer_profile_id.
+}

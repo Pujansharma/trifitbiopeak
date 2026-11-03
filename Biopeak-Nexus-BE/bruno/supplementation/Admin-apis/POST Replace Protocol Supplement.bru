@@ -1,0 +1,51 @@
+meta {
+  name: POST Replace Protocol Supplement
+  type: http
+  seq: 18
+}
+
+post {
+  url: {{baseURL}}/supplementation/protocol-items/{{protocol_item_id}}/replace/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "version_id": "{{protocol_version_id}}",
+    "supplement_id": "{{supplement_id}}",
+    "dosage": "2 softgels",
+    "frequency": "daily",
+    "custom_frequency": null,
+    "timing": "with_lunch",
+    "duration": "90 days",
+    "instructions": "Take 2 softgels with your largest meal.",
+    "rationale": "Cardiovascular support."
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff replace. Admin + associate. Customer 403. No X-Center-ID.
+  Same row. Version must be draft or under_review.
+  Any other status → 400
+  "Supplements can only be changed while the version is draft or under review."
+  Unknown item → 404 "Protocol supplement not found."
+  version_id must equal the item's version.
+  Unknown supplement → 404 "Supplement not found."
+  Inactive supplement → 400.
+  New product already on another row of this version → 400
+  "This supplement is already on this version."
+  Keeping the product already on this row is allowed.
+  frequency and timing rules match add.
+  Writes supplement_replaced, client_visible false.
+  200 data is the updated item.
+  Env: protocol_item_id, protocol_version_id, supplement_id (the new product).
+}

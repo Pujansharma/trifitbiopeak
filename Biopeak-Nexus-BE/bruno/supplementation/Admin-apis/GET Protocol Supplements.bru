@@ -1,0 +1,27 @@
+meta {
+  name: GET Protocol Supplements
+  type: http
+  seq: 11
+}
+
+get {
+  url: {{baseURL}}/supplementation/protocol-versions/{{protocol_version_id}}/items/
+  body: none
+  auth: inherit
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff list for one protocol version. Admin + associate. No X-Center-ID.
+  Not paginated. Oldest created_at first.
+  Unknown version → 404 "Protocol version not found."
+  Empty version returns data [].
+  Each row: id, version_id, supplement {id, product_name, brand_name, form}, dosage, frequency,
+  custom_frequency, timing, duration, instructions, rationale.
+  timing: before_breakfast, with_breakfast, with_lunch, with_dinner,
+  after_dinner, anytime.
+  Env: protocol_version_id.
+}

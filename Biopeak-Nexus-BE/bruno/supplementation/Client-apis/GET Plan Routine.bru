@@ -1,0 +1,29 @@
+meta {
+  name: GET Plan Routine
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseURL}}/supplementation/plan/routine/
+  body: none
+  auth: inherit
+}
+
+headers {
+  X-Customer-Profile-ID: {{customer_profile_id}}
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Customer JWT only. No X-Center-ID.
+  Header X-Customer-Profile-ID must belong to that user.
+  Missing, blank, junk, unknown, another customer's, or inactive profile → 404 Customer profile not found.
+  data.timings groups supplements on stored active versions.
+  Timing order: before_breakfast, with_breakfast, with_lunch, with_dinner, after_dinner, anytime.
+  Empty timings are omitted. No protocol key. ends_on is the version end date.
+  Auth: customer access_token. Env: customer_profile_id.
+}

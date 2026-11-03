@@ -1,11 +1,11 @@
 from django.conf import settings
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
-from rest_framework.exceptions import NotFound
+from rest_framework.exceptions import APIException, NotFound
 from rest_framework.permissions import AllowAny
 
 from core.utils.views.main import BaseGenericAPIView
-from wearables.services.ingestion import ingest_rook_document
+from wearables.services.ingestion import RookIngestionStateChanged, ingest_rook_document
 from wearables.services.notifications import process_rook_notification
 from wearables.services.signature import verify_rook_webhook_signature
 
@@ -16,6 +16,12 @@ def webhook_documents(payload) -> list[dict]:
     if isinstance(payload, list) and all(isinstance(item, dict) for item in payload):
         return payload
     raise ValueError("ROOK webhook payload must be an object or object array.")
+
+
+class RookWebhookRetryRequired(APIException):
+    status_code = 503
+    default_detail = "ROOK ingestion could not be committed; retry the webhook delivery."
+    default_code = "rook_ingestion_retry_required"
 
 
 class RookWebhookView(BaseGenericAPIView):
@@ -63,6 +69,11 @@ class RookDataWebhookView(RookWebhookView):
             ]
         except (TypeError, ValueError) as error:
             self.raise_bad_request(str(error))
+        except RookIngestionStateChanged as error:
+            # The ingestion transaction already rolled back. An explicit 503
+            # requests provider retry instead of permanently acknowledging a
+            # dropped document with the normal 202 Accepted response.
+            raise RookWebhookRetryRequired() from error
         return self.send_response(
             "ROOK webhook accepted.",
             {"results": results},

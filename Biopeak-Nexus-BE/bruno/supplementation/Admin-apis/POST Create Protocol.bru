@@ -1,0 +1,42 @@
+meta {
+  name: POST Create Protocol
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{baseURL}}/supplementation/profiles/{{customer_profile_id}}/protocols/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "name": "Sleep & Recovery",
+    "purpose": "Faster sleep onset and deeper sleep",
+    "notes": ""
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff create. Admin + associate. No X-Center-ID.
+  Active profile or 404. 201.
+  data matches GET Protocol. current_version_id stays null until publish.
+  name and purpose are stored on the protocol.
+  Scratch: name and purpose required. notes optional, default "".
+  Copy: add source_version_id (version on this profile, else 404
+  "Protocol version not found."). name, purpose, notes optional overrides.
+  Omitted name and purpose come from the source protocol.
+  Omitted version fields come from that version: notes, summary_notes, is_ongoing.
+  starts_on, ends_on, review_on stay null.
+  Writes protocol_created and version_drafted. Both client_visible false.
+  Env: customer_profile_id. Copy also needs a version id from GET Profile Protocols.
+}

@@ -1,0 +1,31 @@
+meta {
+  name: GET Master
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseURL}}/supplementation/master/?page=1&limit=10
+  body: none
+  auth: inherit
+}
+
+params:query {
+  page: 1
+  limit: 10
+  search:
+  ~form: capsule
+  ~active: 1
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  List supplements. Paginated.
+  search: brand name or product name (icontains). Omit or empty = no search.
+  form: capsule|tablet|softgel|powder|liquid|gummy|lozenge|oil|cream|spray|other. Omit = all. Junk → 400 "Invalid form."
+  active: 0|1. Omit = both.
+  Response data items: id, product_name, brand_name, form, dietary_attributes, allergen_information [{name, type}].
+}

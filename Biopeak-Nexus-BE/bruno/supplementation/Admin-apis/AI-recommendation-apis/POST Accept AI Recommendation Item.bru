@@ -1,0 +1,35 @@
+meta {
+  name: POST Accept AI Recommendation Item
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseURL}}/supplementation/ai-recommendation-items/{{ai_recommendation_item_id}}/accept/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {}
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff accept. Admin + associate. No X-Center-ID. 200. Body is empty.
+  Allowed while decision is pending or modified.
+  Accept with no earlier modify copies the AI dose into final_*.
+  Accept after modify keeps the edited dose.
+  Decision becomes accepted.
+  Already accepted or rejected → 400.
+  Unknown item → 404 "AI recommendation item not found."
+  data: {id, decision: "accepted"}.
+  Env: ai_recommendation_item_id.
+}

@@ -1,0 +1,51 @@
+meta {
+  name: POST Add Protocol Supplement
+  type: http
+  seq: 10
+}
+
+post {
+  url: {{baseURL}}/supplementation/protocol-versions/{{protocol_version_id}}/items/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "version_id": "{{protocol_version_id}}",
+    "supplement_id": "{{supplement_id}}",
+    "dosage": "1 capsule",
+    "frequency": "daily",
+    "custom_frequency": null,
+    "timing": "with_breakfast",
+    "duration": "30 days",
+    "instructions": "Take 1 capsule with your morning meal.",
+    "rationale": "25(OH)D was 32 ng/mL."
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff add. Admin + associate. No X-Center-ID. 201.
+  Path version must be draft. Body version_id must equal the path id.
+  Unknown version → 404 "Protocol version not found."
+  Unknown supplement → 404 "Supplement not found."
+  Inactive supplement → 400.
+  Same supplement already on this version → 400
+  "This supplement is already on this version."
+  frequency: daily, twice_daily, thrice_daily, every_otherday, weekly,
+  custom, as_needed.
+  custom requires custom_frequency. Any other frequency requires it null.
+  timing: before_breakfast, with_breakfast, with_lunch, with_dinner,
+  after_dinner, anytime.
+  Writes supplement_added, client_visible false.
+  Env: protocol_version_id (draft version from POST Create Protocol),
+  supplement_id (active product).
+}

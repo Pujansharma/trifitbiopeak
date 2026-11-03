@@ -1,0 +1,71 @@
+meta {
+  name: GET AI Recommendation
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseURL}}/supplementation/ai-recommendations/{{ai_recommendation_id}}/
+  body: none
+  auth: inherit
+}
+
+script:post-response {
+  const items = (res.getBody().data || {}).items || [];
+  if (items.length > 0) {
+    bru.setEnvVar("ai_recommendation_item_id", items[0].id);
+  }
+}
+
+tests {
+  const data = res.getBody().data;
+  const frequencies = ["daily", "twice_daily", "thrice_daily", "every_otherday", "weekly", "custom", "as_needed"];
+  const timings = ["before_breakfast", "with_breakfast", "with_lunch", "with_dinner", "after_dinner", "anytime"];
+  test("model is set", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(data.model.trim()).to.not.equal("");
+  });
+  test("queued supplement appears exactly once", function () {
+    const matches = data.items.filter((item) => item.supplement.id === bru.getEnvVar("supplement_id"));
+    expect(matches.length).to.equal(1);
+  });
+  test("every item has a valid dose", function () {
+    data.items.forEach((item) => {
+      expect(frequencies).to.include(item.frequency);
+      expect(timings).to.include(item.timing);
+      ["dosage", "duration", "instructions", "rationale"].forEach((key) => {
+        expect(item[key].trim()).to.not.equal("");
+      });
+    });
+  });
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Staff detail. Admin + associate. No X-Center-ID.
+  Unknown id → 404 "AI recommendation not found."
+  data: id, status (under_review | applied), model, name, purpose, notes,
+  protocol_version_id (null until draft),
+  pending_count, accepted_count, modified_count, rejected_count,
+  items[].
+  items[] oldest first: id, origin (requested | ai_added), decision
+  (pending | accepted | rejected | modified), supplement
+  {id, product_name, brand_name, form, manufacturer}; form is the stored code;
+  no supplement_id,
+  dosage, frequency, custom_frequency, timing, duration, instructions,
+  rationale, final_dosage, final_frequency, final_custom_frequency,
+  final_timing, final_duration, final_instructions, final_rationale, reason.
+  Dose fields are what the AI chose. final_* is null until accept or modify.
+  Accept copies the AI dose into final_*. Modify writes the edited dose
+  into final_* and sets decision to modified.
+  frequency: daily, twice_daily, thrice_daily, every_otherday, weekly,
+  custom, as_needed.
+  timing: before_breakfast, with_breakfast, with_lunch, with_dinner,
+  after_dinner, anytime.
+  Post-response sets env ai_recommendation_item_id to items[0].id.
+  Tests check the contract shape, not the AI text.
+  Env: ai_recommendation_id.
+}

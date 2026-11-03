@@ -1,9 +1,12 @@
+from rest_framework.permissions import AllowAny
+
 from accounts.serializers import TOTPVerifySerializer
 from core.utils.views.main import BaseCreateAPIView
+
 from .serializers import (
     DirectPhoneLoginSerializer,
-    RequestOTPSerializer,
     LoginOTPSerializer,
+    RequestOTPSerializer,
     VerifyOTPSerializer,
 )
 
@@ -29,6 +32,8 @@ class LoginOTPView(BaseCreateAPIView):
 class DirectPhoneLoginView(BaseCreateAPIView):
     """Temporary: bypass OTP for existing users. Remove in a future release."""
 
+    authentication_classes = []
+    permission_classes = [AllowAny]
     serializer_class = DirectPhoneLoginSerializer
 
     def post(self, request, *args, **kwargs):
