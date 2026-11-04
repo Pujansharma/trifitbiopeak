@@ -1,6 +1,11 @@
 from corsheaders.defaults import default_headers
 
 from core.settings.base import *
+from core.settings.rook_static import (
+    ROOK_AUTHORIZATION_HOSTS,
+    ROOK_HISTORICAL_DAYS_DEFAULT,
+    ROOK_PROVISIONED_SOURCE_NAMES,
+)
 
 DEBUG = True
 
@@ -109,6 +114,8 @@ WHATSAPP_APP_ID = config("DEV_WHATSAPP_APP_ID", None)
 WHATSAPP_TEMPLATE_LANGUAGE = config("DEV_WHATSAPP_TEMPLATE_LANGUAGE", "en")
 
 # ROOK / Wearables Phase 1 — additive. All keys remain external to source control.
+# The mobile app may use PostHog to hide the feature UI. Retain this
+# independent backend kill switch for API/webhook/job safety.
 WEARABLES_ENABLED = config("DEV_WEARABLES_ENABLED", default=True, cast=bool)
 WEARABLES_REQUIRE_PROFILE_FEATURE = config(
     "DEV_WEARABLES_REQUIRE_PROFILE_FEATURE", default=False, cast=bool
@@ -116,7 +123,7 @@ WEARABLES_REQUIRE_PROFILE_FEATURE = config(
 TIMELINE_ENABLED = config("DEV_TIMELINE_ENABLED", default=True, cast=bool)
 RECOVERY_DOMAIN_ENABLED = config("DEV_RECOVERY_DOMAIN_ENABLED", default=True, cast=bool)
 BODY_DOMAIN_ENABLED = config("DEV_BODY_DOMAIN_ENABLED", default=True, cast=bool)
-ROOK_ENVIRONMENT = config("DEV_ROOK_ENVIRONMENT", default="sandbox")
+ROOK_ENVIRONMENT = "sandbox"  # Django development settings; JS __DEV__ is mobile-only.
 ROOK_BASE_URL = config("DEV_ROOK_BASE_URL", default="https://api.rook-connect.review")
 ROOK_CLIENT_UUID = config("DEV_ROOK_CLIENT_UUID", default="")
 ROOK_SECRET_KEY = config("DEV_ROOK_SECRET_KEY", default="")
@@ -125,21 +132,16 @@ ROOK_SDK_CLIENT_UUID = config("DEV_ROOK_SDK_CLIENT_UUID", default="")
 ROOK_SDK_SECRET = config("DEV_ROOK_SDK_SECRET", default="")
 # Enable only after ROOK confirms SDK secret is designed for public mobile use.
 ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC = config("DEV_ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC", default=False, cast=bool)
-ROOK_HISTORICAL_DAYS = config("DEV_ROOK_HISTORICAL_DAYS", default=7, cast=int)
-ROOK_PREEXISTING_ENABLED = config(
-    "DEV_ROOK_PREEXISTING_ENABLED", default=True, cast=bool
-)
-# None means 'not configured'. An empty string/list means no provider approved.
-# Specify exact API names (case-sensitive), e.g. Garmin,Fitbit,Oura.
-ROOK_PROVISIONED_SOURCES = config("DEV_ROOK_PROVISIONED_SOURCES", default=None)
+ROOK_HISTORICAL_DAYS = ROOK_HISTORICAL_DAYS_DEFAULT
+ROOK_PREEXISTING_ENABLED = True  # Requires ROOK historical-import entitlement.
+# Provider approval is a ROOK account entitlement, not determined by this list.
+# Review the hardcoded allowlist for this deployment before enabling it.
+ROOK_PROVISIONED_SOURCES = ROOK_PROVISIONED_SOURCE_NAMES
 ROOK_SYNC_DELAY_HOURS = config("DEV_ROOK_SYNC_DELAY_HOURS", default=48, cast=int)
 ROOK_CONNECT_TIMEOUT_SECONDS = config("DEV_ROOK_CONNECT_TIMEOUT_SECONDS", default=5, cast=int)
 ROOK_READ_TIMEOUT_SECONDS = config("DEV_ROOK_READ_TIMEOUT_SECONDS", default=12, cast=int)
 ROOK_ALLOW_UNSIGNED_WEBHOOKS = config("DEV_ROOK_ALLOW_UNSIGNED_WEBHOOKS", default=False, cast=bool)
-ROOK_AUTHORIZATION_ALLOWED_HOSTS = config(
-    "DEV_ROOK_AUTHORIZATION_ALLOWED_HOSTS", default="",
-    cast=lambda v: [host.strip() for host in v.split(",") if host.strip()],
-)
+ROOK_AUTHORIZATION_ALLOWED_HOSTS = ROOK_AUTHORIZATION_HOSTS
 ROOK_CALLBACK_URL = config("DEV_ROOK_CALLBACK_URL", default="")
 ROOK_OAUTH_TIMEOUT_MINUTES = config("DEV_ROOK_OAUTH_TIMEOUT_MINUTES", default=15, cast=int)
 ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS = config(

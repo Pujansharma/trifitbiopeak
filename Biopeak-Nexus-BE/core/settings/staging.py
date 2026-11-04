@@ -2,6 +2,11 @@ from corsheaders.defaults import default_headers
 from django.core.exceptions import ImproperlyConfigured
 
 from core.settings.base import *
+from core.settings.rook_static import (
+    ROOK_AUTHORIZATION_HOSTS,
+    ROOK_HISTORICAL_DAYS_DEFAULT,
+    ROOK_PROVISIONED_SOURCE_NAMES,
+)
 
 DEBUG = False
 
@@ -145,6 +150,8 @@ WHATSAPP_APP_ID = config("STG_WHATSAPP_APP_ID", None)
 WHATSAPP_TEMPLATE_LANGUAGE = config("STG_WHATSAPP_TEMPLATE_LANGUAGE", "en")
 
 # ROOK / Wearables Phase 1 — additive. All keys remain external to source control.
+# The mobile app may use PostHog to hide the feature UI. Retain this
+# independent backend kill switch for API/webhook/job safety.
 WEARABLES_ENABLED = config("STG_WEARABLES_ENABLED", default=False, cast=bool)
 WEARABLES_REQUIRE_PROFILE_FEATURE = config(
     "STG_WEARABLES_REQUIRE_PROFILE_FEATURE", default=True, cast=bool
@@ -152,7 +159,7 @@ WEARABLES_REQUIRE_PROFILE_FEATURE = config(
 TIMELINE_ENABLED = config("STG_TIMELINE_ENABLED", default=False, cast=bool)
 RECOVERY_DOMAIN_ENABLED = config("STG_RECOVERY_DOMAIN_ENABLED", default=True, cast=bool)
 BODY_DOMAIN_ENABLED = config("STG_BODY_DOMAIN_ENABLED", default=True, cast=bool)
-ROOK_ENVIRONMENT = config("STG_ROOK_ENVIRONMENT", default="sandbox")
+ROOK_ENVIRONMENT = "sandbox"  # Django staging settings; JS __DEV__ is mobile-only.
 ROOK_BASE_URL = config("STG_ROOK_BASE_URL", default="https://api.rook-connect.review")
 ROOK_CLIENT_UUID = config("STG_ROOK_CLIENT_UUID", default="")
 ROOK_SECRET_KEY = config("STG_ROOK_SECRET_KEY", default="")
@@ -161,21 +168,16 @@ ROOK_SDK_CLIENT_UUID = config("STG_ROOK_SDK_CLIENT_UUID", default="")
 ROOK_SDK_SECRET = config("STG_ROOK_SDK_SECRET", default="")
 # Enable only after ROOK confirms SDK secret is designed for public mobile use.
 ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC = config("STG_ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC", default=False, cast=bool)
-ROOK_HISTORICAL_DAYS = config("STG_ROOK_HISTORICAL_DAYS", default=7, cast=int)
-ROOK_PREEXISTING_ENABLED = config(
-    "STG_ROOK_PREEXISTING_ENABLED", default=False, cast=bool
-)
-# None means 'not configured'. An empty string/list means no provider approved.
-# Specify exact API names (case-sensitive), e.g. Garmin,Fitbit,Oura.
-ROOK_PROVISIONED_SOURCES = config("STG_ROOK_PROVISIONED_SOURCES", default=None)
+ROOK_HISTORICAL_DAYS = ROOK_HISTORICAL_DAYS_DEFAULT
+ROOK_PREEXISTING_ENABLED = False  # Requires ROOK historical-import entitlement.
+# Provider approval is a ROOK account entitlement, not determined by this list.
+# Review the hardcoded allowlist for this deployment before enabling it.
+ROOK_PROVISIONED_SOURCES = ROOK_PROVISIONED_SOURCE_NAMES
 ROOK_SYNC_DELAY_HOURS = config("STG_ROOK_SYNC_DELAY_HOURS", default=48, cast=int)
 ROOK_CONNECT_TIMEOUT_SECONDS = config("STG_ROOK_CONNECT_TIMEOUT_SECONDS", default=5, cast=int)
 ROOK_READ_TIMEOUT_SECONDS = config("STG_ROOK_READ_TIMEOUT_SECONDS", default=12, cast=int)
 ROOK_ALLOW_UNSIGNED_WEBHOOKS = config("STG_ROOK_ALLOW_UNSIGNED_WEBHOOKS", default=False, cast=bool)
-ROOK_AUTHORIZATION_ALLOWED_HOSTS = config(
-    "STG_ROOK_AUTHORIZATION_ALLOWED_HOSTS", default="",
-    cast=lambda v: [host.strip() for host in v.split(",") if host.strip()],
-)
+ROOK_AUTHORIZATION_ALLOWED_HOSTS = ROOK_AUTHORIZATION_HOSTS
 ROOK_CALLBACK_URL = config("STG_ROOK_CALLBACK_URL", default="")
 ROOK_OAUTH_TIMEOUT_MINUTES = config("STG_ROOK_OAUTH_TIMEOUT_MINUTES", default=15, cast=int)
 ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS = config(
@@ -187,10 +189,9 @@ HEALTH_HISTORICAL_GAP_DAYS = config("STG_HEALTH_HISTORICAL_GAP_DAYS", default=7,
 TIMELINE_INCLUDE_LEGACY_RESULTS = config("STG_TIMELINE_INCLUDE_LEGACY_RESULTS", default=True, cast=bool)
 
 
-# Shared default cache ensures ScopedRateThrottle counts span all ECS tasks.
-# The independent "health" cache remains DummyCache: health snapshots are in DB.
-# A missing Redis URL must fail closed when wearables are enabled, rather than
-# silently releasing per-worker throttles into a production-like environment.
+# Use the existing Django/DRF throttle configuration with the default cache.
+# An optional shared Redis URL can replace LocMemCache for cross-worker limits.
+# The separate health cache remains DummyCache and reads database snapshots.
 _shared_redis_url = config("STG_REDIS_URL", default="").strip()
 if _shared_redis_url:
     if not _shared_redis_url.startswith(("redis://", "rediss://")):
@@ -208,8 +209,3 @@ if _shared_redis_url:
             "socket_timeout": 3,
         },
     }
-elif WEARABLES_ENABLED:
-    raise ImproperlyConfigured(
-        "STG_REDIS_URL is required for shared wearable API throttling. "
-        "Configure the approved ElastiCache Redis endpoint before enabling wearables."
-    )

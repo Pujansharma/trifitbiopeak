@@ -84,51 +84,42 @@ PRD_EMAIL_HOST_PASSWORD=your-production-email-password
 PRD_DEFAULT_FROM_EMAIL=your-production-email@domain.com
 ```
 
-## Redis Configuration (Shared API Throttling)
+## DRF API Throttling (Redis Optional)
 
-When `STG_WEARABLES_ENABLED` or `PRD_WEARABLES_ENABLED` is enabled,
-**a shared Redis cache is required** for DRF `ScopedRateThrottle` counters.
-This is separate from the `health` cache (which remains `DummyCache` because
-health dashboards use PostgreSQL snapshots).
+The ROOK API views already use Django REST Framework `ScopedRateThrottle`,
+with rates defined under `REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]` in
+`core/settings/base.py` (`wearable_connect`, `wearable_status`, `health_read`).
+This continues to work without a ROOK-specific Redis service.
 
-Provide a private, accessible ElastiCache Redis connection URL from your secret
-manager. `rediss://` is recommended for TLS; include an auth token when the
-ElastiCache configuration requires it. The URL must be identical across all
-ECS API tasks and should point to the same logical Redis database.
+When no `STG_REDIS_URL` or `PRD_REDIS_URL` is supplied, Django uses the existing
+`CACHES["default"]` `LocMemCache`. This enforces requests **per process**, not
+globally across multiple ECS workers. The ROOK readiness check reports this as
+a warning, not proof of deployment-wide protection. If global limits are
+required, use BioPeak's approved shared-cache configuration and verify it
+across instances before go-live. WAF/gateway caps are additional protection,
+not a replacement for shared DRF counters.
 
 ```env
-# Local development continues to use LocMemCache; no Redis required.
-# Staging & production: required when wearables enabled.
-STG_REDIS_URL=rediss://your-staging-redis-endpoint:6379/0
-PRD_REDIS_URL=rediss://your-production-redis-endpoint:6379/0
+# Optional: only when a shared Redis default cache is already available.
+STG_REDIS_URL=
+PRD_REDIS_URL=
 ```
 
-The Django Redis cache passes `socket_connect_timeout=3` and
-`socket_timeout=3` seconds to the Redis client in both staging and production.
-Shared DRF throttle counters therefore have bounded Redis network waits. The
-cache **does not ignore Redis connection errors**: an unreachable Redis service
-will cause protected requests to fail instead of silently bypassing rate limits.
-Monitor ElastiCache availability and verify networking/TLS/auth before GA.
-Keep `CACHES["health"]` on `DummyCache` (dashboard snapshots are stored in DB).
+If configured, Django uses Redis for the default cache with a three-second
+connection and read timeout, without suppressing connection errors. Invalid
+Redis URLs still fail configuration. If URLs are absent, no Redis connection
+is attempted and the existing DRF throttle scopes remain in place.
 
-The legacy `DEV_REDIS_HOST`, `STG_REDIS_HOST`, and `PRD_REDIS_HOST` examples
-elsewhere in this file are **not** used by Django's default cache. Configure
-`STG_REDIS_URL` and `PRD_REDIS_URL` instead. A missing URL intentionally stops
-startup if wearables are enabled; do not fall back to per-process memory in GA.
+`CACHES["health"]` remains `DummyCache`; health dashboard snapshots come from
+PostgreSQL, and ROOK ingestion/normalization jobs do not use Redis.
 
-On staging, verify shared cache access before merging:
+To verify API throttling and configuration:
 
 ```bash
-uv sync --frozen
 uv run python manage.py check --settings=core.settings.staging
-uv run python manage.py check_rook_configuration --strict --settings=core.settings.staging
-uv run python manage.py shell --settings=core.settings.staging -c "from django.core.cache import cache; cache.set('shared-cache-probe', 'ok', 30); assert cache.get('shared-cache-probe') == 'ok'; print('Shared cache OK')"
+uv run python manage.py check_rook_configuration --settings=core.settings.staging
+uv run python manage.py test wearables.tests.test_pr143_queue_redis_followup
 ```
-
-Run the probe from **two separate ECS tasks** and verify they observe the same
-key. An AWS WAF rule is an additional coarse limit, **not** a substitute for
-shared `ScopedRateThrottle` state. Review Redis networking, TLS and eviction
-policy with the infrastructure owner. The cache must not expose PHI or secrets.
 
 ## AWS S3 Storage Configuration
 

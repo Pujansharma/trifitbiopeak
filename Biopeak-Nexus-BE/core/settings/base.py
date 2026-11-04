@@ -213,12 +213,10 @@ MEDIA_ROOT = BASE_DIR / "storage" / "media"
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 
-# Health data must never be cached per process on multi-ECS deployments.
-# A DummyCache ensures DB-backed HealthDomainSnapshot is the only cross-request
-# cache until a genuinely shared Redis/Memcached service is deployed. The
-# base default LocMemCache is for local development only; staging/production
-# replace default with shared Redis when wearables are enabled. WAF complements
-# Redis but cannot replace shared ScopedRateThrottle counters.
+# Health snapshots stay database-backed: the dedicated health cache is disabled.
+# DRF ScopedRateThrottle already uses the application's default Django cache.
+# LocMemCache provides per-process limits without Redis; for consistent limits
+# across workers, BioPeak must configure an approved shared default cache.
 CACHES = {
     "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"},
     "health": {"BACKEND": "django.core.cache.backends.dummy.DummyCache"},

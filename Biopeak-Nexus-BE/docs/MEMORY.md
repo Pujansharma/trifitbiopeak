@@ -395,6 +395,11 @@ Canonical: [`docs/google-calendar-integration.md`](google-calendar-integration.m
 - ROOK `/authorizer` may return `authorized=true` with no URL for an existing grant; after revoke it returns an HTTPS URL. Missing `ROOK_AUTHORIZATION_ALLOWED_HOSTS` can therefore appear to break **only reconnect**. Keep the P1 exact-host allowlist fail-closed, including Garmin's `connect.garmin.com` pin; do not accept all HTTPS hosts.
 - Validate trusted-host configuration before changing API connection state. Log only the rejected hostname, never the full authorization URL/query. On authorizer failure during reconnect, preserve the disconnected/expired origin so retry and historical re-import remain correct.
 
+## 2026-11-03 - ROOK DRF throttling configuration decision
+
+- BioPeak will use its existing Django REST Framework `ScopedRateThrottle` for ROOK API limits. `STG_REDIS_URL` and `PRD_REDIS_URL` are now optional: when absent, Django's default LocMemCache provides per-process limits. Keep `CACHES["health"]` on DummyCache; data remains in PostgreSQL.
+- Important tradeoff: LocMemCache cannot enforce the same budget globally across multiple workers. The readiness command warns about this; security reviewer PR #143's prior shared-cache requirement is not met until BioPeak configures an approved shared default cache. Do not claim LocMem is equivalent to distributed throttling.
+
 ## 2026-10-29 - PR #143 freshness/recovery/Redis review follow-up
 
 - Hourly freshness enqueue now coalesces open profile jobs and reuses one stable `freshness:<profile>` key after completion; oldest-due profiles first, max 25 queued per scheduler sweep by default (CLI cap 50). Retryable FAILED jobs remain open until the existing retry path finishes.

@@ -218,9 +218,9 @@ class CacheReadinessTests(SimpleTestCase):
             "health": {"BACKEND": "django.core.cache.backends.dummy.DummyCache"},
         },
     )
-    def test_production_local_memory_throttling_is_a_blocking_error(self):
+    def test_production_local_memory_throttling_warns_about_per_worker_limits(self):
         results = rook_readiness_checks()
         self.assertTrue(any(
-            severity == "ERROR" and name == "WEARABLE_EDGE_RATE_LIMIT"
+            severity == "WARN" and name == "WEARABLE_EDGE_RATE_LIMIT"
             for severity, name, _ in results
         ))

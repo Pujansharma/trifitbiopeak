@@ -38,13 +38,13 @@ def rook_readiness_checks() -> list[tuple[str, str, str]]:
     if not getattr(settings, "WEARABLES_ENABLED", False):
         checks.append(("WARN", "WEARABLES_ENABLED", "Feature is disabled in this environment."))
     elif isinstance(caches["default"], LocMemCache):
-        # ScopedRateThrottle always uses the default Django cache; WAF cannot
-        # coordinate its counters across ECS tasks.
-        production_like = settings.SETTINGS_MODULE.endswith((".production", ".staging"))
+        # DRF ScopedRateThrottle stays active without Redis, but its counters
+        # belong to individual workers and do not enforce a global API budget.
         checks.append((
-            "ERROR" if production_like else "WARN", "WEARABLE_EDGE_RATE_LIMIT",
-            "Django default-cache throttling is per worker. Configure shared "
-            "ElastiCache Redis for default; WAF is only an additional edge cap.",
+            "WARN", "WEARABLE_EDGE_RATE_LIMIT",
+            "DRF throttling is active, but the default LocMemCache limits are "
+            "per process. Use BioPeak's approved shared cache if deployment-wide "
+            "request limits are required; edge limits are additional protection.",
         ))
     sources = provisioned_sources()
     if not sources:
