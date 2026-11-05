@@ -22,6 +22,10 @@ urlpatterns = [
 
     # Therapy: assigned service details, cancellation, and center alignment.
     path(
+        "therapy-services/<uuid:pk>/discard/",
+        views.TherapyProgramServiceDiscardView.as_view(),
+    ),
+    path(
         "therapy-services/<uuid:pk>/",
         views.TherapyProgramServiceDetailView.as_view(),
     ),

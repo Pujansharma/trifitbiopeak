@@ -7,7 +7,7 @@ authorized associates. The frontend can list programs for a customer profile,
 assign a composite template as a new program, and edit a limited set of
 program-level fields.
 
-This feature uses only three API operations:
+The program operations are:
 
 | Method | Purpose | Endpoint |
 |---|---|---|
@@ -16,8 +16,8 @@ This feature uses only three API operations:
 | `PATCH` | Edit allowed program fields | `/programs/composites/programs/:composite_program_id/` |
 
 Services are assigned from the selected composite template during creation.
-They are always read-only in this feature and cannot be added, removed, or
-modified through PATCH.
+Membership and session counts are read-only. During assignment, optionally select
+centers per therapy service; services cannot be added, removed, or modified through PATCH.
 
 Post-creation assessment and therapy add-ons and the profile-scoped assigned
 service list are documented separately in
@@ -40,6 +40,22 @@ Content-Type: application/json
 - The `X-Center-ID` value becomes the owning center for a program created by POST.
 
 ## 3. Data Semantics
+
+For templates containing therapy, `therapy_redemption_is_global` is optional and writable during assignment. Explicit false requires nonempty parent `redeemable_centers`; omitting both fields defaults to true. With the flag omitted, empty centers also default to true and nonempty centers select scoped coverage. Explicit true ignores supplied parent centers and stores no parent selections. Scoped coverage requires active customer centers. Templates without therapy retain their nonempty-center requirement.
+
+Therapy service selections reuse `TherapyProgramService.redeemable_centers`. Optionally submit them as `therapy_services: [{"id":"<catalogue_service_id>","centers":[{"id":"<center_id>"}]}]`. The previous `therapy_service_centers` request field is removed. The list may be omitted, empty, or partial, and each nested `centers` list may be omitted or empty. All active template therapies are still created with fixed sessions. Missing selections store empty centers without inheriting parent centers. Supplied entries require a unique active template therapy ID; null lists remain invalid. Each explicitly selected service center must belong to the scoped program centers and actively offer that service. Program centers must be active and actively assigned to the customer.
+
+For scoped composites, a therapy with empty centers automatically returns `can_redeem: false` and backend redemption is blocked until centers are assigned. Adding centers does not bypass expiry, session, activity, or live availability checks. The existing shared eligibility query supplies this behavior; no persisted redemption flag is added.
+
+Empty or omitted service selections under a global composite retain dynamic redemption at active customer centers currently offering the therapy. Explicit global service selections narrow coverage and must pass the same customer-membership and live service-availability checks. Template `quantity` supplies the fixed therapy session count; assignment never accepts session overrides.
+
+Both creation routes accept optional `expires_at` as `YYYY-MM-DD` or null. Omission/null means no expiry; today or later is valid. This date applies to the whole composite, with existing redemption and booking expiry checks retained.
+
+Both creation routes accept `is_credit` (default false), `is_complimentary` (default true), `price`, and initial `credit_received`. Both flags cannot be true. Non-complimentary programs require price; credit programs additionally require a non-null credit amount. Credit amounts allow zero, reject negatives, and support 10 total digits with 2 decimal places without a cap tied to price. Creation stores the amount without creating a payment receipt. Creation/list/detail responses expose `is_credit` and `credit_received` (decimal string or null); the new credit fields are read-only on composite PATCH.
+
+Assigned composite therapy center arrays are prefetched previews of at most five selections. Use the existing paginated `/programs/program-services/therapy-services/<service_id>/redeemable-centers/` for all selections and `available-redeemable-centers/` for the center picker. The existing center PATCH accepts `add_centers: [{"id":"<center_uuid>"}]`. Standalone therapy redemption rules are unchanged; assigned therapy detail also limits center previews to five.
+
+Parent composite PATCH accepts `therapy_redemption_is_global` and `redeemable_centers`. Switching off requires nonempty supplied or existing centers; switching on ignores supplied parent centers and clears parent selections. A scoped parent cannot exclude existing service selections. Reload the composite after editing coverage.
 
 Top-level `description` is the editable program description stored on
 `composite_program.program.description`. The nested `composite_template`
@@ -127,6 +143,8 @@ null
       "description": "<program_description|null>",
       "expires_at": "<date|null>",
       "is_complimentary": true,
+      "is_credit": false,
+      "credit_received": null,
       "price": "<decimal_string|null>",
       "redeemable_centers": [
         {
@@ -197,7 +215,7 @@ or center ID in the request body. The owning center is derived from
 
 ### Request payload structure
 
-For a template containing at least one active assessment service:
+For a scoped template containing assessment and therapy services, including initial credit:
 
 ```json
 {
@@ -205,33 +223,41 @@ For a template containing at least one active assessment service:
   "name": "<composite_program_name|null>",
   "assessment_type": "baseline",
   "notes": "<string|null>",
-  "expires_at": "<date>",
-  "is_complimentary": true,
-  "price": null,
+  "expires_at": "2027-01-30",
+  "is_complimentary": false,
+  "is_credit": true,
+  "price": "12000.00",
+  "credit_received": "3000.00",
   "redeemable_centers": [
     {
       "id": "<center_uuid>"
     }
   ],
-  "created_date": "<date>"
+  "therapy_services": [
+    {
+      "id": "<catalogue_therapy_service_uuid>",
+      "centers": [{"id": "<center_uuid>"}]
+    }
+  ],
+  "created_date": "2026-10-30"
 }
 ```
 
-For a template without an active assessment service, omit the assessment-only
-fields:
+For a global therapy template without assessment services, omit assessment-only
+fields. Empty service restrictions and no expiry are allowed:
 
 ```json
 {
   "composite_template_id": "<composite_template_uuid>",
   "notes": "<string|null>",
-  "expires_at": "<date>",
+  "expires_at": null,
   "is_complimentary": true,
+  "is_credit": false,
+  "credit_received": null,
   "price": null,
-  "redeemable_centers": [
-    {
-      "id": "<center_uuid>"
-    }
-  ],
+  "therapy_redemption_is_global": true,
+  "redeemable_centers": [],
+  "therapy_services": [],
   "created_date": "<date>"
 }
 ```
@@ -244,14 +270,49 @@ fields:
 | `name` | No | Currently used only for assessment-service programs; accepts a string, `""`, or `null`; `""` is stored as `null` |
 | `assessment_type` | Conditional | Accepts `baseline` or `null`; required when the template contains at least one active assessment service |
 | `notes` | No | Nullable and may be blank |
-| `expires_at` | Yes | Cannot be earlier than the current local date |
+| `expires_at` | No | Date in `YYYY-MM-DD` format, today or later. Omission/null means no expiry. Applies to the whole composite. |
 | `is_complimentary` | No | Defaults to `true` |
+| `is_credit` | No | Defaults to `false`; cannot be true with `is_complimentary=true`. |
+| `credit_received` | Conditional | Required and non-null for credit creation; otherwise optional/null. Nonnegative decimal with 10 total digits and 2 decimal places; zero allowed, no price cap. |
 | `price` | Conditional | Required when `is_complimentary` is `false` |
-| `redeemable_centers` | Yes | Non-empty; every center must be actively assigned to the profile |
+| `redeemable_centers` | Conditional | Optional/empty for global therapy coverage; required for scoped coverage and templates without therapy. Every selected center must be active and assigned to the profile. |
+| `therapy_redemption_is_global` | No | Explicit false requires nonempty `redeemable_centers`; true ignores supplied parent centers. When omitted, defaults to true with empty/omitted centers or false with nonempty centers. |
+| `therapy_services` | No | Omitted/empty/partial allowed. Each supplied entry requires a unique catalogue therapy ID from the active template; nested centers are optional/empty. Missing selections store empty centers. Explicit centers must be eligible. Null lists are invalid. |
 | `created_date` | No | Defaults on the backend when omitted |
 
-The frontend must not send services. The backend derives all active services and
-their category-specific assignments from the selected template.
+The backend derives service membership and session counts from the template.
+The frontend sends only per-therapy center selections in `therapy_services`.
+The same contract applies to `POST /centers/<center_id>/composite-programs/`,
+which also requires `profile_id` and derives the owning center from the URL.
+
+### Center selection flow
+
+1. Load the template's therapy rows using `GET /programs/composites/templates/<template_id>/services/?category=therapy&active=1`. Display `quantity` as read-only sessions and retain nested `service.id` for submission. With no `center_id` parameters, top-level `centers` is an empty array.
+2. Load `GET /profiles/<profile_id>/centers/`. Omitted `active` or `active=1` shows active centers; `active=0` shows inactive centers. Assignment rows of either activity state remain included. Use each row's `center.id`, not the assignment row's `id`. Creation still rejects inactive customer assignments.
+3. Select program `redeemable_centers`, then reload template therapy rows using repeated parameters: `?category=therapy&active=1&center_id=A&center_id=B`.
+4. Each row's top-level `centers` contains the complete matching active service-center choices, without a three-center preview limit. Existing catalogue count fields remain catalogue totals, not the number of filtered choices. Service rows remain paginated; load additional pages as needed to select therapies.
+5. Keep services with `centers: []` visible and allow submission without selecting centers. When program centers change, discard incompatible service selections and reload choices. Global service restrictions can use the client's active center IDs as the listing input.
+6. Submit any optional therapy selections with fixed template sessions omitted from the request. The backend validates explicit selections before creating all active template therapies. Missing selections produce empty centers, so scoped therapies remain non-redeemable.
+
+Example template-list response excerpt (other existing fields omitted):
+
+```json
+{
+  "detail": "All data.",
+  "count": 1,
+  "next": null,
+  "previous": null,
+  "data": [
+    {
+      "id": "<template_line_id>",
+      "service": {"id": "<catalogue_therapy_service_id>", "name": "Therapy"},
+      "quantity": 2,
+      "service_category_code": "therapy",
+      "centers": [{"id": "<center_id>", "code": "CTR01", "name": "Center"}]
+    }
+  ]
+}
+```
 
 `description` is not a POST field. It is available only through the limited
 composite-program PATCH contract.
@@ -274,6 +335,8 @@ composite-program PATCH contract.
     "description": "<program_description|null>",
     "expires_at": "<date|null>",
     "is_complimentary": true,
+    "is_credit": false,
+    "credit_received": null,
     "price": "<decimal_string|null>",
     "redeemable_centers": ["<center_object>"],
     "redeemable_centers_count": 1,
@@ -340,6 +403,8 @@ Only the following program fields may change:
 - `notes`
 - `expires_at`
 - `description`
+- `therapy_redemption_is_global`
+- `redeemable_centers` (parent coverage selections)
 
 The frontend must never submit any of these fields through PATCH:
 
@@ -348,8 +413,7 @@ The frontend must never submit any of these fields through PATCH:
 - `name`, `assessment_type`, or `assessment_type_code`
 - `profile`, `profile_id`, or customer identity fields
 - `center` or owning-center fields
-- `redeemable_centers`
-- `is_complimentary` or `price`
+- `is_complimentary`, `is_credit`, `credit_received`, or `price`
 - counts, cancellation fields, status, creator, or timestamps
 
 Updating top-level `description` changes only
@@ -375,6 +439,8 @@ Updating top-level `description` changes only
     "description": "<updated_program_description|null>",
     "expires_at": "<updated_date|null>",
     "is_complimentary": true,
+    "is_credit": false,
+    "credit_received": null,
     "price": "<decimal_string|null>",
     "redeemable_centers": ["<center_object>"],
     "redeemable_centers_count": 1,
@@ -413,7 +479,21 @@ failures include inaccessible profiles, invalid center context, inactive
 templates, templates without active services, unavailable services, invalid
 redeemable centers, a missing or invalid assessment type when the template
 contains an active assessment service, past expiry dates, and a missing price
-for a non-complimentary program.
+for a non-complimentary program, conflicting credit/complimentary flags, and missing or invalid initial credit amounts.
+
+Service-selection errors appear under `detail.therapy_services`, keyed by catalogue service UUID:
+
+```json
+{
+  "detail": {
+    "therapy_services": {
+      "<catalogue_therapy_service_id>": {
+        "centers": ["This service is not available at center <center_id>."]
+      }
+    }
+  }
+}
+```
 
 ## 8. Frontend Requirements
 
@@ -435,8 +515,10 @@ for a non-complimentary program.
   identifiers.
 - Show the optional name input only for templates containing an active
   assessment service. Require assessment type for those templates.
-- Show template services as a read-only preview before submission.
+- Show fixed template session counts and collect optional per-service center selections; allow omitted/empty/partial selections.
 - Require price only when the complimentary toggle is off.
+- Require a nonnegative initial credit amount when credit is selected; selecting credit requires complimentary to be off.
+- Allow a blank expiry, submitting null or omitting the field.
 
 ### Edit state
 
@@ -451,10 +533,16 @@ for a non-complimentary program.
 
 - GET lists only the selected profile's composite programs and supports active,
   expired, and pagination parameters.
-- POST never sends `profile_id`, `center_id`, or services.
+- Profile POST never sends `profile_id`, `center_id`, or service membership/session overrides. `therapy_services` and nested `centers` are optional.
 - POST allows name to be omitted or null and conditionally requires assessment
   type for templates containing an active assessment service.
 - POST renders field-level backend validation errors correctly.
+- Both creation routes accept optional/null/today/future expiry and reject past or malformed dates.
+- Both routes support initial credit, including zero, and expose credit fields in create/list/detail responses without creating receipts.
+- Both creation routes accept omitted/empty therapy lists, partial lists, and omitted/empty nested centers while creating every active template therapy with fixed sessions and no inherited centers.
+- Scoped assignments reject duplicate, non-therapy, foreign-template, and unavailable explicit service-center selections before any records are written. Missing IDs within supplied entries and null lists remain invalid.
+- Scoped therapies with empty centers expose `can_redeem: false` and cannot redeem; existing global dynamic eligibility is preserved.
+- Global empty restrictions retain dynamic coverage. Center choices remain complete beyond three matches, and unavailable therapy rows remain visible.
 - PATCH uses `/programs/composites/programs/:composite_program_id/`.
 - PATCH submits only notes, expiry, and/or program description.
 - Editing the program description does not alter template metadata.

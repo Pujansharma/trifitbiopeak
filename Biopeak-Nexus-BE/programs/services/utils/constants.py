@@ -96,7 +96,7 @@ class ServiceDocumentType(models.TextChoices):
         "Physical Assessment",
     )
     FITNESS_STRENGTH_VO2_MAX = ("fitness_strength_vo2_max", "VO₂ max Report")
-
+    FMD = "fmd", "FMD Report"
 
 class ServiceDocumentCategory(models.TextChoices):
     REPORT = "report", "Report file"

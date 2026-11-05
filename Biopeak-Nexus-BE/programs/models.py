@@ -162,6 +162,16 @@ class ProgramService(BaseUUIDModel):
 
 
 class TherapyProgram(BaseModel):
+    is_discarded = models.BooleanField(default=False)
+    discarded_by = models.ForeignKey(
+        "users.User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="discarded_therapy_programs",
+        editable=False,
+    )
+
     program = models.OneToOneField(
         Program,
         on_delete=models.CASCADE,
@@ -181,6 +191,16 @@ class TherapyProgram(BaseModel):
 
 
 class TherapyProgramService(BaseModel):
+    is_discarded = models.BooleanField(default=False)
+    discarded_by = models.ForeignKey(
+        "users.User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="discarded_therapy_program_services",
+        editable=False,
+    )
+
     program_service = models.OneToOneField(
         ProgramService,
         related_name="therapy_service",
@@ -332,6 +352,7 @@ class CompositeProgram(BaseModel):
         on_delete=models.PROTECT,
     )
     name = models.CharField(max_length=200, null=True, blank=True)
+    therapy_redemption_is_global = models.BooleanField(default=True)
     assessment_type = models.CharField(
         choices=CompositeAssessmentType,
         null=True,

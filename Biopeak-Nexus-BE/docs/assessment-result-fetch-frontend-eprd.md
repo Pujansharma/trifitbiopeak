@@ -480,7 +480,7 @@ newest-first order.
 ```
 
 Fetched results have `result_mode_code: "fetch"`. The nested `documents`
-preview contains at most three files. Load this endpoint only when the results
+preview contains at most five files. Load this endpoint only when the results
 screen normally loads, its query changes, or the user explicitly refreshes it.
 
 ### 7. Refetch result request

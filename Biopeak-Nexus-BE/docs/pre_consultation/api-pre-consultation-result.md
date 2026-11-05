@@ -192,7 +192,7 @@ Flattened layer answers for export.
 
 | Field | Type |
 |---|---|
-| `patient_baseline` | `{ "name", "sex", "age", "city", "height", "weight" }` — height cm / weight kg (`null` until set) |
+| `patient_baseline` | `{ "name", "sex", "age", "city", "height", "weight", "address" }` — height cm / weight kg (`null` until set); `address` = `{ "line_1", "line_2", "city", "state", "pin_code", "residency_type" }` |
 | `patient_category` | string[] |
 | `patient_concern` | `{ "concern": { "label", "health_system" } }[]` |
 | `patient_symptom` | string[] |

@@ -1,0 +1,33 @@
+meta {
+  name: POST ROOK Notification Webhook
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseURL}}/webhooks/rook/notification/
+  body: json
+  auth: none
+}
+
+headers {
+  Accept: application/json
+  Content-Type: application/json
+  X-ROOK-HASH: {{rook_webhook_hash}}
+}
+
+body:json {
+  {
+    "client_uuid": "{{rook_client_uuid}}",
+    "user_id": "{{rook_user_id}}",
+    "action_datetime": "2026-11-04T10:00:00Z"
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Illustrative notification envelope only. Replace with the ROOK event payload. X-ROOK-HASH signs client_uuid + user_id + action_datetime via the ROOK webhook hash key; never embed this key in Bruno.
+}

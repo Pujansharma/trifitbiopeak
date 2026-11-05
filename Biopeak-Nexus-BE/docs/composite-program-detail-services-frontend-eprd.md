@@ -9,7 +9,7 @@ This ePRD covers only these backend routes:
 
 | Method | Purpose | Endpoint |
 |---|---|---|
-| `GET` | Retrieve composite-program details and a service preview | `/programs/composites/programs/:program_id/` |
+| `GET` | Retrieve composite-program details and service counts | `/programs/composites/programs/:program_id/` |
 | `PATCH` | Partially update editable program fields | `/programs/composites/programs/:program_id/` |
 | `PUT` | Update editable program fields | `/programs/composites/programs/:program_id/` |
 | `GET` | Retrieve the complete paginated service list | `/programs/composites/programs/:program_id/services/` |
@@ -74,14 +74,21 @@ The composite-program detail page must provide:
 The frontend must not reconstruct server-maintained counts or redemption
 eligibility.
 
-### 3.1 Service preview versus complete list
+### 3.1 Service list and counts
 
-The detail endpoint's `services` field is a preview containing at most three
-services. It is `null`, not an empty array, when no preview service is present.
+The detail endpoint does not include a `services` field. Retrieve assigned
+services through `/programs/composites/programs/:program_id/services/`.
+The detail response retains `services_count` and all category service counts.
 
-The services endpoint is the authoritative source for the complete service
-list. `services_count` is the authoritative total count and may be greater than
-the detail response's preview length.
+For therapy rows, nested `service.centers` and sibling `redeemable_centers` show
+the same preview of selected centers, intersected with active catalogue
+assignments and, for scoped composites, the program's redemption centers.
+The preview contains at most five `{id, code, name}` objects. No selected centers
+means `[]`; there is no fallback to catalogue or parent centers. Global coverage
+keeps its existing parent-scope exception and dynamic `can_redeem` behavior,
+while these arrays still represent explicit selections. Standalone therapy
+redemption rules are unchanged. Assigned therapy detail also limits center
+previews to five; complete selections use the paginated centers endpoint.
 
 ### 3.2 Counter semantics
 
@@ -171,34 +178,6 @@ null
       }
     ],
     "redeemable_centers_count": "<integer>",
-    "services": [
-      {
-        "id": "<program_service_uuid>",
-        "service": {
-          "id": "<service_uuid>",
-          "name": "<string>",
-          "service_category": "<Therapy|Assessment|Consultation>",
-          "service_category_code": "<therapy|assessment|consultation>",
-          "image": "<url|null>"
-        },
-        "service_assignment_type": "<Standalone|Add On>",
-        "service_assignment_type_code": "<standalone|add_on>",
-        "sessions_count": "<integer|null>",
-        "sessions_used": "<integer|null>",
-        "sessions_cancelled": "<integer|null>",
-        "redeem_code": "<string|null>",
-        "can_redeem": "<boolean>",
-        "cancellation_reason": "<string|null>",
-        "cancelled_by": "<user_object|null>",
-        "cancelled_at": "<ISO-8601_datetime|null>",
-        "cancelled_date": "<YYYY-MM-DD|null>",
-        "created_date": "<YYYY-MM-DD>",
-        "created_by": "<user_object|null>",
-        "is_active": "<boolean>",
-        "created_at": "<ISO-8601_datetime>",
-        "updated_at": "<ISO-8601_datetime>"
-      }
-    ],
     "services_count": "<integer>",
     "add_ons_count": "<integer>",
     "assessment_services_count": "<integer>",
@@ -221,7 +200,6 @@ Nullable nested values have these additional rules:
 
 - `profile.home_center` can be `null` when no primary center assignment is
   available.
-- `services` can be `null`; otherwise it contains no more than three items.
 - `sessions_count`, `sessions_used`, `sessions_cancelled`, and `redeem_code`
   are populated only for therapy services. They are `null` for assessment and
   consultation services.
@@ -716,7 +694,6 @@ interface CompositeProgramDetail {
   price: string | null;
   redeemable_centers: MinimumCenter[];
   redeemable_centers_count: number;
-  services: ProgramService[] | null;
   services_count: number;
   add_ons_count: number;
   assessment_services_count: number;
@@ -789,8 +766,8 @@ Changing page, limit, category, assignment type, program ID, or center context
 must invalidate and refetch the affected service query. Changing program ID or
 center context must also refetch detail data.
 
-Do not use preview services as page-one service-list data because the preview
-has no pagination metadata and is limited independently.
+Load service-list data through its dedicated paginated endpoint; the detail
+response contains counts without embedded service data.
 
 After cancellation, invalidate and refetch both detail and service-list state.
 Do not derive a complete updated program from the compact cancellation
@@ -857,7 +834,7 @@ response.
   `template_description`.
 - An associate request always includes the selected `X-Center-ID`.
 - A center-context change refetches API-calculated `can_redeem` values.
-- The detail service preview is never treated as the complete service list.
+- The detail response omits `services`; assigned services come from the dedicated list endpoint.
 - The services screen supports `page`, `limit`, and the three documented
   category codes.
 - The services screen supports `assignment_type=add_on|standalone` without

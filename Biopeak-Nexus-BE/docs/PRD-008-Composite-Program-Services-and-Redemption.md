@@ -2,6 +2,15 @@
 
 Manage an assigned composite from its detail page through category-specific service retrieval, edits, center selection, assessment documents, and direct therapy redemption.
 
+On the composite program's `/services/` response, therapy `service.centers` and
+sibling `redeemable_centers` are matching previews of explicit service selections
+intersected with active catalogue assignments and scoped parent program centers.
+Empty selections return `[]`, never catalogue or parent-center fallbacks. Each
+preview contains up to five `{id, code, name}` objects. Global composites retain
+their parent-scope exception and existing redemption eligibility. Standalone
+therapy redemption rules are unchanged. Assigned therapy detail also limits
+center previews to five; complete selections use the paginated centers endpoint.
+
 Examples illustrate the final source contract; they are not captured responses from the supplied program’s database record. Use `<baseURL>` for the configured backend host. Authorization: `Bearer <token>`. Requests are for admin/associate staff unless a block explicitly describes existing customer read access. Send `X-Center-ID: <center_uuid>` for the selected center; mandatory header and role requirements are stated where enforced. JSON mutations use `Content-Type: application/json`; file uploads use multipart/form-data.
 
 ## Logical Flow
@@ -30,7 +39,7 @@ Examples illustrate the final source contract; they are not captured responses f
 22. **Retrieve an individual result request** — Inspect one order/fetch request and its saved provider inputs.
 23. **Edit a pending report order** — Correct booking/profile inputs before submitting an order.
 24. **Confirm a report order** — Validate confirmation inputs and queue provider submission.
-25. **List every request attachment** — Retrieve request files omitted from the three-file preview.
+25. **List every request attachment** — Retrieve request files omitted from the five-file preview.
 26. **Refetch a result request** — Requeue a supported submitted order or fetch job to retrieve current provider results.
 27. **Cancel a result request** — Mark an unfinished request cancelled.
 28. **List assessment results** — Retrieve manually uploaded and provider-created result records for the assigned assessment.
@@ -39,7 +48,7 @@ Examples illustrate the final source contract; they are not captured responses f
 31. **Edit assessment result dates** — Correct collection or report dates on an existing result.
 32. **Delete an assessment result** — Remove a result and its attached documents.
 33. **List every document for an assessment service** — Show the complete document collection across the service’s results.
-34. **List every document for a result** — Retrieve documents omitted from the result’s three-document preview.
+34. **List every document for a result** — Retrieve documents omitted from the result’s five-document preview.
 35. **Upload an assessment result document** — Attach an actual report/raw file to the existing result.
 36. **Delete an individual assessment document** — Remove one file without deleting the result metadata.
 37. **Cancel an assigned assessment service** — Deactivate one assessment occurrence.
@@ -120,78 +129,6 @@ Open the assigned composite and retain its identifiers for subsequent operations
       }
     ],
     "redeemable_centers_count": 1,
-    "services": [
-      {
-        "id": "01a162ff-1000-7000-8000-000000000001",
-        "service": {
-          "id": "019e1622-403b-74d1-a991-df3b388b4ac8",
-          "name": "Recovery Therapy",
-          "service_category": "Therapy",
-          "service_category_code": "therapy",
-          "image": null,
-          "centers": [
-            {
-              "id": "019ed45d-d6c4-7534-830e-501019fd98dd",
-              "code": "C0001",
-              "name": "Biopeak Bengaluru",
-              "image": null,
-              "address": "Indiranagar, Bengaluru",
-              "address_line_1": "100 Example Road",
-              "address_line_2": null,
-              "city": "Bengaluru",
-              "state": "Karnataka",
-              "country": "India",
-              "pincode": "560038",
-              "staff_count": 4,
-              "inactive_staff_count": 0,
-              "customer_count": 20,
-              "inactive_customer_count": 0,
-              "is_active": true,
-              "created_at": "2026-10-22T10:00:00+05:30",
-              "updated_at": "2026-10-22T10:00:00+05:30"
-            }
-          ]
-        },
-        "service_assignment_type": "Standalone",
-        "service_assignment_type_code": "standalone",
-        "redeemable_centers": [
-          {
-            "id": "019ed45d-d6c4-7534-830e-501019fd98dd",
-            "code": "C0001",
-            "name": "Biopeak Bengaluru"
-          }
-        ],
-        "sessions_count": 4,
-        "sessions_used": 0,
-        "sessions_cancelled": 0,
-        "redeem_code": "RC123456",
-        "can_redeem": true,
-        "results_count": 0,
-        "documents_count": 0,
-        "reports_count": 0,
-        "raw_data_count": 0,
-        "fetch_count": 0,
-        "fetch_results_count": 0,
-        "fetch_documents_count": 0,
-        "fetch_pending_count": 0,
-        "cancellation_reason": null,
-        "cancelled_by": null,
-        "cancelled_at": null,
-        "cancelled_date": null,
-        "created_date": "2026-10-22",
-        "created_by": {
-          "id": "019f1000-0000-7000-8000-000000000006",
-          "email": "staff@example.com",
-          "first_name": "Asha",
-          "last_name": "Rao",
-          "image": null,
-          "last_login": "2026-10-22T10:00:00+05:30"
-        },
-        "is_active": true,
-        "created_at": "2026-10-22T10:00:00+05:30",
-        "updated_at": "2026-10-22T10:00:00+05:30"
-      }
-    ],
     "services_count": 3,
     "add_ons_count": 0,
     "assessment_services_count": 1,
@@ -223,7 +160,7 @@ Open the assigned composite and retain its identifiers for subsequent operations
 
 #### Logic
 
-The supplied UUID is also the base Program UUID. services is a preview of at most three entries and can be null; use request 5 for the complete list. Category counters count assigned occurrences, not therapy sessions, and include cancelled lines. add_ons_count overlaps category counters. service remains the catalogue representation; redeemable_centers on an assigned service contains its therapy selections (empty for other categories). Parent redeemable_centers currently serializes code and name without id; retain selected UUIDs from assignment or use the profile-center lookup in request 39. can_redeem for therapy includes entitlement, expiry, remaining sessions and live availability; consultation returns false. Without a center context, therapy checks whether any selected center is eligible.
+The supplied UUID is also the base Program UUID. Composite program detail and PATCH responses omit services; use request 5 for the assigned-service list. services_count and all category counters remain present. Category counters count assigned occurrences, not therapy sessions, and include cancelled lines. add_ons_count overlaps category counters. In the dedicated service responses, service remains the catalogue representation; redeemable_centers on an assigned service contains its therapy selections (empty for other categories). Parent redeemable_centers currently serializes code and name without id; retain selected UUIDs from assignment or use the profile-center lookup in request 39. can_redeem for therapy includes entitlement, expiry, remaining sessions and live availability; consultation returns false. Without a center context, therapy checks whether any selected center is eligible.
 
 ### 2. Edit supported program fields
 
@@ -306,78 +243,6 @@ Update program metadata without changing the assigned template or service occurr
       }
     ],
     "redeemable_centers_count": 1,
-    "services": [
-      {
-        "id": "01a162ff-1000-7000-8000-000000000001",
-        "service": {
-          "id": "019e1622-403b-74d1-a991-df3b388b4ac8",
-          "name": "Recovery Therapy",
-          "service_category": "Therapy",
-          "service_category_code": "therapy",
-          "image": null,
-          "centers": [
-            {
-              "id": "019ed45d-d6c4-7534-830e-501019fd98dd",
-              "code": "C0001",
-              "name": "Biopeak Bengaluru",
-              "image": null,
-              "address": "Indiranagar, Bengaluru",
-              "address_line_1": "100 Example Road",
-              "address_line_2": null,
-              "city": "Bengaluru",
-              "state": "Karnataka",
-              "country": "India",
-              "pincode": "560038",
-              "staff_count": 4,
-              "inactive_staff_count": 0,
-              "customer_count": 20,
-              "inactive_customer_count": 0,
-              "is_active": true,
-              "created_at": "2026-10-22T10:00:00+05:30",
-              "updated_at": "2026-10-22T10:00:00+05:30"
-            }
-          ]
-        },
-        "service_assignment_type": "Standalone",
-        "service_assignment_type_code": "standalone",
-        "redeemable_centers": [
-          {
-            "id": "019ed45d-d6c4-7534-830e-501019fd98dd",
-            "code": "C0001",
-            "name": "Biopeak Bengaluru"
-          }
-        ],
-        "sessions_count": 4,
-        "sessions_used": 0,
-        "sessions_cancelled": 0,
-        "redeem_code": "RC123456",
-        "can_redeem": true,
-        "results_count": 0,
-        "documents_count": 0,
-        "reports_count": 0,
-        "raw_data_count": 0,
-        "fetch_count": 0,
-        "fetch_results_count": 0,
-        "fetch_documents_count": 0,
-        "fetch_pending_count": 0,
-        "cancellation_reason": null,
-        "cancelled_by": null,
-        "cancelled_at": null,
-        "cancelled_date": null,
-        "created_date": "2026-10-22",
-        "created_by": {
-          "id": "019f1000-0000-7000-8000-000000000006",
-          "email": "staff@example.com",
-          "first_name": "Asha",
-          "last_name": "Rao",
-          "image": null,
-          "last_login": "2026-10-22T10:00:00+05:30"
-        },
-        "is_active": true,
-        "created_at": "2026-10-22T10:00:00+05:30",
-        "updated_at": "2026-10-22T10:00:00+05:30"
-      }
-    ],
     "services_count": 3,
     "add_ons_count": 0,
     "assessment_services_count": 1,
@@ -870,7 +735,7 @@ Append repeatable assessment, therapy and consultation assignments.
 | `add_services` | Yes | `Array` | Nonempty list; repeated catalogue IDs create separate occurrences. |
 | `add_services[].id` | Yes | `019e1622-403b-74d1-a991-df3b388b4ac8` | Active catalogue service UUID. |
 | `add_services[].sessions_count` | Therapy only | `2` | Positive integer required for therapy; omit/null for assessment and consultation. |
-| `add_services[].centers` | Therapy only | `[{"id":"019ed45d-d6c4-7534-830e-501019fd98dd"}]` | Required nonempty {id} reference list for therapy; omit for assessment and consultation. |
+| `add_services[].centers` | No | `[{"id":"019ed45d-d6c4-7534-830e-501019fd98dd"}]` | Optional for therapy; omission/[] stores empty centers without inheriting parent centers. Explicit centers must be active customer centers offering that therapy and within scoped program centers. Omit for assessment/consultation; null is invalid. |
 | `add_services[].centers[].id` | Yes per center | `019ed45d-d6c4-7534-830e-501019fd98dd` | Center UUID; use the existing {id} reference pattern. |
 
 ```json
@@ -1050,7 +915,7 @@ Append repeatable assessment, therapy and consultation assignments.
 
 #### Logic
 
-Each therapy selection must be an active parent redeemable center. No catalogue availability check occurs here. Therapy gets its requested session allowance; assessment and consultation get their own extension records without counters. Existing pricing and template membership are unchanged. Response services remains a preview; reload request 5 for all occurrences.
+Omitted/empty therapy center selections store empty centers. Explicit centers must be active, actively assigned to the customer, and actively offer the therapy; scoped composites additionally require parent redemption-center membership. Empty scoped therapy centers have can_redeem=false and cannot redeem, while global composites retain dynamic eligibility. Repeated therapies may have different sessions and centers. Therapy gets its requested session allowance; assessment and consultation get their own extension records without counters. Existing pricing and template membership are unchanged. Response services remains a preview; reload request 5 for all occurrences. All rows are validated before insertion, and the request remains atomic.
 
 #### Errors
 
@@ -1059,7 +924,9 @@ Each therapy selection must be an active parent redeemable center. No catalogue 
 ```json
 {
   "detail": {
-    "add_services": "Select at least one redemption center."
+    "add_services": [
+      {"centers": ["This service is not available at center <center_uuid>."]}
+    ]
   }
 }
 ```
@@ -1069,7 +936,9 @@ Each therapy selection must be an active parent redeemable center. No catalogue 
 ```json
 {
   "detail": {
-    "add_services": "Centers must be active members of the program's redeemable centers."
+    "add_services": [
+      {"centers": ["Centers must be active customer centers within the program's redemption scope."]}
+    ]
   }
 }
 ```
@@ -1079,7 +948,9 @@ Each therapy selection must be an active parent redeemable center. No catalogue 
 ```json
 {
   "detail": {
-    "add_services": "Center selections are only supported for therapy service entries."
+    "add_services": [
+      {"centers": ["Center selections are only supported for therapy service entries."]}
+    ]
   }
 }
 ```
@@ -2009,7 +1880,7 @@ Show pending orders, fetch jobs, statuses, results and available request edits.
 
 #### Logic
 
-Newest first. files previews at most three files; retrieve its files endpoint for all. provider_lifecycle is null when no provider lifecycle handler applies; supported providers return their provider-specific lifecycle object. Refetch/confirmation execute asynchronously, so reload this list or detail to observe the saved status. For the currently integrated Bugspeaks and Strand lifecycle handlers, a populated provider_lifecycle has event and received_at fields; for example {"event":"<provider-event>","received_at":"2026-10-22T10:00:00+05:30"}.
+Newest first. files previews at most five files; retrieve its files endpoint for all. provider_lifecycle is null when no provider lifecycle handler applies; supported providers return their provider-specific lifecycle object. Refetch/confirmation execute asynchronously, so reload this list or detail to observe the saved status. For the currently integrated Bugspeaks and Strand lifecycle handlers, a populated provider_lifecycle has event and received_at fields; for example {"event":"<provider-event>","received_at":"2026-10-22T10:00:00+05:30"}.
 
 ### 21. Fetch existing provider results
 
@@ -2351,7 +2222,7 @@ The empty example applies only when the selected provider’s confirmation confi
 
 ### 25. List every request attachment
 
-Retrieve request files omitted from the three-file preview.
+Retrieve request files omitted from the five-file preview.
 
 **Method:** `GET`
 
@@ -2627,7 +2498,7 @@ Retrieve manually uploaded and provider-created result records for the assigned 
 
 #### Logic
 
-Newest first. documents is a preview of at most three documents; use the result-documents endpoint for the complete collection. result_mode distinguishes upload/fetch/order with a corresponding result_mode_code.
+Newest first. documents is a preview of at most five documents; use the result-documents endpoint for the complete collection. result_mode distinguishes upload/fetch/order with a corresponding result_mode_code.
 
 ### 29. Create a manual assessment result
 
@@ -2942,7 +2813,7 @@ Document type and module category belong to the parent result; file category bel
 
 ### 34. List every document for a result
 
-Retrieve documents omitted from the result’s three-document preview.
+Retrieve documents omitted from the result’s five-document preview.
 
 **Method:** `GET`
 

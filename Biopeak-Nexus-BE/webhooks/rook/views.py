@@ -29,7 +29,7 @@ class RookWebhookView(BaseGenericAPIView):
     permission_classes = (AllowAny,)
 
     def validate_signature(self, payload, request) -> bool:
-        if not getattr(settings, "WEARABLES_ENABLED", True):
+        if not getattr(settings, "WEARABLES_ENABLED", False):
             raise NotFound("Wearable integration is not enabled.")
         expected_client = getattr(settings, "ROOK_CLIENT_UUID", "")
         valid_clients = {client for client in (

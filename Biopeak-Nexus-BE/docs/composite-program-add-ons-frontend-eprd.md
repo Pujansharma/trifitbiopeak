@@ -119,6 +119,7 @@ Each selection is an occurrence rather than a unique-service membership.
 - Every therapy line starts with a blank, required positive-integer session
   quantity.
 - Repeated therapy lines may have different quantities.
+- Therapy centers are optional per occurrence; omitted or empty lists store no centers without inheriting program centers.
 - Do not show consultation services, prerequisite controls, catalogue pricing,
   or a calculated program price.
 
@@ -147,11 +148,12 @@ Content-Type: application/json
     },
     {
       "id": "<therapy_service_uuid>",
-      "quantity": 4
+      "sessions_count": 4
     },
     {
       "id": "<therapy_service_uuid>",
-      "quantity": 2
+      "sessions_count": 2,
+      "centers": [{"id": "<center_uuid>"}]
     }
   ]
 }
@@ -164,13 +166,23 @@ The backend resolves each service's stored `service_category`:
 
 - assessment creates an `AssessmentProgramService` extension;
 - therapy creates a `TherapyProgramService` extension whose `sessions_count`
-  receives `quantity`.
+  receives the submitted `sessions_count`.
+
+Each therapy entry may omit `centers` or send `[]`. Explicit selections use
+`centers: [{"id":"<center_uuid>"}]` and must be active centers actively assigned
+to the customer and actively offering that therapy. Scoped composites also
+require selections within their existing program redemption centers. Empty
+scoped selections have `can_redeem=false` and cannot redeem; global composites
+retain dynamic eligibility. Centers are unsupported for assessment/consultation
+entries, and null center lists remain invalid.
 
 Every new `ProgramService` uses `assignment_type=add_on`. Repeated service IDs
 are intentional and must not be deduplicated.
 
-The request is atomic. An invalid, inactive, unsupported, or quantity-invalid
+The request is atomic. An invalid, inactive, unsupported, session-invalid, or center-invalid
 entry prevents every occurrence in the request from being created.
+Center errors appear as an `add_services` array aligned with submitted rows,
+so repeated catalogue IDs can have independent errors.
 
 ### 6.2 Success response
 
@@ -187,7 +199,7 @@ The response remains the existing refreshed composite-program representation:
     "id": "<composite_program_uuid>",
     "uid": "<program_uid|null>",
     "name": "<string|null>",
-    "services": "<three_item_program_service_preview|null>",
+    "services": "<five_item_program_service_preview|null>",
     "services_count": "<integer>",
     "add_ons_count": "<integer>",
     "assessment_services_count": "<integer>",
@@ -201,7 +213,7 @@ The response remains the existing refreshed composite-program representation:
 }
 ```
 
-`services` is a preview containing at most three occurrences. It is never the
+`services` is a preview containing at most five occurrences. It is never the
 authoritative complete list. The frontend must not append the preview to a
 paginated list.
 
@@ -307,7 +319,7 @@ Use the top-level program-service `id`, not `service.id`, as the frontend row
 key and as the identifier for occurrence-specific operations.
 
 For therapy occurrences, `sessions_count: 0` means no assigned sessions.
-Add-on creation requires a positive `quantity`.
+Add-on creation requires a positive `sessions_count`.
 
 Results are ordered newest first.
 
@@ -360,7 +372,7 @@ type AssignmentTypeCode = "add_on" | "standalone";
 
 interface AddOnRequestItem {
   id: string;
-  quantity?: number;
+  sessions_count?: number;
 }
 
 interface CompositeAddOnRequest {
@@ -413,7 +425,9 @@ interface CompositeProgramServiceListItem {
 - Associates can read both category catalogues.
 - The POST body retains `add_services` and sends catalogue UUIDs, not URLs.
 - Repeated service IDs create distinct program-service occurrences.
-- Every therapy occurrence maps `quantity` to its own session allocation.
+- Every therapy occurrence maps `sessions_count` to its own session allocation.
+- Therapy centers may be omitted/empty or explicitly selected per occurrence. Explicit centers must satisfy customer membership, program scope, and live therapy availability; invalid selections roll back the entire request.
+- Empty scoped therapy centers disable redemption; global dynamic eligibility remains unchanged.
 - Consultation services cannot be selected, created, or returned by the new
   profile-scoped endpoint.
 - POST returns refreshed composite-program metadata and counters, not an

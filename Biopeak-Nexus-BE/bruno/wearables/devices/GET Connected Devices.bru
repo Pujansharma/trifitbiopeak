@@ -1,0 +1,23 @@
+meta {
+  name: GET Connected Devices
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseURL}}/api/v1/devices/
+  body: none
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Lists device authorizations for the logged-in customer profile. Set environment access_token to the *customer* JWT, not an admin token.
+}

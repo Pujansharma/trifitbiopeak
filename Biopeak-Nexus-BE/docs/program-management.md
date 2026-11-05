@@ -50,9 +50,9 @@ The core customer-facing container. One program per engagement.
 | `notes` | TextField (nullable) | Internal notes |
 | `expires_at` | DateField (nullable) | Program expiry date |
 | `is_complimentary` | BooleanField | Whether this is a complimentary program (default: True) |
-| `is_credit` | BooleanField | Whether this is a credit program (default: False); standalone therapy rejects both flags being true |
+| `is_credit` | BooleanField | Whether this is a credit program (default: False); therapy and composite creation reject both flags being true |
 | `price` | DecimalField (nullable) | Program-level price |
-| `credit_received` | DecimalField (nullable, 10 digits/2 decimal places) | Recorded credit amount; exposed for standalone therapy programs |
+| `credit_received` | DecimalField (nullable, 10 digits/2 decimal places) | Recorded credit amount; exposed for standalone therapy and composite programs |
 | `sessions_count` | PositiveIntegerField | Total sessions allotted in this program |
 | `sessions_used` | PositiveIntegerField | Sessions consumed so far (default: 0) |
 | `redeemable_centers` | M2M(Center) | Centers where this program can be redeemed |
@@ -156,6 +156,12 @@ When a customer books a session under a program service:
 
 See [Therapy Program Modification ePRD](PRD-007-Therapy-Program-Modification.md) for the PATCH payload, response previews, and complete selected-center retrieval. See [Program Payments](PRD-010-Program-Payments.md) for receipts and credit/complimentary flag updates.
 
+Therapy program PATCH responses reuse the services preview loaded before the update without fetching it again after saving. This preview may be stale, including its session counters, center selections, and `can_redeem` values. Clients must GET the program detail after a successful PATCH for current service data.
+
+Therapy program creation responses do not fetch a services preview and return `services: []`. Clients must GET the program detail after creation to retrieve its service preview.
+
+Service, center, and related-resource previews are limited to five items in serializers. Prefetch querysets remain unsliced and load complete related collections for the fetched parents. Full service and center collections remain available through their dedicated paginated endpoints; counts and eligibility checks use the complete relations.
+
 `TherapyProgramService.redeemable_centers` stores each assigned service's explicit center selections. These are separate from global catalog availability and must remain within the program's stored redeemable centers. Adding a program center never expands service selections automatically. The owning center has no redemption bypass. Center selections remain recorded if a service later becomes unavailable; redemption, booking, rescheduling, slots, and appointment completion revalidate availability. Program-level redeem-all validates all remaining active services before consuming any sessions.
 
 `is_credit` and `is_complimentary` are writable during creation, program PATCH, payments POST, and assigned therapy-service PATCH. Flags are optional on PATCH and payments POST; omitted flags retain their stored values. The service PATCH accepts top-level flags and updates the shared standalone or composite parent Program, affecting all its services. Complimentary is `is_complimentary=true, is_credit=false`; credit is `false, true`; regular paid is `false, false`. There is no `is_paid` field. The `true, true` combination is rejected. When flags are supplied to the payments POST or service PATCH, credit and regular paid programs require an existing price. Set it through program PATCH first if needed. Zero assigned sessions provide no redemption allowance.
@@ -173,6 +179,14 @@ Initial creation, individual service/session edits, derived counters, automatic 
 Staff can read paginated history at `GET /programs/<program_uuid>/history/`, including cancelled or expired programs. Customers cannot access it. See [Program Modification Audit API](program-modification-audit-frontend-eprd.md) for the contract.
 
 ### User-Owned Database Rollout
+
+Composite assignment accepts optional `therapy_services` containing catalogue service IDs and optional nested center selections on both creation routes. Omitted/empty/partial selections create all active template therapies with fixed template sessions and empty centers for missing selections; parent centers are never inherited. Explicit selections are validated against active customer assignments, program scope, and active service-center availability. Scoped therapies with empty centers have `can_redeem=false` and cannot redeem, while global empty restrictions retain dynamic eligibility through the existing shared eligibility query. The template-services listing accepts repeated `center_id` parameters and returns complete top-level center choices; no parameters means empty choices. The customer-center list defaults to active centers and supports `active=0|1` while retaining assignments of either activity state.
+
+Both composite creation routes accept initial `is_credit` and `credit_received` with therapy creation validation and optional/null `expires_at` for the whole program. Initial credit creates no receipt; new credit fields appear in create/list/detail responses and remain read-only on composite PATCH. These API changes reuse existing fields and relations and require no additional migration.
+
+Composite therapy coverage adds only `CompositeProgram.therapy_redemption_is_global` (default `True`, writable during assignment and parent PATCH). During assignment, explicit `False` requires nonempty `redeemable_centers`; omitting both fields defaults to `True`. When the flag is omitted, empty centers default to `True` and nonempty centers select `False`. Explicit `True` ignores supplied parent centers and stores no parent selections, including on PATCH. Composite therapy occurrences continue using the existing `TherapyProgramService.redeemable_centers` relation; no new center-link model or per-service global flag is required. Global composites with empty service selections use active customer centers currently offering the therapy. Explicit service selections remain restrictions; scoped composites also enforce their stored parent centers. Standalone therapy rules are unchanged. See [Customer Composite Programs](customer-composite-programs-frontend-prd.md#3-data-semantics).
+
+The user must generate and apply the field migration. Set this flag to **False for all existing composites**, including rows with empty center selections, to preserve legacy restrictions rather than applying the new default retroactively. Existing service-center selections need no copying. No migrations are generated or applied by Codex.
 
 The `Program.is_credit` and `Program.credit_received` fields, `ProgramAuditLog` model, and `TherapyProgramService.redeemable_centers` relation require schema migrations. No migration files are generated or applied by Codex. New credit amounts remain null on existing rows; audit collection starts after deployment.
 

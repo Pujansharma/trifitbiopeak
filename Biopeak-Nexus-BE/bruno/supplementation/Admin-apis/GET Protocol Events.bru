@@ -24,12 +24,20 @@ docs {
   Staff audit for one protocol. Admin + associate. No X-Center-ID.
   Unknown id → 404. Inactive protocol still loads.
   Subset of GET Profile Events: same row, same order, same page/limit/action.
-  Other protocols and null protocol_id rows are omitted.
+  Other protocols, null protocol_id rows, and rows with no version are omitted.
   page, limit (default 10, max 50). Newest created_at first.
   action: optional stored action code. Junk → 400 "Invalid action."
   Includes client_visible false.
-  data[]: id, action, reason, client_visible, client_title, change_type, effective_on,
-  protocol_id, protocol_version_id, before, after, created_at.
+  data[]: id, action, actor {name, roles[{id, name}]}, reason, client_visible,
+  client_title,
+  change_type, effective_on,
+  protocol_id, protocol_name, protocol_version_id, protocol_version_number,
+  before, after, created_at.
+  protocol_name is this protocol's name.
+  protocol_version_number is the linked version's number. Both always set.
+  actor is null when the event has no actor.
+  name is first + last.
+  roles are that associate's active care roles. An admin has roles: [].
   Stored supplement_id in before/after is returned as
   supplement {id, product_name, brand_name, form}.
   form is the stored code. Stored JSON keeps supplement_id.

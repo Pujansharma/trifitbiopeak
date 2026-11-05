@@ -39,7 +39,7 @@ class ConsultationServiceSerializer(BaseServiceSerializerMeta, BaseModelSerializ
         read_only_fields = ["centers_count"]
 
     def get_centers(self, instance: Service):
-        assignments = instance.active_center_assignments[:3]
+        assignments = instance.active_center_assignments[:5]
         return MinimumCenterSerializer(
             [assignment.center for assignment in assignments],
             many=True,

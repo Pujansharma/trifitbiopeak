@@ -37,6 +37,7 @@ from programs.utils.audit import create_program_audit_log
 from programs.utils.constants import ProgramType
 from programs.utils.db import (
     cancel_all_program_services,
+    discard_therapy_program,
     update_program_redeemable_centers_count,
     update_program_services_count,
     update_program_sessions_count,
@@ -79,6 +80,8 @@ class BaseTherapyProgramSerializer(BaseModelSerializer):
 
 
 class TherapyProgramServiceSerializer(BaseModelSerializer):
+    is_discarded = serializers.BooleanField(read_only=True)
+    discarded_by = BaseUserSerializer(read_only=True)
     id = serializers.UUIDField(source="program_service.id", read_only=True)
     redeemable_centers = MinimumCenterSerializer(many=True, read_only=True)
     program = TherapyProgramRepresentationSerializer(
@@ -122,6 +125,8 @@ class TherapyProgramServiceSerializer(BaseModelSerializer):
             "created_date",
             "created_at",
             "is_active",
+            "is_discarded",
+            "discarded_by",
             "cancellation_reason",
             "cancelled_by",
             "cancelled_at",
@@ -165,6 +170,8 @@ class TherapyServiceAdditionSerializer(TherapyCenterAdditionSerializer):
 
 
 class TherapyProgramSerializer(BaseModelSerializer):
+    is_discarded = serializers.BooleanField(read_only=True)
+    discarded_by = BaseUserSerializer(read_only=True)
     id = serializers.UUIDField(source="pk", read_only=True)
     uid = serializers.CharField(source="program.uid", read_only=True)
     profile = CustomerProfileWithCenterSerializer(
@@ -248,6 +255,8 @@ class TherapyProgramSerializer(BaseModelSerializer):
             "created_at",
             "updated_at",
             "is_active",
+            "is_discarded",
+            "discarded_by",
             "created_by",
         ]
         read_only_fields = ["sessions_count", "sessions_used", "sessions_cancelled", "is_active"]
@@ -257,8 +266,10 @@ class TherapyProgramSerializer(BaseModelSerializer):
         return BaseProgramServiceSerializer(qs, many=True, context=self.context).data
 
     def get_redeemable_centers(self, instance):
-        qs = instance.program.redeemable_centers.all()[:3]
-        return BaseCenterSerializer(qs, many=True, context=self.context).data
+        qs = getattr(instance.program, "redeemable_center_preview", None)
+        if qs is None:
+            qs = instance.program.redeemable_centers.all()
+        return BaseCenterSerializer(qs[:5], many=True, context=self.context).data
 
     @classmethod
     def get_center(cls, center_identifier: UUID, created_by: User):
@@ -403,8 +414,9 @@ class TherapyProgramSerializer(BaseModelSerializer):
                     not existing_service.is_active
                     or not hasattr(existing_service, "therapy_service")
                     or not existing_service.therapy_service.is_active
+                    or existing_service.therapy_service.is_discarded
             ):
-                errors[index]["id"] = "This service assignment is cancelled or invalid."
+                errors[index]["id"] = "This service assignment is cancelled, discarded, or invalid."
             if selected_centers - center_identifiers:
                 errors[index]["centers"] = (
                     "Centers must belong to the program's redeemable centers."
@@ -461,9 +473,15 @@ class TherapyProgramSerializer(BaseModelSerializer):
         instance.refresh_from_db()
         instance.program = program
         program.therapy_program = instance
+        if hasattr(program, "redeemable_center_preview"):
+            del program.redeemable_center_preview
         prefetch_related_objects(
             [program],
-            "redeemable_centers",
+            Prefetch(
+                "redeemable_centers",
+                queryset=Center.objects.all(),
+                to_attr="redeemable_center_preview",
+            ),
             "created_by",
             "customer_profile__customer__user",
             Prefetch(
@@ -472,14 +490,6 @@ class TherapyProgramSerializer(BaseModelSerializer):
                 to_attr="primary_center_assignments",
             ),
         )
-        program.service_preview = list(
-            ProgramService.objects.filter(program=program)
-            .select_related("program", "service", "created_by", "therapy_service")
-            .prefetch_related("therapy_service__redeemable_centers")
-            .order_by("-created_at", "-pk")[:5]
-        )
-        for program_service in program.service_preview:
-            program_service.program = program
         return instance
 
     def create(self, validated_data: dict):
@@ -528,6 +538,8 @@ class TherapyProgramSerializer(BaseModelSerializer):
         user = self.context["request"].user
         program = instance.program
         self.authorize_program_update(program, user)
+        if instance.is_discarded:
+            raise serializers.ValidationError("Discarded programs cannot be updated.")
         if not program.is_active or not instance.is_active:
             raise serializers.ValidationError("Cancelled programs cannot be updated.")
         program_data = validated_data.pop("program", {})
@@ -554,6 +566,8 @@ class TherapyProgramSerializer(BaseModelSerializer):
                 )
                 setattr(program, attribute, value)
             program.save(update_fields=[*program_data, "updated_at"])
+            if TherapyProgram.objects.filter(pk=instance.pk, is_discarded=True).exists():
+                raise serializers.ValidationError("Discarded programs cannot be updated.")
             existing_centers = set(
                 program.redeemable_centers.values_list("pk", flat=True)
             )
@@ -633,6 +647,8 @@ class TherapyProgramDetailSerializer(TherapyProgramSerializer):
             "created_at",
             "updated_at",
             "is_active",
+            "is_discarded",
+            "discarded_by",
             # Cancellation
             "cancellation_reason",
             "cancelled_by",
@@ -643,11 +659,31 @@ class TherapyProgramDetailSerializer(TherapyProgramSerializer):
         read_only_fields = ["sessions_count", "sessions_used", "sessions_cancelled", "is_active"]
 
     def get_redeemable_centers(self, instance):
-        qs = instance.program.redeemable_centers.all()[:3]
-        return MinimumCenterSerializer(qs, many=True, context=self.context).data
+        qs = getattr(instance.program, "redeemable_center_preview", None)
+        if qs is None:
+            qs = instance.program.redeemable_centers.all()
+        return MinimumCenterSerializer(qs[:5], many=True, context=self.context).data
 
     def create(self, validated_data):
         raise serializers.ValidationError("Create not allowed.")
+
+
+class TherapyProgramDiscardSerializer(BaseModelSerializer):
+    is_discarded = serializers.BooleanField(read_only=True)
+    discarded_by = BaseUserSerializer(read_only=True)
+
+    class Meta:
+        model = TherapyProgram
+        fields = ["is_discarded", "discarded_by"]
+
+    def create(self, validated_data: dict):
+        therapy_program = validated_data["therapy_program"]
+        if therapy_program.is_discarded:
+            return therapy_program
+        with transaction.atomic():
+            discard_therapy_program(therapy_program, validated_data["discarded_by"])
+        therapy_program.refresh_from_db(fields=["is_discarded", "discarded_by"])
+        return therapy_program
 
 
 class TherapyProgramCancelSerializer(BaseModelSerializer):
@@ -683,9 +719,16 @@ class TherapyProgramCancelSerializer(BaseModelSerializer):
         cancelled_date = program_fields.get("cancelled_date")
         if not therapy_program:
             raise serializers.ValidationError("Not valid therapy program provided")
+        if therapy_program.is_discarded:
+            raise serializers.ValidationError("Discarded programs cannot be cancelled.")
         if not therapy_program.is_active:
             raise serializers.ValidationError("Program already cancelled")
         with transaction.atomic():
+            Program.objects.filter(pk=therapy_program.program.pk).update(
+                updated_at=timezone.localtime(),
+            )
+            if TherapyProgram.objects.filter(pk=therapy_program.pk, is_discarded=True).exists():
+                raise serializers.ValidationError("Discarded programs cannot be cancelled.")
             therapy_program.is_active = False
             cancellation_fields = {
                 "is_active": False,
@@ -727,6 +770,8 @@ class TherapyProgramRedeemSerializer(BaseModelSerializer):
         redeemed_by = validated_data.pop("redeemed_by")
         center_id = validated_data["center_id"]
         redeemed_date = validated_data["redeemed_date"]
+        if therapy_program.is_discarded:
+            raise serializers.ValidationError("Discarded programs cannot be redeemed.")
         if not therapy_program.is_active:
             raise serializers.ValidationError("This program has been cancelled.")
         program_exists = (

@@ -1,4 +1,10 @@
 vars {
+  rook_data_source: Garmin
+  rook_health_domain: heart
+  rook_client_uuid:
+  rook_user_id:
+  rook_state_token:
+  rook_webhook_hash:
   baseURL: https://api.biopeak.com
   phone: +91-9999999990
   access_token: 
@@ -56,6 +62,7 @@ vars {
 }
 vars:secret [
   access_token,
+  rook_webhook_hash,
   otp,
   orange_webhook_secret,
   whatsapp_webhook_verify_token,

@@ -28,8 +28,6 @@ from programs.models import (
     RedemptionHistory,
 )
 from programs.services.serializers import BaseServiceSerializer
-from programs.therapy.eligibility import therapy_services_at_center
-from programs.utils.audit import create_program_audit_log
 from programs.utils.constants import ProgramType
 
 
@@ -55,7 +53,7 @@ class TherapyServiceAvailableRedeemableCenterSerializer(ProgramAvailableRedeemab
 class AssignedProgramServiceSerializer(BaseModelSerializer):
     id = serializers.UUIDField(source="service.pk", read_only=True)
     name = serializers.CharField(source="service.name", read_only=True)
-    service_category = serializers.SerializerMethodField()
+    service_category = serializers.CharField(source="service.service_category", read_only=True)
     service_category_code = serializers.CharField(source="service.service_category", read_only=True)
     image = serializers.FileField(source="service.image", read_only=True)
     centers = serializers.SerializerMethodField()
@@ -64,23 +62,30 @@ class AssignedProgramServiceSerializer(BaseModelSerializer):
         model = ProgramService
         fields = ["id", "name", "service_category", "service_category_code", "image", "centers"]
 
-    @classmethod
-    def get_service_category(cls, instance: ProgramService) -> str:
-        return instance.service.get_service_category_display()
+    def to_representation(self, instance: ProgramService):
+        representation = super().to_representation(instance)
+        if "service_category" in representation:
+            representation["service_category"] = instance.service.get_service_category_display()
+        return representation
 
-    def get_centers(self, instance: ProgramService) -> list | None:
+    def get_centers(self, instance: ProgramService):
         if instance.program.program_type != ProgramType.THERAPY:
             return BaseServiceSerializer(instance.service, context=self.context).data["centers"]
         if not hasattr(instance, "therapy_service"):
             return []
-        centers = instance.therapy_service.redeemable_centers.all()
-        preview_limit = self.context.get("therapy_center_preview_limit", 3)
-        if preview_limit is not None:
-            centers = centers[:preview_limit]
-        return MinimumCenterSerializer(centers, many=True, context=self.context).data
+        centers = getattr(instance.therapy_service, "redeemable_center_preview", None)
+        if centers is None:
+            centers = instance.therapy_service.redeemable_centers.all()[:5]
+        return MinimumCenterSerializer(centers[:5], many=True, context=self.context).data
 
 
 class BaseProgramSerializer(BaseModelSerializer):
+    is_discarded = serializers.BooleanField(
+        source="therapy_program.is_discarded", read_only=True, default=False,
+    )
+    discarded_by = BaseUserSerializer(
+        source="therapy_program.discarded_by", read_only=True, default=None,
+    )
     uid = serializers.CharField(read_only=True)
     profile = BaseCustomerProfileSerializer(source="customer_profile", read_only=True)
     sessions_count = serializers.IntegerField(
@@ -121,6 +126,8 @@ class BaseProgramSerializer(BaseModelSerializer):
             "created_date",
             "cancelled_date",
             "is_active",
+            "is_discarded",
+            "discarded_by",
             "created_at",
             "updated_at",
         ]
@@ -151,6 +158,9 @@ class ProgramAuditLogSerializer(BaseModelSerializer):
 
 class ProgramPaymentHistorySerializer(BaseModelSerializer):
     created_by = BaseUserSerializer(read_only=True)
+    amount_received = serializers.DecimalField(
+        max_digits=10, decimal_places=2, min_value=Decimal("0.01"),
+    )
     is_credit = serializers.BooleanField(required=False, write_only=True)
     is_complimentary = serializers.BooleanField(required=False, write_only=True)
 
@@ -164,36 +174,45 @@ class ProgramPaymentHistorySerializer(BaseModelSerializer):
 
     def create(self, validated_data: dict):
         program = validated_data["program"]
-        program_flags = {}
-        for field in ("is_credit", "is_complimentary"):
-            if field in validated_data:
-                program_flags[field] = validated_data.pop(field)
-        if program_flags:
-            is_credit = program_flags.get("is_credit", program.is_credit)
-            is_complimentary = program_flags.get(
-                "is_complimentary", program.is_complimentary,
-            )
-            if is_complimentary and is_credit:
-                raise serializers.ValidationError(
-                    {"is_credit": "A program cannot be both complimentary and credit."}
-                )
-            if not is_complimentary and program.price is None:
-                raise serializers.ValidationError(
-                    {"price": "Price is required when program is not complimentary."}
-                )
+        amount_received = validated_data["amount_received"]
+        validated_data.pop("is_credit", None)
+        validated_data.pop("is_complimentary", None)
         with transaction.atomic():
-            Program.objects.filter(pk=program.pk).update(
+            # Enforce the cap against the stored total when concurrent receipts arrive.
+            updated_count = Program.objects.alias(
+                paid_total=Coalesce(F("credit_received"), Decimal("0.00")),
+            ).filter(
+                pk=program.pk,
+                is_complimentary=False,
+                price__isnull=False,
+                price__gte=F("paid_total") + amount_received,
+            ).update(
                 credit_received=Coalesce(F("credit_received"), Decimal("0.00"))
-                + validated_data["amount_received"],
+                + amount_received,
                 updated_at=timezone.localtime(),
-                **program_flags,
             )
-            payment = super().create(validated_data)
-            for field, value in program_flags.items():
-                create_program_audit_log(
-                    program, field, getattr(program, field), value,
-                    validated_data["created_by"],
+            if not updated_count:
+                current_program = Program.objects.filter(pk=program.pk).only(
+                    "is_complimentary", "price", "credit_received",
+                ).first()
+                if current_program is not None:
+                    if current_program.is_complimentary:
+                        raise serializers.ValidationError(
+                            "Cannot make a payment against complimentary program."
+                        )
+                    if current_program.price is None:
+                        raise serializers.ValidationError("Program does not have price.")
+                    credit_received = current_program.credit_received
+                    if credit_received is None:
+                        credit_received = Decimal("0.00")
+                    if credit_received + amount_received > current_program.price:
+                        raise serializers.ValidationError(
+                            {"amount_received": "Total amount paid cannot exceed the program price."}
+                        )
+                raise serializers.ValidationError(
+                    "Program changed while recording payment. Please retry."
                 )
+            payment = super().create(validated_data)
         logger.info(
             f"ProgramPaymentHistorySerializer.create: program={program.pk} "
             f"payment={payment.pk} amount_received={payment.amount_received} recorded."
@@ -211,10 +230,16 @@ class TherapyProgramRepresentationSerializer(BaseProgramSerializer):
 
 
 class BaseProgramServiceSerializer(BaseModelSerializer):
+    is_discarded = serializers.BooleanField(
+        source="therapy_service.is_discarded", read_only=True, default=False,
+    )
+    discarded_by = BaseUserSerializer(
+        source="therapy_service.discarded_by", read_only=True, default=None,
+    )
     program = serializers.SerializerMethodField()
     service = AssignedProgramServiceSerializer(source="*", read_only=True)
     cancelled_by = BaseUserSerializer(read_only=True)
-    can_redeem = serializers.SerializerMethodField()
+    can_redeem = serializers.BooleanField(read_only=True, default=False)
     sessions_count = serializers.IntegerField(
         source="therapy_service.sessions_count", read_only=True
     )
@@ -245,6 +270,8 @@ class BaseProgramServiceSerializer(BaseModelSerializer):
             "created_at",
             "is_active",
             "can_redeem",
+            "is_discarded",
+            "discarded_by",
             "cancellation_reason",
             "cancelled_by",
             "cancelled_at",
@@ -252,38 +279,11 @@ class BaseProgramServiceSerializer(BaseModelSerializer):
             "active_appointment",
         ]
 
-    def get_program(self, instance: ProgramService) -> dict:
+    def get_program(self, instance: ProgramService):
         serializer_class = {
             ProgramType.THERAPY: TherapyProgramRepresentationSerializer,
         }.get(instance.program.program_type, BaseProgramSerializer)
         return serializer_class(instance.program, context=self.context).data
-
-    def get_can_redeem(self, instance: ProgramService) -> bool:
-        if hasattr(instance, "can_redeem"):
-            return instance.can_redeem
-        program = instance.program
-        if program.program_type != ProgramType.THERAPY:
-            return True
-        if not hasattr(instance, "therapy_service"):
-            return False
-        therapy_service = instance.therapy_service
-        if not instance.is_active or not therapy_service.is_active or not program.is_active:
-            return False
-        if not program.therapy_program.is_active:
-            return False
-        if program.expires_at is not None and program.expires_at < timezone.localdate():
-            return False
-        if therapy_service.sessions_used >= therapy_service.sessions_count:
-            return False
-        request = self.context.get("request")
-        center_identifier = request.headers.get("X-Center-ID") if request else None
-        if center_identifier:
-            return therapy_services_at_center(center_identifier).filter(pk=therapy_service.pk).exists()
-        return therapy_service.redeemable_centers.filter(
-            redeemable_programs=program,
-            service_assignments__service=instance.service,
-            service_assignments__is_active=True,
-        ).exists()
 
     def get_active_appointment(self, obj: ProgramService) -> dict | None:
         open_appointments = getattr(obj, "open_appointments", None)

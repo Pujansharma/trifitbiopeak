@@ -31,23 +31,22 @@ from appointments.utils.redemption import OPEN_APPOINTMENT_STATUSES
 from core.utils.exceptions import get_object_or_404
 from core.utils.permissions import ReadOnly
 from core.utils.views.main import (
-    BaseGenericAPIView,
     BaseListAPIView,
     BaseListCreateAPIView,
     BaseRetrieveAPIView,
 )
 from external.permissions import ExternalAPIKeyPermission
 from external.serializers import CustomerProfileSummarySerializer
-from external.views import ExternalUserProgramSummaryView
 from programs.composites.views import CompositeProgramViewMeta
-from programs.models import Program, ProgramService, TherapyProgram
+from programs.models import Program
+from programs.models import ProgramService, TherapyProgram, TherapyProgramService
 from programs.program_services.serializers import AssessmentProgramServiceSerializer
 from programs.serializers import BaseProgramSerializer
-from programs.services.models import CenterServiceAssignment, ServiceResult
-from programs.services.utils.constants import ServiceCategory, ServiceDocumentType
-from programs.models import ProgramService, TherapyProgram, TherapyProgramService
 from programs.services.models import CenterServiceAssignment
+from programs.services.models import ServiceResult
 from programs.services.utils.constants import ServiceCategory
+from programs.services.utils.constants import ServiceDocumentType
+from programs.therapy.views import TherapyProgramServiceViewMeta
 from programs.utils.constants import ProgramType
 from webhooks.metsights.tasks import send_reports_export_email
 
@@ -81,38 +80,43 @@ class CustomerProgramServicesView(BaseListAPIView, CustomerProfileAccessViewMeta
         ).filter(center_conditions, **filter_kwargs).order_by("-created_at", "-pk").distinct()
 
 
-class CustomerProgramViewMeta(BaseGenericAPIView):
-    @classmethod
-    def get_therapy_program_queryset(cls):
-        service_preview = ProgramService.objects.select_related(
+class CustomerProgramViewMeta(TherapyProgramServiceViewMeta):
+    def get_therapy_program_queryset(self):
+        service_preview = self.get_program_service_queryset().select_related(
             "program",
             "service",
             "created_by",
             "therapy_service",
+            "therapy_service__discarded_by",
             "program__customer_profile__customer__user",
             "program__therapy_program",
+            "program__therapy_program__discarded_by",
         ).prefetch_related(
-            "therapy_service__redeemable_centers",
             Prefetch(
                 "service__center_assignments",
                 queryset=CenterServiceAssignment.objects.filter(
                     is_active=True,
-                ).select_related("center"),
+                ).select_related("center").order_by("-created_at", "-pk"),
                 to_attr="active_center_assignments",
             ),
         )
         return (
             TherapyProgram.objects.select_related(
+                "discarded_by",
                 "program",
                 "program__created_by",
             )
             .prefetch_related(
                 Prefetch(
                     "program__program_services",
-                    queryset=service_preview.order_by("-created_at", "-pk")[:5],
+                    queryset=service_preview.order_by("-created_at", "-pk"),
                     to_attr="service_preview",
                 ),
-                "program__redeemable_centers",
+                Prefetch(
+                    "program__redeemable_centers",
+                    queryset=Center.objects.all(),
+                    to_attr="redeemable_center_preview",
+                ),
             )
         )
 
@@ -178,12 +182,15 @@ class CustomerTherapyProgramsView(
     serializer_class = CustomerTherapyProgramSerializer
 
     def get_queryset(self):
-        filter_kwargs = {}
+        filter_kwargs = {"is_discarded": False}
         active_query = self.request.query_params.get("active")
         complete_query = self.request.query_params.get("complete")
         expired_query = self.request.query_params.get("expired")
+        discarded_query = self.request.query_params.get("discarded", "0")
         customer_profile = self.get_customer_profile()
 
+        if discarded_query in {"0", "1"}:
+            filter_kwargs["is_discarded"] = bool(int(discarded_query))
         if active_query in {"0", "1"}:
             filter_kwargs["is_active"] = bool(int(active_query))
         if complete_query in {"0", "1"}:
@@ -213,7 +220,7 @@ class CustomerTherapyProgramsView(
     def perform_create(
             self,
             serializer,
-    ) -> None:
+    ):
         customer_profile = self.get_customer_profile()
         serializer.save(
             customer_profile=customer_profile,
@@ -239,11 +246,16 @@ class CustomerTherapyProgramServicesView(
 
     def get_queryset(self):
         therapy_program = self.get_therapy_program()
+        filter_kwargs = {}
+        discarded_query = self.request.query_params.get("discarded")
+        if discarded_query in ["0", "1"]:
+            filter_kwargs["is_discarded"] = bool(int(discarded_query))
         return (
             TherapyProgramService.objects.filter(
                 program_service__program__therapy_program=therapy_program,
+                **filter_kwargs,
             )
-            .select_related("program_service__service", "program_service__program")
+            .select_related("program_service__service", "program_service__program", "discarded_by")
             .defer("program_service__data")
             .prefetch_related(
                 "redeemable_centers",
@@ -445,14 +457,11 @@ class CustomerDocumentExportView(CustomerDocumentsViewMeta):
             }
             for document in documents.iterator(chunk_size=100) if document.file
         )
-        documents_count = send_reports_export_email(
+        send_reports_export_email(
             serializer.validated_data["email"],
             first_name,
             files,
-            as_zip=True,
         )
-        if not documents_count:
-            self.raise_bad_request("No matching documents could be downloaded.")
         return self.send_response("Reports export request received.")
 
 
@@ -476,7 +485,9 @@ class CustomerProgramsView(BaseListAPIView, CustomerProfileMeta):
         }
         expired_filter_kwargs = expired_filters.get(expired, {})
         filter_kwargs.update(expired_filter_kwargs)
-        return Program.objects.select_related("customer_profile__customer__user", "therapy_program").filter(
+        return Program.objects.select_related(
+            "customer_profile__customer__user", "therapy_program__discarded_by",
+        ).filter(
             customer_profile=customer_profile,
             **filter_kwargs,
         ).order_by("-created_at", "-pk")
@@ -492,7 +503,7 @@ class CustomerProgramSummaryViewMeta(CustomerProfileMeta):
         summary = Program.objects.filter(
             customer_profile=customer_profile,
             **program_filters,
-        ).aggregate(
+        ).exclude(therapy_program__is_discarded=True).aggregate(
             programs_count=Count("pk"),
             programs_active=Count("pk", filter=Q(is_active=True)),
             programs_inactive=Count("pk", filter=Q(is_active=False)),
@@ -501,6 +512,9 @@ class CustomerProgramSummaryViewMeta(CustomerProfileMeta):
         service_summary = ProgramService.objects.filter(
             program__customer_profile=customer_profile,
             **service_filters,
+        ).exclude(
+            Q(therapy_service__is_discarded=True)
+            | Q(program__therapy_program__is_discarded=True)
         ).aggregate(
             services_count=Count("pk"),
             services_active=Count("pk", filter=Q(is_active=True)),
@@ -543,18 +557,59 @@ class CustomerCompositeProgramSummaryView(CustomerProgramTypeSummaryView):
     program_type = ProgramType.COMPOSITE
 
 
-class CustomerTherapyProgramSummaryView(ExternalUserProgramSummaryView, CustomerProgramSummaryViewMeta):
+class CustomerTherapyProgramSummaryView(BaseRetrieveAPIView, CustomerProgramSummaryViewMeta):
     permission_classes = [IsCustomerUser]
+    serializer_class = CustomerProfileSummarySerializer
 
-    def get_customer_profile(self):
-        return CustomerProfileMeta.get_customer_profile(self)
+    def get_object(self):
+        customer_profile = self.get_customer_profile()
+        today = timezone.localdate()
+        summary = Program.objects.filter(
+            customer_profile=customer_profile,
+            program_type=ProgramType.THERAPY,
+            therapy_program__is_discarded=False,
+        ).aggregate(
+            programs_count=Count("pk"),
+            programs_expired=Count("pk", filter=Q(expires_at__lt=today)),
+            programs_inactive=Count("pk", filter=Q(is_active=False)),
+            programs_complete=Count(
+                "pk",
+                filter=Q(
+                    is_active=True,
+                    therapy_program__sessions_count=(
+                            F("therapy_program__sessions_used")
+                            + F("therapy_program__sessions_cancelled")
+                    ),
+                ),
+            ),
+            sessions_count=Coalesce(Sum("therapy_program__sessions_count"), 0),
+            sessions_used=Coalesce(Sum("therapy_program__sessions_used"), 0),
+            sessions_cancelled=Coalesce(Sum("therapy_program__sessions_cancelled"), 0),
+            sessions_expired=Coalesce(
+                Sum(
+                    F("therapy_program__sessions_count")
+                    - F("therapy_program__sessions_used"),
+                    filter=Q(expires_at__lt=today),
+                ),
+                0,
+            ),
+        )
+        for field, value in summary.items():
+            setattr(customer_profile, field, value)
+        return customer_profile
 
 
 class CustomerProgramsSummaryView(CustomerTherapyProgramSummaryView):
     def get(self, request, *args, **kwargs):
         customer_profile = self.get_customer_profile()
         totals = self.get_program_summary(customer_profile, None)
-        type_counts = Program.objects.filter(customer_profile=customer_profile).values("program_type").annotate(
+        type_counts = Program.objects.filter(
+            customer_profile=customer_profile,
+        ).exclude(
+            therapy_program__is_discarded=True
+        ).values(
+            "program_type"
+        ).annotate(
             count=Count("pk"),
         )
         totals["programs_by_type"] = {program_type: 0 for program_type in ProgramType.values}

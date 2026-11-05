@@ -8,7 +8,10 @@ from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.exceptions import NotFound
 
+from accounts.associates.models import AssociateRole
+from accounts.associates.utils.roles import assignment_active_roles
 from accounts.customers.models import CustomerProfile
+from accounts.users.models import User
 from accounts.users.utils.helper import calculate_age
 from core.utils.exceptions import bad_request
 from core.utils.models import BaseModelManager
@@ -829,6 +832,7 @@ class ProtocolDetailSerializer(serializers.Serializer):
 
 class ProtocolCurrentVersionSerializer(serializers.Serializer):
     id = serializers.UUIDField()
+    name = serializers.CharField()
     current_version_id = serializers.SerializerMethodField()
     version_name = serializers.SerializerMethodField()
     supplement_count = serializers.SerializerMethodField()
@@ -1083,16 +1087,59 @@ class LocalIsoDateTimeField(serializers.DateTimeField):
         return local_iso_datetime(value)
 
 
+def protocol_event_actor_roles(user: User) -> list[AssociateRole]:
+    associate = getattr(user, "associate", None)
+    if associate is None:
+        return []
+    roles = []
+    seen_role_ids = set()
+    for assignment in associate.center_assignments.all():
+        for role in assignment_active_roles(assignment):
+            if role.pk in seen_role_ids:
+                continue
+            seen_role_ids.add(role.pk)
+            roles.append(role)
+    return roles
+
+
+class ProtocolEventActorRoleSerializer(BaseModelSerializer):
+    class Meta:
+        model = AssociateRole
+        fields = ["id", "name"]
+
+
+class ProtocolEventActorSerializer(BaseSerializer):
+    name = serializers.SerializerMethodField()
+    roles = serializers.SerializerMethodField()
+
+    def get_name(self, user: User) -> str:
+        name_parts = [
+            name_part
+            for name_part in (user.first_name, user.last_name)
+            if name_part
+        ]
+        return " ".join(name_parts)
+
+    def get_roles(self, user: User) -> list:
+        return ProtocolEventActorRoleSerializer(
+            protocol_event_actor_roles(user),
+            many=True,
+        ).data
+
+
 class SupplementationProfileEventSerializer(serializers.Serializer):
     id = serializers.UUIDField()
     action = serializers.CharField()
+    actor = ProtocolEventActorSerializer(allow_null=True)
     reason = serializers.CharField(allow_null=True, allow_blank=True)
     client_visible = serializers.BooleanField()
     client_title = serializers.CharField(allow_null=True, allow_blank=True)
     change_type = serializers.CharField(allow_null=True, allow_blank=True)
     effective_on = serializers.DateField(allow_null=True)
     protocol_id = serializers.SerializerMethodField()
+    protocol_name = serializers.SerializerMethodField()
     protocol_version_id = serializers.SerializerMethodField()
+    protocol_version_number = serializers.SerializerMethodField()
     before = serializers.SerializerMethodField()
     after = serializers.SerializerMethodField()
     created_at = LocalIsoDateTimeField()
@@ -1111,10 +1158,20 @@ class SupplementationProfileEventSerializer(serializers.Serializer):
             return None
         return str(event.protocol.pk)
 
+    def get_protocol_name(self, event: ProtocolEvent) -> str | None:
+        if event.protocol is None:
+            return None
+        return event.protocol.name
+
     def get_protocol_version_id(self, event: ProtocolEvent) -> str | None:
         if event.protocol_version is None:
             return None
         return str(event.protocol_version.pk)
+
+    def get_protocol_version_number(self, event: ProtocolEvent) -> int | None:
+        if event.protocol_version is None:
+            return None
+        return event.protocol_version.version_number
 
     def get_before(self, event: ProtocolEvent):
         return present_event_snapshot(event.before, self.event_supplements(event))
@@ -1914,15 +1971,15 @@ class AiRecommendationItemSerializer(serializers.Serializer):
     origin = serializers.CharField(read_only=True)
     decision = serializers.CharField(read_only=True)
     supplement = AiRecommendationSupplementSerializer(read_only=True)
-    dosage = serializers.CharField(read_only=True)
-    frequency = serializers.CharField(read_only=True)
+    dosage = serializers.CharField(read_only=True, allow_null=True)
+    frequency = serializers.CharField(read_only=True, allow_null=True)
     custom_frequency = serializers.CharField(
         read_only=True,
         allow_null=True,
         allow_blank=True,
     )
-    timing = serializers.CharField(read_only=True)
-    duration = serializers.CharField(read_only=True)
+    timing = serializers.CharField(read_only=True, allow_null=True)
+    duration = serializers.CharField(read_only=True, allow_null=True)
     instructions = serializers.CharField(read_only=True)
     rationale = serializers.CharField(read_only=True)
     final_dosage = serializers.CharField(

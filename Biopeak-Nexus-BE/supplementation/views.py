@@ -16,6 +16,8 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.exceptions import NotFound
 
+from accounts.associates.models import AssociateCenterAssignment
+from accounts.associates.utils.roles import active_role_links_prefetch
 from accounts.customers.models import CustomerProfile
 from accounts.utils.permissions import IsAdminUser, IsAssociateUser, IsCustomerUser
 from core.utils.exceptions import get_object_or_404
@@ -218,9 +220,21 @@ class ProtocolEventViewMeta(BaseGenericAPIView):
     filter_kwargs = {}
 
     def get_protocol_event_queryset(self, *, action: str | None):
-        queryset = ProtocolEvent.objects.filter(**self.filter_kwargs).select_related(
-            "protocol",
-            "protocol_version",
+        queryset = (
+            ProtocolEvent.objects.filter(**self.filter_kwargs)
+            .select_related(
+                "protocol",
+                "protocol_version",
+                "actor__associate",
+            )
+            .prefetch_related(
+                Prefetch(
+                    "actor__associate__center_assignments",
+                    queryset=AssociateCenterAssignment.objects.filter(
+                        is_active=True,
+                    ).prefetch_related(active_role_links_prefetch()),
+                )
+            )
         )
         if action:
             queryset = queryset.filter(action=action)
@@ -604,7 +618,10 @@ class ProtocolEventListView(BaseListAPIView, ProtocolEventViewMeta):
         action = self.request.query_params.get("action", "").strip()
         if action and action not in ProtocolEventAction.values:
             self.raise_bad_request("Invalid action.")
-        self.filter_kwargs = {"protocol": protocol_id}
+        self.filter_kwargs = {
+            "protocol": protocol_id,
+            "protocol_version__isnull": False,
+        }
         return self.get_protocol_event_queryset(action=action or None)
 
 

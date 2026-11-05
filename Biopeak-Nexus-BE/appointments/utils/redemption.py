@@ -14,6 +14,7 @@ from appointments.utils.operations import invalidate_operations_cache
 from appointments.utils.transitions import sync_associate_status_snapshots
 from integrations.communications import schedule_queue_appointment_post_care
 from programs.models import (
+    Program,
     RedemptionHistory,
     TherapyProgram,
     TherapyProgramService,
@@ -82,6 +83,8 @@ def resolve_bookable_therapy_program_service(
     therapy_program_service = (
         TherapyProgramService.objects.filter(
             program_service__pk=program_service_id,
+            is_discarded=False,
+            program_service__program__therapy_program__is_discarded=False,
             program_service__program__customer_profile=customer_profile,
             program_service__service=service,
             program_service__is_active=True,
@@ -134,6 +137,8 @@ def therapy_program_services_for_customer_service(
     program_service_id=None,
 ):
     queryset = TherapyProgramService.objects.filter(
+        is_discarded=False,
+        program_service__program__therapy_program__is_discarded=False,
         program_service__program__customer_profile=customer_profile,
         program_service__service=service,
         program_service__is_active=True,
@@ -187,6 +192,17 @@ def ensure_customer_slot_within_therapy_programs(
         return
 
     if not queryset.exists():
+        discarded_services = TherapyProgramService.objects.filter(
+            Q(is_discarded=True)
+            | Q(program_service__program__therapy_program__is_discarded=True),
+            program_service__program__customer_profile=customer_profile,
+            program_service__service=service,
+            program_service__program__program_type=ProgramType.THERAPY,
+        )
+        if discarded_services.exists():
+            raise serializers.ValidationError(
+                {"program_service_id": ["No non-discarded therapy service is available."]}
+            )
         return
     covers_slot = Q(program_service__program__expires_at__isnull=True) | Q(
         program_service__program__expires_at__gte=slot_date
@@ -224,6 +240,8 @@ def schedule_appointment_redemption(appointment, redeemed_by):
     if appointment.program_service is None:
         return None
 
+    ensure_therapy_service_center(appointment.program_service, appointment.center.pk)
+
     program_service_pk = appointment.program_service.pk
     therapy_program_service = TherapyProgramService.objects.filter(
         program_service__pk=program_service_pk
@@ -245,15 +263,22 @@ def schedule_appointment_redemption(appointment, redeemed_by):
 
 def increment_therapy_sessions_used(program_service_id, quantity):
     """Burn sessions without exceeding the remaining allowance. Returns rows updated."""
+    Program.objects.filter(program_services__pk=program_service_id).update(
+        updated_at=timezone.localtime(),
+    )
     updated = (
-        TherapyProgramService.objects.filter(program_service__pk=program_service_id)
+        TherapyProgramService.objects.filter(
+            program_service__pk=program_service_id, is_discarded=False,
+        )
+        .exclude(program_service__program__therapy_program__is_discarded=True)
         .filter(sessions_used__lte=F("sessions_count") - quantity)
         .update(sessions_used=F("sessions_used") + quantity)
     )
     if updated != 1:
         return 0
     TherapyProgram.objects.filter(
-        program__program_services__pk=program_service_id
+        program__program_services__pk=program_service_id, is_discarded=False,
+        program__program_services__therapy_service__is_discarded=False,
     ).update(sessions_used=F("sessions_used") + quantity)
     return updated
 

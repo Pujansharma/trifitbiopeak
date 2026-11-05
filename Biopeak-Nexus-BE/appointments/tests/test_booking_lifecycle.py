@@ -1,4 +1,5 @@
 from datetime import date, datetime, time, timedelta
+from unittest.mock import patch
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -16,7 +17,11 @@ from accounts.associates.models import (
     AssociateRole,
 )
 from accounts.centers.models import Center, CenterOperatingHour
-from accounts.customers.models import Customer, CustomerCenterAssignment, CustomerProfile
+from accounts.customers.models import (
+    Customer,
+    CustomerCenterAssignment,
+    CustomerProfile,
+)
 from accounts.models import UserAccount
 from accounts.users.models import User
 from accounts.utils.constants import UserType
@@ -29,6 +34,7 @@ from appointments.models import (
     CareTeamAvailabilityBlock,
 )
 from appointments.serializers.booking import (
+    CUSTOMER_BOOKING_WINDOW_MESSAGE,
     AppointmentBookSerializer,
     AppointmentCancelSerializer,
     AppointmentDetailSerializer,
@@ -38,6 +44,11 @@ from appointments.serializers.booking import (
     AppointmentSlotFindSerializer,
 )
 from appointments.serializers.care_teams import CenterCareTeamSerializer
+from appointments.tests.test_customer_appointment_auth import (
+    create_therapy_program_service,
+    next_weekday_slot_date,
+)
+from appointments.utils.calendar import get_center_timezone_name
 from appointments.utils.constants import (
     AppointmentAuditAction,
     AppointmentStatus,
@@ -67,6 +78,8 @@ from appointments.utils.transitions import validate_transition
 from appointments.views.booking import (
     AppointmentAuditLogListView,
     AppointmentBookView,
+    AppointmentRescheduleView,
+    AppointmentSlotFindView,
 )
 from core.utils.constants import AppointmentModes
 from inventory.models import Equipment, EquipmentType, Room, RoomType
@@ -77,6 +90,7 @@ from programs.services.models import (
     Service,
 )
 from programs.services.utils.constants import ServiceCategory
+
 
 def serialized_audit_datetime(value):
     return DateTimeField().to_representation(value)
@@ -194,6 +208,11 @@ def first_slot(slots_payload):
 
 def parse_slot_datetimes(slot):
     return datetime.fromisoformat(slot["start"]), datetime.fromisoformat(slot["end"])
+
+
+def service_window_from_slot(slot, duration_minutes):
+    start = datetime.fromisoformat(slot["start"])
+    return start, start + timedelta(minutes=duration_minutes)
 
 
 def assert_slot_has_no_pin_keys(test_case, slot):
@@ -393,7 +412,7 @@ class BookingWorldTests(TestCase):
         }
 
     def book_virtual_payload(self, slot, preferred=None):
-        start, end = parse_slot_datetimes(slot)
+        start, end = service_window_from_slot(slot, self.assignment.duration)
         payload = {
             "customer_profile_id": str(self.customer_profile.pk),
             "service_id": str(self.service.pk),
@@ -471,7 +490,7 @@ class BookingHappyPathTests(BookingWorldTests):
         }
         slots_payload = find_slots(self.center, payload)
         slot = first_slot(slots_payload)
-        start, end = parse_slot_datetimes(slot)
+        start, end = service_window_from_slot(slot, self.assignment.duration)
         appointment = book_appointment(
             self.center,
             self.actor,
@@ -569,6 +588,74 @@ class BookingHappyPathTests(BookingWorldTests):
         self.assertNotIn("doctor", slot)
         self.assertNotIn("specialty", slot)
 
+    def test_staff_slots_step_fifteen_minutes_and_fit_service(self):
+        zone = ZoneInfo(get_center_timezone_name(self.center))
+        slot_date = next_weekday_slot_date()
+        AssociateRosterEntry.objects.filter(center=self.center).update(
+            end_time=time(20, 0)
+        )
+        self.assignment.duration = 45
+        self.assignment.buffer_before = 0
+        self.assignment.buffer_after = 0
+        self.assignment.save(
+            update_fields=["duration", "buffer_before", "buffer_after"]
+        )
+        payload = self.virtual_slot_payload()
+        payload["date"] = slot_date.isoformat()
+        slots = find_slots(self.center, payload)["slots"]
+        starts = [
+            datetime.fromisoformat(slot["start"]).astimezone(zone) for slot in slots
+        ]
+        self.assertEqual(starts[0].time(), time(9, 0))
+        self.assertEqual(starts[-1].time(), time(17, 15))
+        self.assertEqual(starts[1] - starts[0], timedelta(minutes=15))
+        self.assertEqual(
+            datetime.fromisoformat(slots[0]["end"])
+            - datetime.fromisoformat(slots[0]["start"]),
+            timedelta(minutes=15),
+        )
+        start_times = [item.time() for item in starts]
+        self.assertNotIn(time(17, 30), start_times)
+        self.assertNotIn(time(17, 45), start_times)
+
+        self.assignment.duration = 25
+        self.assignment.save(update_fields=["duration"])
+        slots = find_slots(self.center, payload)["slots"]
+        starts = [
+            datetime.fromisoformat(slot["start"]).astimezone(zone) for slot in slots
+        ]
+        self.assertEqual(starts[-1].time(), time(17, 30))
+        start_times = [item.time() for item in starts]
+        self.assertNotIn(time(17, 45), start_times)
+        self.assertNotIn(time(18, 0), start_times)
+
+        self.assignment.duration = 60
+        self.assignment.buffer_after = 30
+        self.assignment.save(update_fields=["duration", "buffer_after"])
+        booked_start = datetime.combine(slot_date, time(10, 30), tzinfo=zone)
+        book_appointment(
+            self.center,
+            self.actor,
+            {
+                "customer_profile_id": str(self.customer_profile.pk),
+                "service_id": str(self.service.pk),
+                "modality": AppointmentModes.VIRTUAL,
+                "start": booked_start.isoformat(),
+                "end": (booked_start + timedelta(minutes=60)).isoformat(),
+                **self.virtual_preferred,
+            },
+        )
+        slots = find_slots(self.center, payload)["slots"]
+        start_times = [
+            datetime.fromisoformat(slot["start"]).astimezone(zone).time()
+            for slot in slots
+        ]
+        self.assertIn(time(9, 0), start_times)
+        self.assertNotIn(time(9, 15), start_times)
+        self.assertNotIn(time(10, 30), start_times)
+        self.assertIn(time(12, 0), start_times)
+        self.assertEqual(start_times[-1], time(16, 30))
+
 
 class BookingValidationTests(BookingWorldTests):
     def test_find_slots_rejects_past_date(self):
@@ -582,6 +669,61 @@ class BookingValidationTests(BookingWorldTests):
                 },
             )
         self.assertIn("Date cannot be in the past.", drf_error_text(raised.exception))
+
+    def open_past_date(self):
+        past_date = timezone.localdate() - timedelta(days=1)
+        while past_date.weekday() == 6:
+            past_date -= timedelta(days=1)
+        return past_date
+
+    def post_find_slots(self, user, payload):
+        factory = APIRequestFactory()
+        request = factory.post(
+            f"/centers/{self.center.pk}/appointments/slots/",
+            payload,
+            format="json",
+        )
+        force_authenticate(request, user=user)
+        return AppointmentSlotFindView.as_view()(
+            request, center_id=self.center.pk
+        )
+
+    def test_staff_find_slots_returns_past_starts(self):
+        past_date = self.open_past_date()
+        payload = self.virtual_slot_payload()
+        payload["date"] = past_date.isoformat()
+        for account_type in (UserType.ASSOCIATE, UserType.ADMIN):
+            UserAccount.objects.update_or_create(
+                user=self.actor,
+                defaults={"account_type": account_type},
+            )
+            response = self.post_find_slots(self.actor, payload)
+            self.assertEqual(response.status_code, 200, response.data)
+            slots = response.data["data"]["slots"]
+            self.assertGreater(len(slots), 0)
+            now = timezone.now()
+            self.assertTrue(
+                all(
+                    datetime.fromisoformat(slot["start"]) < now
+                    for slot in slots
+                )
+            )
+
+    def test_customer_find_slots_rejects_past_date(self):
+        customer_user = self.customer_profile.customer.user
+        UserAccount.objects.create(
+            user=customer_user,
+            account_type=UserType.CUSTOMER,
+        )
+        payload = {
+            "customer_profile_id": str(self.customer_profile.pk),
+            "service_id": str(self.service.pk),
+            "modality": AppointmentModes.VIRTUAL,
+            "date": self.open_past_date().isoformat(),
+        }
+        response = self.post_find_slots(customer_user, payload)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Date cannot be in the past.", str(response.data))
 
     def test_find_slots_requires_preferred(self):
         with self.assertRaises(DRFValidationError) as raised:
@@ -733,7 +875,7 @@ class BookingValidationTests(BookingWorldTests):
         self.assertEqual(slot["equipment"]["name"], equipment.name)
         self.assertEqual(slot["room"]["id"], str(self.room.pk))
         assert_slot_has_no_pin_keys(self, slot)
-        start, end = parse_slot_datetimes(slot)
+        start, end = service_window_from_slot(slot, self.assignment.duration)
         appointment = book_appointment(
             self.center,
             self.actor,
@@ -786,7 +928,7 @@ class BookingValidationTests(BookingWorldTests):
         self.assertEqual(slot["equipment"]["id"], str(second.pk))
         self.assertEqual(slot["equipment"]["name"], second.name)
         assert_slot_has_no_pin_keys(self, slot)
-        start, end = parse_slot_datetimes(slot)
+        start, end = service_window_from_slot(slot, self.assignment.duration)
         appointment = book_appointment(
             self.center,
             self.actor,
@@ -973,7 +1115,7 @@ class LifecycleTests(BookingWorldTests):
             self.center, self.actor, self.book_virtual_payload(first_slot_row)
         )
         original_start = appointment.start_datetime
-        start, end = parse_slot_datetimes(later_slot)
+        start, end = service_window_from_slot(later_slot, self.assignment.duration)
         appointment = reschedule_appointment(
             self.center,
             appointment,
@@ -1439,6 +1581,132 @@ class PastDirectBookingTests(BookingWorldTests):
             "specialty_id": str(self.coach.pk),
         }
 
+    def post_book(self, user, payload):
+        factory = APIRequestFactory()
+        request = factory.post(
+            f"/centers/{self.center.pk}/appointments/",
+            payload,
+            format="json",
+        )
+        force_authenticate(request, user=user)
+        return AppointmentBookView.as_view()(
+            request, center_id=self.center.pk
+        )
+
+    @patch(
+        "appointments.serializers.booking.schedule_queue_appointment_confirmed"
+    )
+    def test_staff_book_accepts_historical_start(self, queue_confirmed):
+        base_start = datetime(2026, 9, 14, 10, 0, tzinfo=KOLKATA)
+        for index, account_type in enumerate(
+            (UserType.ASSOCIATE, UserType.ADMIN)
+        ):
+            UserAccount.objects.update_or_create(
+                user=self.actor,
+                defaults={"account_type": account_type},
+            )
+            start = base_start + timedelta(hours=index)
+            payload = self.historical_payload()
+            payload["start"] = start.isoformat()
+            payload["end"] = (start + timedelta(minutes=30)).isoformat()
+            response = self.post_book(self.actor, payload)
+            self.assertEqual(response.status_code, 201, response.data)
+            self.assertTrue(
+                Appointment.objects.filter(
+                    customer_profile=self.customer_profile,
+                    start_datetime=start,
+                    status=AppointmentStatus.CONFIRMED,
+                ).exists()
+            )
+        queue_confirmed.assert_not_called()
+
+    def future_open_window(self):
+        slot_date = timezone.localdate() + timedelta(days=1)
+        while slot_date.weekday() == 6:
+            slot_date += timedelta(days=1)
+        start = datetime.combine(slot_date, time(10, 0), tzinfo=KOLKATA)
+        return start, start + timedelta(minutes=30)
+
+    def post_reschedule(self, user, appointment_id, payload):
+        factory = APIRequestFactory()
+        request = factory.post(
+            f"/centers/{self.center.pk}/appointments/{appointment_id}/reschedule/",
+            payload,
+            format="json",
+        )
+        force_authenticate(request, user=user)
+        return AppointmentRescheduleView.as_view()(
+            request,
+            center_id=self.center.pk,
+            pk=appointment_id,
+        )
+
+    def test_staff_reschedule_rejects_historical_start(self):
+        UserAccount.objects.create(
+            user=self.actor,
+            account_type=UserType.ASSOCIATE,
+        )
+        start, end = self.future_open_window()
+        payload = self.historical_payload()
+        payload["start"] = start.isoformat()
+        payload["end"] = end.isoformat()
+        booked = self.post_book(self.actor, payload)
+        self.assertEqual(booked.status_code, 201, booked.data)
+        response = self.post_reschedule(
+            self.actor,
+            booked.data["data"]["id"],
+            self.historical_payload(),
+        )
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn("Date cannot be in the past.", str(response.data))
+        appointment = Appointment.objects.get(pk=booked.data["data"]["id"])
+        self.assertEqual(appointment.start_datetime, start)
+
+    def test_customer_book_rejects_historical_start(self):
+        therapy_program_service = create_therapy_program_service(
+            self.customer_profile, self.center, self.service
+        )
+        program = therapy_program_service.program_service.program
+        program.redeemable_centers.add(self.center)
+        therapy_program_service.redeemable_centers.add(self.center)
+        customer_user = self.customer_profile.customer.user
+        UserAccount.objects.create(
+            user=customer_user,
+            account_type=UserType.CUSTOMER,
+        )
+        payload = self.historical_payload()
+        payload["program_service_id"] = str(
+            therapy_program_service.program_service_id
+        )
+        response = self.post_book(customer_user, payload)
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn("Date cannot be in the past.", str(response.data))
+        self.assertFalse(
+            Appointment.objects.filter(
+                customer_profile=self.customer_profile,
+                start_datetime=datetime(2026, 9, 14, 10, 0, tzinfo=KOLKATA),
+            ).exists()
+        )
+
+    def test_staff_program_service_historical_start_uses_booking_window(self):
+        therapy_program_service = create_therapy_program_service(
+            self.customer_profile, self.center, self.service
+        )
+        program = therapy_program_service.program_service.program
+        program.redeemable_centers.add(self.center)
+        therapy_program_service.redeemable_centers.add(self.center)
+        UserAccount.objects.create(
+            user=self.actor,
+            account_type=UserType.ASSOCIATE,
+        )
+        payload = self.historical_payload()
+        payload["program_service_id"] = str(
+            therapy_program_service.program_service_id
+        )
+        response = self.post_book(self.actor, payload)
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn(CUSTOMER_BOOKING_WINDOW_MESSAGE, str(response.data))
+
     def test_book_rejects_historical_start(self):
         serializer = AppointmentBookSerializer(
             data=self.historical_payload(),
@@ -1449,11 +1717,11 @@ class PastDirectBookingTests(BookingWorldTests):
         self.assertIn("Date cannot be in the past.", drf_error_text(raised.exception))
 
     def test_reschedule_rejects_historical_start(self):
-        slots_payload = find_slots(self.center, self.virtual_slot_payload())
-        slot = first_slot(slots_payload)
-        appointment = book_appointment(
-            self.center, self.actor, self.book_virtual_payload(slot)
-        )
+        start, end = self.future_open_window()
+        payload = self.historical_payload()
+        payload["start"] = start.isoformat()
+        payload["end"] = end.isoformat()
+        appointment = book_appointment(self.center, self.actor, payload)
         serializer = AppointmentRescheduleSerializer(
             appointment,
             data=self.historical_payload(),

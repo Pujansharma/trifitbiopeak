@@ -1,0 +1,23 @@
+meta {
+  name: GET Browser State Callback
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseURL}}/r/{{rook_state_token}}/client_uuid/{{rook_client_uuid}}/user_id/{{rook_user_id}}/
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Public callback used by ROOK after authorization. Only use a valid one-time state and identifiers from a genuine connect flow; querying does not itself authorize a connection.
+}

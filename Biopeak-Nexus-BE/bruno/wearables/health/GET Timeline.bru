@@ -1,0 +1,23 @@
+meta {
+  name: GET Health Timeline
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseURL}}/api/v1/health/timeline/?offset=0&limit=50
+  body: none
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Paginated health timeline. Optional start and end ISO dates and domain filter.
+}

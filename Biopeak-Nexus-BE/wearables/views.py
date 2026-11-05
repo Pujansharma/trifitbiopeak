@@ -47,7 +47,7 @@ class WearablesAPIView(BaseGenericAPIView):
     permission_classes = (IsCustomerUser,)
 
     def ensure_wearables_enabled(self) -> None:
-        if not getattr(settings, "WEARABLES_ENABLED", True):
+        if not getattr(settings, "WEARABLES_ENABLED", False):
             raise NotFound("Wearable integration is not enabled.")
 
     def ensure_profile_feature_enabled(self, customer_profile) -> None:

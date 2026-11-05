@@ -533,11 +533,14 @@ class AiRecommendationItem(BaseUUIDModel):
         max_length=32,
         default=AiRecommendationItemDecision.PENDING,
     )
-    dosage = models.TextField()
-    frequency = models.CharField(max_length=32)
+    # Null dose fields mean a held item: Luma would not dose this product.
+    # ponytail: the parser enforces all-or-none nulls; add a CheckConstraint if
+    # anything other than the Luma worker writes these rows.
+    dosage = models.TextField(null=True, blank=True)
+    frequency = models.CharField(max_length=32, null=True, blank=True)
     custom_frequency = models.TextField(null=True, blank=True)
-    timing = models.CharField(max_length=32)
-    duration = models.TextField()
+    timing = models.CharField(max_length=32, null=True, blank=True)
+    duration = models.TextField(null=True, blank=True)
     instructions = models.TextField()
     rationale = models.TextField()
     final_dosage = models.TextField(null=True, blank=True)
@@ -565,11 +568,13 @@ class AiRecommendationItem(BaseUUIDModel):
                 name="ai_item_decision_valid",
             ),
             models.CheckConstraint(
-                condition=models.Q(frequency__in=ProtocolItemFrequency.values),
+                condition=models.Q(frequency__isnull=True)
+                | models.Q(frequency__in=ProtocolItemFrequency.values),
                 name="ai_item_frequency_valid",
             ),
             models.CheckConstraint(
-                condition=models.Q(timing__in=ProtocolItemTiming.values),
+                condition=models.Q(timing__isnull=True)
+                | models.Q(timing__in=ProtocolItemTiming.values),
                 name="ai_item_timing_valid",
             ),
             models.CheckConstraint(

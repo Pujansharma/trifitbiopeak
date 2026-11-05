@@ -41,9 +41,9 @@ class ResultRequestFilesSerializer(BaseModelSerializer):
     def get_files(self, instance):
         files = getattr(instance, "preview_files", None)
         if files is None:
-            files = instance.files.all()[:3]
+            files = instance.files.all()
         return ResultRequestFileSerializer(
-            files, many=True, context=self.context
+            files[:5], many=True, context=self.context
         ).data
 
 
@@ -73,10 +73,10 @@ class BaseServiceSerializer(BaseModelSerializer):
         if assignments is None:
             assignments = instance.center_assignments.filter(
                 is_active=True,
-            ).select_related("center")[:3]
+            ).select_related("center")[:5]
         if not assignments:
             return None
-        centers = [assignment.center for assignment in assignments[:3]]
+        centers = [assignment.center for assignment in assignments[:5]]
         return BaseCenterSerializer(centers, many=True, context=self.context).data
 
 
@@ -131,7 +131,7 @@ class BaseServiceSerializerMeta(BaseSerializer):
 
     def get_centers(self, instance):
         center_assignments = getattr(instance, "center_assignments")
-        assignments = center_assignments.all()[:3]
+        assignments = center_assignments.all()[:5]
         centers = [asg.center for asg in assignments]
         return MinimumCenterSerializer(centers, many=True, context=self.context).data
 

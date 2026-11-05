@@ -1,0 +1,30 @@
+meta {
+  name: POST Retry Sync
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseURL}}/api/v1/devices/retry-sync/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "data_source": "{{rook_data_source}}"
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Enqueues a recovery pull; the separate ECS recovery task must be scheduled or the job remains pending.
+}

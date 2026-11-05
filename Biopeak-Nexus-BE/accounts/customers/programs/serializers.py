@@ -12,7 +12,8 @@ from products.serializers import BaseProductSerializer
 from programs.composites.models import CompositeTemplate, CompositeTemplateService
 from programs.composites.serializers import (
     BaseCompositeTemplateSerializer,
-    CompositeTherapyServiceCentersSerializer,
+    CompositeProgramValidationMixin,
+    CompositeTherapyServiceSelectionSerializer,
 )
 from programs.composites.utils.constants import CompositeAssessmentType
 from programs.composites.utils.db import (
@@ -20,8 +21,7 @@ from programs.composites.utils.db import (
     update_composite_program_service_counts,
 )
 from programs.composites.validators import (
-    validate_composite_therapy_centers,
-    validate_therapy_template_quantities,
+    get_invalid_therapy_quantity_identifiers,
 )
 from programs.models import (
     CompositeProgram,
@@ -31,16 +31,16 @@ from programs.models import (
     TherapyProgramService,
 )
 from programs.serializers import AssignedProgramServiceSerializer
-from programs.therapy.serializers import (
-    TherapyCenterAdditionSerializer,
-    TherapyProgramSerializer,
-)
 from programs.services.models import ServiceDocument, ServiceResult
 from programs.services.serializers import (
     BaseServiceDocumentModuleCategorySerializer,
     BaseServiceSerializer,
 )
 from programs.services.utils.constants import ServiceCategory
+from programs.therapy.serializers import (
+    TherapyCenterAdditionSerializer,
+    TherapyProgramSerializer,
+)
 from programs.utils.constants import ProgramType, ServiceAssignment
 from programs.utils.db import (
     update_program_redeemable_centers_count,
@@ -112,6 +112,8 @@ class CustomerTherapyProgramSerializer(TherapyProgramSerializer):
             "created_at",
             "updated_at",
             "is_active",
+            "is_discarded",
+            "discarded_by",
             "created_by",
         ]
         read_only_fields = ["sessions_count", "sessions_used", "sessions_cancelled", "is_active"]
@@ -141,6 +143,8 @@ class CustomerTherapyActiveAppointmentSerializer(BaseSerializer):
 
 
 class CustomerTherapyProgramServiceSerializer(BaseModelSerializer):
+    is_discarded = serializers.BooleanField(read_only=True)
+    discarded_by = BaseUserSerializer(read_only=True)
     id = serializers.UUIDField(source="program_service.pk", read_only=True)
     service = CustomerProgramServiceSerializer(
         source="program_service", read_only=True
@@ -173,6 +177,8 @@ class CustomerTherapyProgramServiceSerializer(BaseModelSerializer):
             "cancelled_at",
             "cancelled_date",
             "active_appointment",
+            "is_discarded",
+            "discarded_by",
         ]
 
     def get_active_appointment(self, instance):
@@ -299,13 +305,12 @@ class CustomerCompositeProgramServiceListSerializer(BaseModelSerializer):
             "updated_at",
         ]
 
-
     def get_redeemable_centers(self, instance: ProgramService):
         therapy_service = getattr(instance, "therapy_service", None)
         if therapy_service is None:
             return []
         return MinimumCenterSerializer(
-            therapy_service.redeemable_centers.all(), many=True,
+            getattr(therapy_service, "redeemable_center_preview", [])[:5], many=True,
         ).data
 
 
@@ -319,9 +324,15 @@ class CustomerCompositeProgramServiceSerializer(BaseModelSerializer):
         read_only=True,
     )
     can_redeem = serializers.BooleanField(default=True, read_only=True)
-    sessions_count = serializers.SerializerMethodField(read_only=True)
-    sessions_used = serializers.SerializerMethodField(read_only=True)
-    sessions_cancelled = serializers.SerializerMethodField(read_only=True)
+    sessions_count = serializers.IntegerField(
+        source="therapy_service.sessions_count", read_only=True, default=None,
+    )
+    sessions_used = serializers.IntegerField(
+        source="therapy_service.sessions_used", read_only=True, default=None,
+    )
+    sessions_cancelled = serializers.IntegerField(
+        source="therapy_service.sessions_cancelled", read_only=True, default=None,
+    )
     redeem_code = serializers.SerializerMethodField(read_only=True)
     cancellation_reason = serializers.CharField(read_only=True, allow_null=True)
     cancelled_by = BaseUserSerializer(read_only=True)
@@ -373,24 +384,13 @@ class CustomerCompositeProgramServiceSerializer(BaseModelSerializer):
         if therapy_service is None:
             return []
         return MinimumCenterSerializer(
-            therapy_service.redeemable_centers.all(), many=True,
+            getattr(therapy_service, "redeemable_center_preview", [])[:5], many=True,
         ).data
 
-    def get_sessions_count(self, instance: ProgramService):
-        therapy_program_service = getattr(instance, "therapy_service", None)
-        return getattr(therapy_program_service, "sessions_count", None)
 
-    def get_sessions_used(self, instance: ProgramService):
-        therapy_program_service = getattr(instance, "therapy_service", None)
-        return getattr(therapy_program_service, "sessions_used", None)
-
-    def get_sessions_cancelled(self, instance: ProgramService):
-        therapy_program_service = getattr(instance, "therapy_service", None)
-        return getattr(therapy_program_service, "sessions_cancelled", None)
-
-
-class CustomerCompositeProgramSerializer(BaseModelSerializer):
-    therapy_service_centers = CompositeTherapyServiceCentersSerializer(
+class CustomerCompositeProgramSerializer(CompositeProgramValidationMixin, BaseModelSerializer):
+    therapy_redemption_is_global = serializers.BooleanField(required=False)
+    therapy_services = CompositeTherapyServiceSelectionSerializer(
         many=True, required=False, write_only=True,
     )
     id = serializers.UUIDField(source="pk", read_only=True)
@@ -429,10 +429,17 @@ class CustomerCompositeProgramSerializer(BaseModelSerializer):
         allow_null=True,
         allow_blank=True,
     )
-    expires_at = serializers.DateField(source="program.expires_at", required=False)
+    expires_at = serializers.DateField(
+        source="program.expires_at", required=False, allow_null=True,
+    )
     is_complimentary = serializers.BooleanField(
         source="program.is_complimentary",
         default=True,
+    )
+    is_credit = serializers.BooleanField(source="program.is_credit", default=False)
+    credit_received = serializers.DecimalField(
+        source="program.credit_received", max_digits=10, decimal_places=2,
+        min_value=0, required=False, allow_null=True,
     )
     price = serializers.DecimalField(
         source="program.price",
@@ -444,8 +451,8 @@ class CustomerCompositeProgramSerializer(BaseModelSerializer):
     redeemable_centers = CustomerCompositeProgramCenterSerializer(
         source="program.redeemable_centers",
         many=True,
-        required=True,
-        allow_empty=False,
+        required=False,
+        allow_empty=True,
     )
     services = serializers.SerializerMethodField(read_only=True)
     services_count = serializers.IntegerField(
@@ -501,13 +508,16 @@ class CustomerCompositeProgramSerializer(BaseModelSerializer):
             "center",
             "composite_template",
             "composite_template_id",
-            "therapy_service_centers",
+            "therapy_services",
             "program_type",
             "notes",
             "expires_at",
             "is_complimentary",
+            "is_credit",
+            "credit_received",
             "price",
             "redeemable_centers",
+            "therapy_redemption_is_global",
             "redeemable_centers_count",
             "services",
             "services_count",
@@ -532,7 +542,7 @@ class CustomerCompositeProgramSerializer(BaseModelSerializer):
 
     def create(self, validated_data: dict):
         name = validated_data.get("name")
-        therapy_service_centers = validated_data.pop("therapy_service_centers", [])
+        therapy_services = validated_data.pop("therapy_services", [])
         if not name:
             validated_data["name"] = None
         customer_profile = validated_data.pop("customer_profile")
@@ -542,19 +552,16 @@ class CustomerCompositeProgramSerializer(BaseModelSerializer):
             "composite_template_id"
         )
         program_data = validated_data.pop("program", {})
-        redeemable_center_data = program_data.pop("redeemable_centers")
+        redeemable_center_data = program_data.pop("redeemable_centers", [])
+        if validated_data.get("therapy_redemption_is_global"):
+            redeemable_center_data = []
         expires_at = program_data.get("expires_at")
-        is_complimentary = program_data.get("is_complimentary", True)
-        price = program_data.get("price")
 
         if expires_at and expires_at < timezone.localdate():
             raise serializers.ValidationError(
                 {"expires_at": "Expiry date cannot be earlier than today's date."}
             )
-        if not is_complimentary and price is None:
-            raise serializers.ValidationError(
-                {"price": "Price is required when program is not complimentary."}
-            )
+        self._validate_composite_program_metadata(program_data)
 
         center_identifiers = {
             center_data["id"] for center_data in redeemable_center_data
@@ -617,13 +624,21 @@ class CustomerCompositeProgramSerializer(BaseModelSerializer):
                 {"composite_template_id": "Composite template has no active services."}
             )
 
-        validate_therapy_template_quantities(
-            (
-                (template_service.service, template_service.quantity)
-                for template_service in template_services
-            ),
-            "composite_template_id",
+        service_quantities = []
+        for template_service in template_services:
+            service_quantities.append((template_service.service, template_service.quantity))
+        invalid_quantity_identifiers = get_invalid_therapy_quantity_identifiers(
+            service_quantities,
         )
+        if invalid_quantity_identifiers:
+            raise serializers.ValidationError(
+                {
+                    "composite_template_id": (
+                        "A positive quantity is required for therapy services: "
+                        f"{', '.join(sorted(invalid_quantity_identifiers))}."
+                    )
+                }
+            )
         has_assessment_service = any(
             template_service.service.service_category
             == ServiceCategory.ASSESSMENT
@@ -639,9 +654,17 @@ class CustomerCompositeProgramSerializer(BaseModelSerializer):
                 }
             )
 
-        centers_by_service = validate_composite_therapy_centers(
-            therapy_service_centers, template_services, centers_by_primary_key,
+        is_global = validated_data.get(
+            "therapy_redemption_is_global", not centers_by_primary_key,
         )
+        centers_by_service = self._validate_composite_therapy_centers(
+            therapy_services,
+            template_services,
+            centers_by_primary_key,
+            customer_profile,
+            is_global,
+        )
+        validated_data["therapy_redemption_is_global"] = is_global
         service_centers = []
         for template_service in template_services:
             service_centers.append(centers_by_service.get(template_service.service.pk, []))
@@ -700,7 +723,7 @@ class CustomerCompositeProgramSerializer(BaseModelSerializer):
         if not program_services:
             return None
         return CustomerCompositeProgramServiceSerializer(
-            program_services,
+            program_services[:5],
             many=True,
             context=self.context,
         ).data

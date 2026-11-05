@@ -275,19 +275,21 @@ POST /centers/<center_id>/appointments/slots/
 - **Expected data**: `slots` is empty
 - **Expected data**: This is not an API error
 
-### SLOT-08: Past date
+### SLOT-08: Staff walk-in past date
 
 - **Priority**: P0
-- **Request**: Use yesterday in the center timezone
-- **Expected status**: `400`
-- **Expected detail**: `Date cannot be in the past.`
+- **Request**: Staff token. Use yesterday in the center timezone. Omit `program_service_id`
+- **Expected status**: `200`
+- **Expected data**: Slots for that open day, including starts before the request time
+- **Customer JWT**: same date → `400` `"Date cannot be in the past."`
+- **Staff with `program_service_id`**: same date → `400` slot-window message, not the past-date message
 
-### SLOT-09: Today removes elapsed starts
+### SLOT-09: Staff today keeps elapsed starts
 
 - **Priority**: P1
-- **Request**: Use today
+- **Request**: Staff token. Use today. Omit `program_service_id`
 - **Expected status**: `200`
-- **Expected data**: Every returned slot starts at or after the request time
+- **Expected data**: Returned slots may start before the request time
 
 ### SLOT-10: Missing preferred object
 
@@ -465,7 +467,7 @@ Endpoint:
 POST /centers/<center_id>/appointments/
 ```
 
-Use `start` and `end` from Find Slots. Move nested slot IDs to top-level booking fields.
+Staff Find Slots: use `start` from the slot. Set book `end` to `start` plus `duration_minutes` (the slot `end` is 15 minutes later). Customer auto-assign: use `start` and `end` from Find Slots. Move nested slot IDs to top-level booking fields.
 
 ### Base booking request
 
@@ -586,13 +588,16 @@ Use `start` and `end` from Find Slots. Move nested slot IDs to top-level booking
 - **Expected data**: Appointment remains saved
 - **Expected side effect**: Notification work is skipped or failed separately
 
-### BOOK-14: Direct booking in the past
+### BOOK-14: Staff walk-in booking in the past
 
 - **Priority**: P0
-- **Request**: Send valid historical times without using Find Slots
-- **Expected status**: `400`
-- **Expected data**: No historical appointment is created
-- **Defect rule**: File a defect if booking succeeds
+- **Request**: Staff token. Send valid historical times. Omit `program_service_id`
+- **Expected status**: `201`
+- **Expected data**: Confirmed appointment at those times
+- **Expected side effect**: No confirm WhatsApp / Google Calendar outbox enqueue
+- **Customer JWT**: same times → `400` `"Date cannot be in the past."`
+- **Staff with `program_service_id`**: same times → `400` `"Start must be between 4 hours and 7 days from now."`
+- **Reschedule**: any caller, including staff walk-in, new `start` in the past → `400` `"Date cannot be in the past."`
 
 ## 7. List and view appointments
 

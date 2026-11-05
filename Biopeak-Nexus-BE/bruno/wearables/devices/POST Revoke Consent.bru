@@ -1,0 +1,28 @@
+meta {
+  name: POST Revoke Consent
+  type: http
+  seq: 8
+}
+
+post {
+  url: {{baseURL}}/api/v1/devices/consent/revoke/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+  Content-Type: application/json
+}
+
+body:json {
+  {}
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Member privacy opt-out. Works even after wearable feature rollout is disabled; retained historical health records are not deleted.
+}

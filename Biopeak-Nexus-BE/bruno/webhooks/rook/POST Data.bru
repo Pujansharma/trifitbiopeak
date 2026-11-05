@@ -1,0 +1,38 @@
+meta {
+  name: POST ROOK Data Webhook
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseURL}}/webhooks/rook/data/
+  body: json
+  auth: none
+}
+
+headers {
+  Accept: application/json
+  Content-Type: application/json
+  X-ROOK-HASH: {{rook_webhook_hash}}
+}
+
+body:json {
+  {
+    "client_uuid": "{{rook_client_uuid}}",
+    "user_id": "{{rook_user_id}}",
+    "metadata": {"datetime_string": "2026-11-04T10:00:00Z"},
+    "datetime": "2026-11-04T10:00:00Z",
+    "data_structure": "physical_health_summary",
+    "document_version": 1,
+    "source_of_data_string": "{{rook_data_source}}",
+    "accumulated_steps_int": 5000
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Illustrative envelope only: replace with an actual ROOK data document for ingestion. X-ROOK-HASH = HMAC-SHA256(ROOK_WEBHOOK_HASH_KEY, client_uuid + user_id + metadata.datetime_string), lower-case hex. Sending a placeholder or invalid signature will fail; no ROOK secret is stored here.
+}

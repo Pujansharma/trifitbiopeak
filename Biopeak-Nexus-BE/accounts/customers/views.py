@@ -412,7 +412,7 @@ class CustomerAvailableAssociateView(BaseListAPIView):
                     F("associate__user__last_name"),
                 ),
             )
-            .filter(search, role_filter, **filter_kwargs, is_admin=False)
+            .filter(search, role_filter, **filter_kwargs, is_care_staff=True)
             .order_by("-exists", "-created_at")
         )
 
@@ -573,9 +573,11 @@ class CustomerCenterListView(BaseListAPIView):
     permission_classes = [IsAdminUser | IsAssociateUser]
 
     def get_queryset(self):
-        filter_kwargs = {}
+        filter_kwargs = {"center__is_active": True}
         search = Q()
-        user = self.request.user
+        active_query = self.request.query_params.get("active")
+        if active_query in {"0", "1"}:
+            filter_kwargs["center__is_active"] = active_query == "1"
 
         search_params = self.request.query_params.get("search", "")
         search_params = search_params.strip()
@@ -586,7 +588,11 @@ class CustomerCenterListView(BaseListAPIView):
         qs = (
             CustomerCenterAssignment.objects.select_related("center")
             .prefetch_related()
-            .filter(search, customer_profile_id=self.kwargs["pk"])
+            .filter(
+                search,
+                customer_profile__pk=self.kwargs["pk"],
+                **filter_kwargs
+            )
             .order_by('-is_primary', '-created_at')
         )
         return qs

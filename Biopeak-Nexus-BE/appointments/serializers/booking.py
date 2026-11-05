@@ -126,6 +126,11 @@ def ensure_customer_slot_date(slot_date, center, field_name="date"):
         )
 
 
+def ensure_start_not_in_past(start):
+    if start < timezone.now():
+        raise serializers.ValidationError("Date cannot be in the past.")
+
+
 def ensure_customer_booking_start(start, field_name="start"):
     """Customer book/reschedule: start in now+4h .. now+7d."""
     earliest_start, latest_start = customer_booking_bounds()
@@ -218,6 +223,15 @@ def resolve_center_customer_profile(center, customer_profile_id):
             {"customer_profile_id": ["Invalid customer profile for this center."]}
         )
     return customer_profile
+
+
+def request_account_is_staff(request):
+    if request is None:
+        return False
+    return get_user_account_type(request.user) in {
+        UserType.ADMIN,
+        UserType.ASSOCIATE,
+    }
 
 
 def ensure_request_owns_customer_profile(request, customer_profile):
@@ -501,6 +515,8 @@ class AppointmentSlotFindSerializer(BaseSerializer):
         return value
 
     def validate_date(self, value):
+        if request_account_is_staff(self.context.get("request")):
+            return value
         if value < timezone.localdate():
             raise serializers.ValidationError("Date cannot be in the past.")
         return value
@@ -542,6 +558,7 @@ class AppointmentSlotFindSerializer(BaseSerializer):
         )
         attrs["preferred"] = preferred
         attrs["auto_assign"] = False
+        attrs["include_past"] = request_account_is_staff(request)
         if attrs.get("program_service_id") is not None:
             apply_program_service_slot_gates(attrs, customer_profile, service)
         return attrs
@@ -682,8 +699,8 @@ class AppointmentBookSerializer(BaseSerializer):
                 "Service is not available at this center."
             )
         attrs["assignment"] = assignment
-        if attrs["start"] < timezone.now():
-            raise serializers.ValidationError("Date cannot be in the past.")
+        if not request_account_is_staff(request):
+            ensure_start_not_in_past(attrs["start"])
         if attrs.get("program_service") is not None:
             ensure_customer_booking_start(attrs["start"])
         return attrs
@@ -725,7 +742,8 @@ class AppointmentBookSerializer(BaseSerializer):
                     appointment=appointment,
                     expires_at=timezone.now() + timedelta(hours=IDEMPOTENCY_TTL_HOURS),
                 )
-            schedule_queue_appointment_confirmed(appointment)
+            if appointment.start_datetime >= timezone.now():
+                schedule_queue_appointment_confirmed(appointment)
         return appointment
 
 
@@ -955,6 +973,7 @@ class AppointmentRescheduleSerializer(AppointmentBookSerializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        ensure_start_not_in_past(attrs["start"])
         appointment = self.context["appointment"]
         validate_transition(appointment.status, "reschedule")
         if attrs["customer_profile"].pk != appointment.customer_profile.pk:

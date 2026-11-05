@@ -38,6 +38,45 @@ def enqueue_health_job(
     return job
 
 
+def enqueue_or_reuse_orphaned_normalization_job(*, document: RookHealthDocument) -> bool:
+    """Enqueue a lost orphan job, or reactivate its completed idempotency key.
+
+    A successful get_or_create on an existing terminal job does not enqueue
+    work. The conditional update prevents two sweeps counting the same retry.
+    """
+    now = timezone.now()
+    job, created = HealthProcessingJob.objects.get_or_create(
+        idempotency_key=(
+            f"orphan-normalize:{document.pk}:"
+            f"{document.document_version}:{document.content_hash[:16]}"
+        ),
+        defaults={
+            "customer_profile": document.customer_profile,
+            "document": document,
+            "job_type": HealthJobType.NORMALIZE_DOCUMENT,
+            "status": HealthJobStatus.PENDING,
+            "scheduled_at": now,
+        },
+    )
+    if created:
+        return True
+    return bool(HealthProcessingJob.objects.filter(
+        pk=job.pk,
+        document=document,
+        job_type=HealthJobType.NORMALIZE_DOCUMENT,
+        status=HealthJobStatus.COMPLETED,
+    ).update(
+        status=HealthJobStatus.PENDING,
+        attempt_count=0,
+        scheduled_at=now,
+        started_at=None,
+        completed_at=None,
+        locked_at=None,
+        failure_detail="",
+        payload={},
+        updated_at=now,
+    ))
+
 
 def open_freshness_jobs(customer_profile) -> QuerySet[HealthProcessingJob]:
     """Freshness jobs that have not finished their permitted attempts."""

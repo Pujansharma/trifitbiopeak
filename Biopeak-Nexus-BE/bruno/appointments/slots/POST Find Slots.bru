@@ -80,10 +80,10 @@ docs {
   - customer_profile_id — UUID, active profile assigned to this center
   - service_id — UUID, active service assigned to this center
   - modality — virtual | in_person (not both)
-  - date — YYYY-MM-DD today or future (env slot_date). Past date → 400 "Date cannot be in the past."
-    Customer JWT always; staff when program_service_id set: now+24h … now+7d window.
-  - program_service_id — optional. Staff when set: same slot window + therapy expiry as customer.
-    Staff omit → walk-in slots (no window / no expiry gate).
+  - date — YYYY-MM-DD (env slot_date). Staff: past dates allowed; elapsed starts included (with or without program_service_id).
+    Customer JWT: past date → 400 "Date cannot be in the past."
+    Customer always; staff when program_service_id set: date must overlap now+24h … now+7d (preferred path does not clip each start).
+  - program_service_id — optional. Staff when set: date window + therapy expiry. Staff omit → no window / no expiry.
   - preferred — REQUIRED for staff. Staff+room+equipment from preferred only (no leftover auto-fill).
 
   preferred keys (omit empty UUIDs — pre-request strips blanks; only keys present in body):
@@ -111,6 +111,9 @@ docs {
   have an active room type, and room_type_ref in that set (OR).
 
   Response data: {date, timezone, duration_minutes, buffer_before_minutes, buffer_after_minutes, slots[], truncated}.
+  Staff slots: starts every 15 minutes. Returned only when service + buffers fit in
+  center hours ∩ chosen resources, minus bookings. Slot end = start + 15 minutes.
+  Book end = start + duration_minutes. Customer auto-assign stays on service length.
   Each slot: {start, end} + nested care_team / doctor / specialty / room / equipment
   ({id, name}; specialty also role {id, name}). Omit key if not in preferred.
   No associates[]. No bare *_id. Book: slot.doctor.id → doctor_id, etc.

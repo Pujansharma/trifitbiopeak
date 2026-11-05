@@ -70,7 +70,7 @@ class TherapyServiceSerializer(BaseServiceSerializerMeta, BaseModelSerializer):
         read_only_fields = ["service_category"]
 
     def get_centers(self, instance: Service):
-        assignments = instance.center_assignments.all()[:3]
+        assignments = instance.center_assignments.all()[:5]
         centers = [assignment.center for assignment in assignments]
         return TherapyServiceCenterSerializer(
             centers, many=True, context=self.context
@@ -270,6 +270,8 @@ class TherapyProgramServiceCancelSerializer(BaseModelSerializer):
         cancelled_by = validated_data.pop("cancelled_by", None)
         cancellation_reason = validated_data.get("cancellation_reason")
         cancelled_date = validated_data.get("cancelled_date")
+        if therapy_program_service.is_discarded:
+            raise serializers.ValidationError("Discarded services cannot be cancelled.")
         if not therapy_program_service.program_service.is_active:
             raise serializers.ValidationError("Program service is already cancelled.")
 

@@ -1,0 +1,30 @@
+meta {
+  name: POST Disconnect
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseURL}}/api/v1/devices/disconnect/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "data_source": "{{rook_data_source}}"
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Disconnect this ROOK provider; existing history is retained.
+}

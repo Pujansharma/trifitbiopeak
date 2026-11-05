@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from django.db import transaction
 from django.db.models import Prefetch
 from django.utils import timezone
@@ -25,6 +27,7 @@ from accounts.customers.models import (
     CustomerAssociateAssignment,
     CustomerProfileAddress, CustomerProfileFeature,
 )
+from accounts.customers.utils.unique_ids import generate_customer_profile_unique_id
 from accounts.customers.utils.db import (
     create_customer_user_account,
     increment_centers_count,
@@ -341,7 +344,10 @@ class CenterCustomerProfileSerializer(BaseModelSerializer):
             )
             customer = Customer.objects.create(user=user, contact_email=contact_email)
             profile = CustomerProfile.objects.create(
-                customer=customer, is_main=True, **profile_data
+                customer=customer,
+                unique_id=generate_customer_profile_unique_id(),
+                is_main=True,
+                **profile_data,
             )
             create_customer_user_account(customer)
 
@@ -452,6 +458,7 @@ class CenterCustomerProfileHomeCenterSerializer(BaseModelSerializer):
 
     def create(self, validated_data):
         center_id = validated_data.pop("center_id", None)
+        created_by = validated_data.pop("created_by")
         if not center_id:
             raise serializers.ValidationError("Invalid Center ID provided.")
         profile_wrapper = validated_data.pop("customer_profile", {})
@@ -479,9 +486,13 @@ class CenterCustomerProfileHomeCenterSerializer(BaseModelSerializer):
             user = User.objects.create_user(
                 email=None, password=None, phone=phone, **profile_data
             )
-            customer = Customer.objects.create(user=user, contact_email=contact_email)
+            customer = Customer.objects.create(
+                user=user, contact_email=contact_email, created_by=created_by,
+            )
             profile = CustomerProfile.objects.create(
                 customer=customer,
+                unique_id=generate_customer_profile_unique_id(),
+                created_by=created_by,
                 is_main=True,
                 **profile_data,
                 **customer_profile_extra,
@@ -495,7 +506,8 @@ class CenterCustomerProfileHomeCenterSerializer(BaseModelSerializer):
                     "This profile already has a primary center assigned."
                 )
             assignment = CustomerCenterAssignment.objects.create(
-                customer_profile=profile, center_id=center_id, is_primary=True
+                customer_profile=profile, center_id=center_id, is_primary=True,
+                created_by=created_by,
             )
             increment_customer_count(center_id)
             increment_centers_count(profile.pk)
@@ -712,13 +724,22 @@ class CustomerAssociateAssignmentSerializer(BaseModelSerializer):
         ]
 
     @classmethod
-    def get_invalid_associates(cls, center_id, associate_ids):
-        qs = AssociateCenterAssignment.objects.filter(
-            center_id=center_id, associate_id__in=associate_ids, is_admin=False
-        ).values_list("associate_id", flat=True)
+    def get_invalid_associates(
+        cls, center_id: UUID, associate_ids: list[UUID], *, require_care_staff: bool
+    ):
+        """Require care staff for additions; allow membership-only removals."""
+        filter_kwargs = {
+            "center__pk": center_id,
+            "associate__pk__in": associate_ids,
+        }
+        if require_care_staff:
+            filter_kwargs["is_care_staff"] = True
 
-        not_valid = set(associate_ids) - set(qs)
-        return not_valid
+        valid_associate_ids = AssociateCenterAssignment.objects.filter(
+            **filter_kwargs
+        ).values_list("associate__pk", flat=True)
+
+        return set(associate_ids) - set(valid_associate_ids)
 
     @classmethod
     def _perform_add_action(
@@ -789,7 +810,9 @@ class CustomerAssociateAssignmentSerializer(BaseModelSerializer):
 
         if add_ids:
             _add_ids = [i["id"] for i in add_ids]
-            invalid_ids = self.get_invalid_associates(center_id, _add_ids)
+            invalid_ids = self.get_invalid_associates(
+                center_id, _add_ids, require_care_staff=True
+            )
             if invalid_ids:
                 raise serializers.ValidationError({
                     "add": (
@@ -806,7 +829,9 @@ class CustomerAssociateAssignmentSerializer(BaseModelSerializer):
 
         if remove_ids:
             _remove_associate_ids = [i["id"] for i in remove_ids]
-            invalid_ids = self.get_invalid_associates(center_id, _remove_associate_ids)
+            invalid_ids = self.get_invalid_associates(
+                center_id, _remove_associate_ids, require_care_staff=False
+            )
             if invalid_ids:
                 raise serializers.ValidationError({
                     "remove": (

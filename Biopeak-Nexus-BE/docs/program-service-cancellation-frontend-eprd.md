@@ -1,5 +1,10 @@
 # Program and Program Service Cancellation — Frontend ePRD
 
+Therapy programs and their assigned services also support permanent
+[discard actions](therapy-program-discard-api.md). Discard is independent of
+cancellation: it preserves active flags and cancellation history while removing
+discarded lines from the parent program totals.
+
 ## 1. Purpose
 
 Implement cancellation for assigned assessment, therapy, and consultation

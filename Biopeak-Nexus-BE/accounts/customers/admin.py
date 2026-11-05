@@ -23,6 +23,7 @@ class CustomerAdmin(admin.ModelAdmin):
 class CustomerProfileAdmin(admin.ModelAdmin):
     readonly_fields = [
         "id",
+        "unique_id",
         "created_at",
         "updated_at",
         "is_main",
@@ -32,11 +33,19 @@ class CustomerProfileAdmin(admin.ModelAdmin):
     ]
     list_display = [
         "id",
+        "unique_id",
         "first_name",
         "last_name",
         "customer__contact_email",
         "is_main",
         "created_at",
+    ]
+    search_fields = [
+        "id",
+        "unique_id",
+        "first_name",
+        "last_name",
+        "customer__contact_email",
     ]
     list_filter = ["is_main", "is_onboarding_completed"]
     raw_id_fields = ["customer", "created_by"]

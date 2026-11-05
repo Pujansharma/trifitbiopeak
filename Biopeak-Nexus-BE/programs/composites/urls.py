@@ -1,6 +1,7 @@
 from django.urls import path
 
 from programs.composites import views
+from programs.views import CompositeProgramPaymentView
 
 urlpatterns = [
     path(
@@ -30,6 +31,14 @@ urlpatterns = [
     path(
         "programs/<uuid:pk>/",
         views.CompositeProgramDetailView.as_view(),
+    ),
+    path(
+        "programs/<uuid:pk>/payments/",
+        CompositeProgramPaymentView.as_view(),
+    ),
+    path(
+        "programs/<uuid:pk>/available-redeemable-centers/",
+        views.CompositeProgramAvailableRedeemableCentersView.as_view(),
     ),
     path(
         "programs/<uuid:pk>/services/",

@@ -1,4 +1,5 @@
-from django.db.models import Exists, OuterRef, Prefetch, Q, QuerySet
+from django.db.models import Exists, F, OuterRef, Prefetch, Q, QuerySet
+from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from rest_framework.mixins import UpdateModelMixin
 from rest_framework.request import Request
@@ -42,6 +43,7 @@ from programs.program_services.serializers import (
     ResultRequestCancelSerializer,
     ResultRequestRefetchSerializer,
     TherapyProgramServiceCentersSerializer,
+    TherapyProgramServiceDiscardSerializer,
     TherapyProgramServiceSerializer,
 )
 from programs.program_services.utils.db import (
@@ -181,7 +183,8 @@ class TherapyProgramServiceViewMeta(BaseGenericAPIView):
         if account_type == UserType.CUSTOMER:
             filter_kwargs["program_service__program__customer_profile__customer"] = self.request.user.customer
         return TherapyProgramService.objects.filter(**filter_kwargs).select_related(
-            "program_service__program__customer_profile"
+            "program_service__program__customer_profile",
+            "program_service__program__composite_program",
         )
 
     def get_therapy_service(self):
@@ -200,10 +203,48 @@ class TherapyProgramServiceRedeemableCentersView(BaseListAPIView, TherapyProgram
 
     def get_queryset(self):
         therapy_service = self.get_therapy_service()
+        program = therapy_service.program_service.program
         can_redeem_subquery = Center.objects.filter(
             pk=OuterRef("pk"),
-            redeemable_programs=therapy_service.program_service.program,
+            redeemable_programs=program,
         )
+        if program.program_type == ProgramType.THERAPY:
+            can_redeem_subquery = TherapyProgramService.objects.filter(
+                pk=therapy_service.pk,
+                is_discarded=False,
+                program_service__program__therapy_program__is_discarded=False,
+                program_service__program__redeemable_centers__pk=OuterRef("pk"),
+            )
+        if program.program_type == ProgramType.COMPOSITE:
+            redemption_center = F("program_service__service__center_assignments__center")
+            selected_centers = TherapyProgramService.objects.filter(
+                pk=OuterRef("pk"), redeemable_centers__isnull=False,
+            )
+            can_redeem_subquery = TherapyProgramService.objects.filter(
+                Q(program_service__program__expires_at__isnull=True)
+                | Q(program_service__program__expires_at__gte=timezone.localdate()),
+                Q(program_service__program__composite_program__therapy_redemption_is_global=True)
+                | Q(program_service__program__redeemable_centers=redemption_center),
+                Q(redeemable_centers=redemption_center)
+                | Q(
+                    ~Exists(selected_centers),
+                    program_service__program__composite_program__therapy_redemption_is_global=True,
+                ),
+                pk=therapy_service.pk,
+                is_active=True,
+                program_service__is_active=True,
+                program_service__program__program_type=ProgramType.COMPOSITE,
+                program_service__program__is_active=True,
+                program_service__program__composite_program__is_active=True,
+                program_service__service__is_active=True,
+                program_service__service__service_category=ServiceCategory.THERAPY,
+                sessions_used__lt=F("sessions_count"),
+                program_service__service__center_assignments__center__pk=OuterRef("pk"),
+                program_service__service__center_assignments__center__is_active=True,
+                program_service__service__center_assignments__is_active=True,
+                program_service__program__customer_profile__center_assignments__center=redemption_center,
+                program_service__program__customer_profile__center_assignments__is_active=True,
+            )
         return Center.objects.filter(
             redeemable_therapy_services=therapy_service,
         ).annotate(can_redeem=Exists(can_redeem_subquery)).order_by("-created_at", "-pk")
@@ -240,6 +281,25 @@ class TherapyProgramServiceAvailableRedeemableCentersView(BaseListAPIView, Thera
             pk=OuterRef("pk"),
             redeemable_programs=program,
         )
+        if program.program_type == ProgramType.THERAPY:
+            program_redeemable_centers = TherapyProgramService.objects.filter(
+                pk=therapy_service.pk,
+                is_discarded=False,
+                program_service__program__therapy_program__is_discarded=False,
+                program_service__program__redeemable_centers__pk=OuterRef("pk"),
+            )
+        if program.program_type == ProgramType.COMPOSITE:
+            program_redeemable_centers = Center.objects.filter(
+                pk=OuterRef("pk"), is_active=True,
+                customer_assignments__customer_profile=program.customer_profile,
+                customer_assignments__is_active=True,
+                service_assignments__service=therapy_service.program_service.service,
+                service_assignments__is_active=True,
+            )
+            if not program.composite_program.therapy_redemption_is_global:
+                program_redeemable_centers = program_redeemable_centers.filter(
+                    redeemable_programs=program,
+                )
         therapy_service_centers = TherapyProgramService.objects.filter(
             pk=therapy_service.pk,
             redeemable_centers__pk=OuterRef("pk"),
@@ -325,11 +385,6 @@ class TherapyProgramServiceDetailView(BaseRetrieveUpdateAPIView):
     def perform_update(self, serializer):
         serializer.save(updated_by=self.request.user)
 
-    def get_serializer_context(self):
-        context = super().get_serializer_context()
-        context["therapy_center_preview_limit"] = None
-        return context
-
     def get_queryset(self):
         filter_kwargs = {}
         account_type = get_user_account_type(self.request.user)
@@ -342,19 +397,25 @@ class TherapyProgramServiceDetailView(BaseRetrieveUpdateAPIView):
             ).select_related(
                 "service",
                 "therapy_service",
+                "therapy_service__discarded_by",
                 "created_by",
                 "cancelled_by",
                 "program__customer_profile__customer__user",
                 "program__therapy_program",
+                "program__therapy_program__discarded_by",
             )
             .prefetch_related(
-                "therapy_service__redeemable_centers",
+                Prefetch(
+                    "therapy_service__redeemable_centers",
+                    queryset=Center.objects.order_by("-created_at", "-pk"),
+                    to_attr="redeemable_center_preview",
+                ),
                 Prefetch(
                     "service__center_assignments",
                     queryset=CenterServiceAssignment.objects.filter(
                         is_active=True,
                         center__redeemable_programs__program_services__pk=self.kwargs["pk"],
-                    ).select_related("center"),
+                    ).select_related("center").order_by("-created_at", "-pk"),
                     to_attr="active_center_assignments",
                 ),
             )
@@ -403,6 +464,43 @@ class TherapyProgramServiceCancelView(BaseProgramServiceCancelView):
         )
 
 
+class TherapyProgramServiceDiscardView(BaseCreateAPIView):
+    serializer_class = TherapyProgramServiceDiscardSerializer
+    permission_classes = [IsAdminUser | BaseAssociateRBACPermission]
+
+    def get_queryset(self):
+        center = self.get_center()
+        return TherapyProgramService.objects.select_related(
+            "program_service__program", "discarded_by",
+        ).filter(
+            program_service__program__center=center,
+            program_service__program__program_type=ProgramType.THERAPY,
+            program_service__service__service_category=ServiceCategory.THERAPY,
+        )
+
+    def get_center(self):
+        center_identifier = getattr(self.request, "center_id", None)
+        if not center_identifier:
+            self.raise_bad_request("Center information not provided.")
+        return get_object_or_404(
+            Center.objects.all(), "Center not found with this ID.", pk=center_identifier,
+        )
+
+    def get_therapy_program_service(self):
+        return get_object_or_404(
+            self.get_queryset(),
+            "Therapy program service not found.",
+            pk=self.kwargs["pk"],
+        )
+
+    def perform_create(self, serializer):
+        therapy_program_service = self.get_therapy_program_service()
+        serializer.save(
+            therapy_program_service=therapy_program_service,
+            discarded_by=self.request.user,
+        )
+
+
 class ConsultationProgramServiceCancelView(BaseProgramServiceCancelView):
     service_category = ServiceCategory.CONSULTATION
 
@@ -440,7 +538,7 @@ class AssessmentServiceResultRequestView(
                 "created_by",
             )
             .prefetch_related("results", Prefetch(
-                "files", queryset=ResultRequestFile.objects.order_by("-created_at")[:3], to_attr="preview_files",
+                "files", queryset=ResultRequestFile.objects.order_by("-created_at"), to_attr="preview_files",
             ))
         )
 
@@ -481,7 +579,7 @@ class ResultRequestViewMeta(BaseGenericAPIView):
                 "created_by",
             )
             .prefetch_related("results", Prefetch(
-                "files", queryset=ResultRequestFile.objects.order_by("-created_at")[:3], to_attr="preview_files",
+                "files", queryset=ResultRequestFile.objects.order_by("-created_at"), to_attr="preview_files",
             ))
         )
 
@@ -510,11 +608,12 @@ class ResultRequestConfirmOrderView(BaseCreateAPIView, ResultRequestViewMeta):
         result_request = self.get_result_request()
         if result_request.request_type != RequestResultType.ORDER or result_request.status == ResultRequestStatus.CANCELLED:
             raise ValidationError("Only non-cancelled order requests can be confirmed.")
-        if result_request.is_submitted or result_request.status in [ResultRequestStatus.QUEUED, ResultRequestStatus.RUNNING]:
+        if result_request.is_submitted or result_request.status in [ResultRequestStatus.QUEUED,
+                                                                    ResultRequestStatus.RUNNING]:
             return self.send_response(self.get_create_success_message(), status=202)
         if (
-            result_request.status == ResultRequestStatus.FAILED
-            and result_request.product.provider.callback != ProviderCallbackFunction.METFLUX
+                result_request.status == ResultRequestStatus.FAILED
+                and result_request.product.provider.callback != ProviderCallbackFunction.METFLUX
         ):
             raise ValidationError("A failed booking cannot be submitted again. Create another order.")
         if result_request.status not in [ResultRequestStatus.PENDING, ResultRequestStatus.FAILED]:

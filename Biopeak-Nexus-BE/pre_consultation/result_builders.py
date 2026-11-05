@@ -9,7 +9,10 @@ from accounts.customers.models import CustomerProfile
 from accounts.users.utils.helper import calculate_age
 from core.utils.db.functions import ExtractPartText
 from pre_consultation.models import PreConsultationSession
-from pre_consultation.layers.patient_baseline import customer_profile_to_payload_v2
+from pre_consultation.layers.patient_baseline import (
+    EMPTY_PATIENT_BASELINE_ADDRESS,
+    customer_profile_to_payload_v2,
+)
 from pre_consultation.layers.patient_medical_history_context import (
     get_customer_profile_gender_and_age,
 )
@@ -807,6 +810,31 @@ def _raw_data_surgery_rows(context: ResultSessionContext) -> list[dict[str, str]
     ]
 
 
+def _raw_data_patient_baseline(context: ResultSessionContext) -> dict:
+    if context.customer_profile is None:
+        return {
+            "name": "",
+            "sex": None,
+            "age": None,
+            "city": "",
+            "height": None,
+            "weight": None,
+            "address": dict(EMPTY_PATIENT_BASELINE_ADDRESS),
+        }
+
+    profile_payload = customer_profile_to_payload_v2(context.customer_profile)
+    address = profile_payload["address"]
+    return {
+        "name": f"{profile_payload['first_name']} {profile_payload['last_name']}".strip(),
+        "sex": profile_payload["gender"],
+        "age": calculate_age(context.customer_profile.date_of_birth),
+        "city": address["city"],
+        "height": profile_payload["height"],
+        "weight": profile_payload["weight"],
+        "address": address,
+    }
+
+
 def build_raw_data_payload(context: ResultSessionContext) -> dict:
     category_label_map = get_directive_category_label_map()
     concern_label_map = get_directive_concern_label_map()
@@ -819,26 +847,6 @@ def build_raw_data_payload(context: ResultSessionContext) -> dict:
         health_goal["id"]: health_goal["label"]
         for health_goal in get_directive_health_goals()
     }
-
-    baseline_payload = {
-        "name": "",
-        "sex": None,
-        "age": None,
-        "city": "",
-        "height": None,
-        "weight": None,
-    }
-    if context.customer_profile is not None:
-        profile_payload = customer_profile_to_payload_v2(context.customer_profile)
-        address = profile_payload["address"]
-        baseline_payload = {
-            "name": f"{profile_payload['first_name']} {profile_payload['last_name']}".strip(),
-            "sex": profile_payload["gender"],
-            "age": calculate_age(context.customer_profile.date_of_birth),
-            "city": address.get("city", ""),
-            "height": profile_payload["height"],
-            "weight": profile_payload["weight"],
-        }
 
     patient_category = [
         category_label_map.get(category_id, category_id)
@@ -920,7 +928,7 @@ def build_raw_data_payload(context: ResultSessionContext) -> dict:
     ]
 
     return {
-        "patient_baseline": baseline_payload,
+        "patient_baseline": _raw_data_patient_baseline(context),
         "patient_category": patient_category,
         "patient_concern": patient_concern,
         "patient_symptom": patient_symptom,

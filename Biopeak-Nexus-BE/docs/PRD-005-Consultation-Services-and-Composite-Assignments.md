@@ -453,6 +453,8 @@ Read consultation membership for a template.
 | Name | Required | Example | Notes |
 | --- | --- | --- | --- |
 | `category` | No | `consultation` | Send this value to restrict results to consultations. |
+| `active` | No | `1` | 1 requires active template entries and active catalogue services; 0 includes entries where either is inactive; omitted returns both. |
+| `center_id` | No | `<center_id>` | Repeat for therapy-center choices, e.g. `center_id=A&center_id=B`. Top-level `centers` returns all active matches offering each therapy; no IDs means an empty array. Does not remove service rows with no matches. |
 | `search` | No | `Nutrition` | Case-insensitive service-name substring. |
 | `page` | No | `1` | Page number; default 1. |
 | `limit` | No | `10` | Default 10; maximum 50. |
@@ -477,6 +479,7 @@ Read consultation membership for a template.
       "is_active": true,
       "is_locked": false,
       "centers_count": 0,
+      "centers": [],
       "redeemable_centers_count": 0,
       "products": [],
       "products_count": 0,
@@ -520,15 +523,18 @@ Associates must send `X-Center-ID: <center_id>` matching the URL and have Packag
 | --- | --- | --- | --- |
 | `profile_id` | Yes | `<profile_uuid>` | Active customer profile assigned to the URL center. |
 | `composite_template_id` | Yes | `<template_uuid>` | Active template with at least one active service. |
-| `expires_at` | Yes | `2027-01-15` | Date, today or later. |
-| `redeemable_centers` | Yes | `[{"id":"<center_uuid>"}]` | Nonempty list of active centers actively assigned to this profile. |
+| `expires_at` | No | `2027-01-15` | Optional date, today or later; omission/null means no expiry on either creation route. |
+| `redeemable_centers` | Conditional | `[{"id":"<center_uuid>"}]` | Nonempty for scoped coverage and templates without therapy; active centers actively assigned to this profile. |
 | `name` | No | `Consultation Care` | Maximum 200 characters; null/blank allowed, blank becomes null. |
 | `notes` | No | `null` | Null or blank allowed. |
 | `assessment_type` | Conditional | `null` | Not needed for consultation-only templates; required if active assessment services are included. Choices: `baseline`, `annual`, `six_month_review`, `retest`, `special_investigation`. |
 | `is_complimentary` | No | `true` | Defaults true; applies to the whole program. |
+| `is_credit` | No | `false` | Defaults false; cannot be true together with is_complimentary. |
+| `credit_received` | Conditional | `500.00` | Required/non-null for credit creation; otherwise optional/null. Nonnegative decimal, 10 total digits and 2 decimal places, zero allowed, no price cap. Returned in create/list/detail; read-only on composite PATCH. |
 | `price` | Conditional | `2500.00` | Required when not complimentary; decimal, 10 digits total and 2 decimal places. |
 | `created_date` | No | `2026-10-15` | Defaults to the current local date. |
-| `therapy_service_centers` | Conditional | `[{"id":"<therapy_service_uuid>","centers":[{"id":"<center_uuid>"}]}]` | For mixed templates, select therapy service centers; omit for consultation-only templates. |
+| `therapy_services` | No | `[{"id":"<therapy_service_uuid>","centers":[{"id":"<center_uuid>"}]}]` | Omitted/empty/partial allowed. Nested centers are optional/empty; missing selections store empty centers. Supplied entries require unique catalogue therapy IDs from the active template. Null lists remain invalid. Replaces therapy_service_centers. |
+| `therapy_redemption_is_global` | No | `false` | Omitted flag defaults to scoped with nonempty parent centers, otherwise global for therapy templates. Explicit true ignores parent centers; empty global service restrictions retain dynamic eligibility. |
 
 ```json
 {
@@ -547,9 +553,9 @@ Associates must send `X-Center-ID: <center_id>` matching the URL and have Packag
 
 #### Logic
 
-Every active template service must be global or available at at least one selected redeemable center. Assignment creates an independent program-service occurrence and consultation extension for each active consultation line, with no consultation quantity. It does not propagate later template membership changes into existing programs.
+Assignment creates an independent program-service occurrence and consultation extension for each active consultation line, with no consultation quantity. It does not propagate later template membership changes into existing programs. Every active template therapy is created with fixed template sessions, including when therapy_services is omitted, empty, or partial. Missing therapies or omitted/empty nested centers store empty centers without inheriting parent centers. Scoped therapies with empty centers return can_redeem=false and cannot redeem. Every explicit scoped service-center pair must be active and within the selected parent centers; global explicit restrictions must be active customer centers offering that therapy. Global empty-center therapies retain dynamic eligibility. Non-therapy services are not subject to the new therapy-center checks.
 
-An active therapy line with a missing or nonpositive stored quantity rejects assignment with `400` under `detail.composite_template_id`, identifying the affected catalogue services. This guard also applies to the legacy profile assignment route; that route otherwise retains its existing coverage, optional-expiry, and permission rules.
+An active therapy line with a missing or nonpositive stored quantity rejects assignment with `400` under `detail.composite_template_id`, identifying the affected catalogue services. Both assignment routes share therapy-center, initial-credit, and optional-expiry validation while retaining their existing permissions. Initial credit is stored without creating a receipt. See [Customer Composite Programs](customer-composite-programs-frontend-prd.md#center-selection-flow) for the picker flow and complete mixed-template payload.
 
 #### Response — `201 Created`
 
@@ -590,6 +596,8 @@ An active therapy line with a missing or nonpositive stored quantity rejects ass
     "notes": null,
     "expires_at": "2027-01-15",
     "is_complimentary": true,
+    "is_credit": false,
+    "credit_received": null,
     "price": null,
     "redeemable_centers": [
       {
@@ -634,17 +642,21 @@ The create response currently has `services:null`; call step 10 for assigned occ
 
 #### Errors
 
-`400 Bad Request` — consultation unavailable at the selected centers:
+`400 Bad Request` — a supplied therapy center does not offer the service:
 
 ```json
 {
   "detail": {
-    "composite_template_id": "Template services are unavailable at the selected centers: <service_uuid>"
+    "therapy_services": {
+      "<therapy_service_uuid>": {
+        "centers": ["This service is not available at center <center_uuid>."]
+      }
+    }
   }
 }
 ```
 
-Other implemented validations return `400` under `detail`: `profile_id` for an unassigned profile, `redeemable_centers` for invalid profile-center selections, `composite_template_id` for an inactive/empty template, and `expires_at` for a past expiry.
+Other implemented validations return `400` under `detail`: `profile_id` for an unassigned profile, `redeemable_centers` for invalid profile-center selections, `composite_template_id` for an inactive/empty template, `expires_at` for a past expiry, `is_credit` for conflicting flags, `credit_received` for a missing/invalid credit amount, and `price` for a non-complimentary program without a price. Per-service membership and availability errors are keyed by catalogue service UUID under `therapy_services`.
 
 ### 9. Get the assigned composite program
 
@@ -701,6 +713,8 @@ Staff endpoint; send `X-Center-ID` for center-specific service previews.
     "notes": null,
     "expires_at": "2027-01-15",
     "is_complimentary": true,
+    "is_credit": false,
+    "credit_received": null,
     "price": null,
     "redeemable_centers": [
       {
@@ -1441,6 +1455,8 @@ The consultation must be global or available at at least one active redeemable c
     "notes": null,
     "expires_at": "2027-01-15",
     "is_complimentary": true,
+    "is_credit": false,
+    "credit_received": null,
     "price": null,
     "redeemable_centers": [
       {

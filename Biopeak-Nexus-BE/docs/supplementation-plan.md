@@ -154,11 +154,11 @@ Writers emit `protocol_created`, `version_drafted`, `supplement_added`, `supplem
 | `protocol_version` | FK, null | Set when the draft is created |
 | `AiRecommendationItem.origin` | text | `requested`, `ai_added` |
 | `decision` | text | `pending`, `accepted`, `rejected`, `modified` |
-| dose columns | text | AI original: `dosage`, `frequency`, `custom_frequency`, `timing`, `duration`, `instructions`, `rationale` |
+| dose columns | text, null on a held item | AI original: `dosage`, `frequency`, `custom_frequency`, `timing`, `duration`. `instructions` and `rationale` are never null |
 | `final_*` | text, null | Set on accept or modify. Draft copies these |
 | `reason` | text, null | Reject or modify reason |
 
-The worker calls Luma `POST {LUMA_BASE_URL}/luma/v1/integrations/nexus/clients/<customer_profile_id>/protocol-recommendation` with `X-API-Key: LUMA_NEXUS_API_KEY`, timeout 60s. Those two values are Django settings, loaded from `DEV_` / `STG_` / `PRD_` `LUMA_BASE_URL` and `LUMA_NEXUS_API_KEY`. Blank URL or key fails the job with "Luma is not configured." Body: `customer_profile_id`, `metsights_profile_id` (main profile hint, else null), `name`, `purpose`, `notes`, `supplements[]` (id, product, brand, form, serving, ingredients, allergens), `constraints[]` (active only). Response: `model`, `items[]` with `supplement_id`, dose fields, and `origin`. Every requested id must come back. Extra ids must be active catalogue products and are stored as `ai_added`. A bad response fails the job. Non-2xx maps by status only (Luma's error body is never read): 401 "Luma rejected the Nexus API key.", 404 "Luma could not find this client.", 409 "Luma could not confirm this client's identity.", 422 "Luma could not build a recommendation for this client.", anything else, a timeout or a connection error "Luma is unavailable." One try and one retry. The second failure stays `failed`. A request or save error marks that job `failed` and the worker continues with the next job.
+The worker calls Luma `POST {LUMA_BASE_URL}/luma/v1/integrations/nexus/clients/<customer_profile_id>/protocol-recommendation` with `X-API-Key: LUMA_NEXUS_API_KEY`, timeout 60s. Those two values are Django settings, loaded from `DEV_` / `STG_` / `PRD_` `LUMA_BASE_URL` and `LUMA_NEXUS_API_KEY`. Blank URL or key fails the job with "Luma is not configured." Body: `customer_profile_id`, `metsights_profile_id` (main profile hint, else null), `name`, `purpose`, `notes`, `supplements[]` (id, product, brand, form, serving, ingredients, allergens), `constraints[]` (active only). Response: `model`, `items[]` with `supplement_id`, dose fields, and `origin`. Every requested id must come back. Extra ids must be active catalogue products and are stored as `ai_added`. A bad response fails the job. An item with `dosage`, `frequency`, `custom_frequency`, `timing` and `duration` all null is a held item (Luma will not dose that product) and is saved; a null `dosage`, `frequency`, `timing` or `duration` on any other item fails the job. Non-2xx maps by status only (Luma's error body is never read): 401 "Luma rejected the Nexus API key.", 404 "Luma could not find this client.", 409 "Luma could not confirm this client's identity.", 422 "Luma could not build a recommendation for this client.", anything else, a timeout or a connection error "Luma is unavailable." One try and one retry. The second failure stays `failed`. A request or save error marks that job `failed` and the worker continues with the next job.
 
 ## API tracker — Admin FE
 
@@ -477,12 +477,13 @@ Every protocol, including inactive protocols, newest `created_at` first, includi
 
 Staff picker for copying a protocol. Admin or associate. No `X-Center-ID`. Active profile, else 404. Not paginated.
 
-One row per protocol, including inactive protocols. The row is the highest `version_number` whose status is `approved`, `scheduled`, `active`, `expired`, or `cancelled`. A `superseded` version is the row only when every higher `version_number` is `draft` or `under_review`. `draft` and `under_review` are never the row. A protocol with no such version is omitted. `approved` is listed before publish, so `Protocol.current_version` may be null. Newest protocol `created_at` first. `version_name` is `v` plus `version_number`. `effective_from` is `starts_on`. `status` is the stored status. `id` is the protocol id. Response `current_version_id` is the chosen version. `supplement_count` is the `ProtocolItem` count on that version.
+One row per protocol, including inactive protocols. The row is the highest `version_number` whose status is `approved`, `scheduled`, `active`, `expired`, or `cancelled`. A `superseded` version is the row only when every higher `version_number` is `draft` or `under_review`. `draft` and `under_review` are never the row. A protocol with no such version is omitted. `approved` is listed before publish, so `Protocol.current_version` may be null. Newest protocol `created_at` first. `version_name` is `v` plus `version_number`. `effective_from` is `starts_on`. `status` is the stored status. `id` is the protocol id. `name` is the protocol name. Response `current_version_id` is the chosen version. `supplement_count` is the `ProtocolItem` count on that version.
 
 ```json
 [
   {
     "id": "uuid",
+    "name": "Sleep & Recovery",
     "current_version_id": "uuid",
     "version_name": "v2",
     "supplement_count": 2,
@@ -522,30 +523,32 @@ Staff protocol page. Admin or associate. No `X-Center-ID`. Unknown id returns 40
 
 Staff audit for one protocol. Admin or associate. No `X-Center-ID`. Unknown protocol returns 404. An inactive protocol still loads.
 
-This is the profile event list filtered to `protocol_id`. Same row, same order, same query. Rows for other protocols are omitted. Pagination is independent of the profile list.
+Profile event rows for this `protocol_id`. Null `protocol_version` rows omitted. `protocol_name` / `protocol_version_number` always set on this list.
 
-Query: `page`, `limit` (default 10, max 50), `action`. Junk `action` returns 400 `Invalid action.` Newest `created_at`, then `id`. Includes `client_visible` false.
+Query: `page`, `limit` (default 10, max 50), `action`. Junk `action` → 400 `Invalid action.` Newest `created_at`, then `id`.
 
-A stored `supplement_id` in `before` or `after` is replaced in the response by `supplement`: `{id, product_name, brand_name, form}`. The stored JSON keeps `supplement_id`. A missing supplement is `{id, product_name: null, brand_name: null, form: null}`. Other keys in that object stay.
+Snapshots: stored `supplement_id` → response `supplement` `{id, product_name, brand_name, form}` (missing product → null name fields). Item actions use dose fields; `supplement_added` `before` null; `supplement_removed` `after` null. Status actions use `{status, starts_on, ends_on, approval_notes}`.
 
-Item payloads (`supplement_added`, `supplement_modified`, `supplement_removed`, `supplement_replaced`) are `supplement_id`, `dosage`, `frequency`, `custom_frequency`, `timing`, `duration`, `instructions`, `rationale`. `supplement_added` has `before` null. `supplement_removed` has `after` null. Edit and delete store `reason`. Replace does not.
-
-`approved`, `published`, `scheduled`, `superseded`, `cancelled`, and `extended` use `{status, starts_on, ends_on, approval_notes}` for `before` and `after`. Cancel stores the text on `ProtocolVersion.cancellation_reason`, not on `ProtocolEvent.reason`.
-
-`client_title`, `client_reason`, `change_type`, and `effective_on` are null.
+`actor` null when unset. `actor.name` = first + last. `actor.roles` = active associate care roles `{id, name}` across centers; admin `[]`.
 
 ```json
 [
   {
     "id": "uuid",
     "action": "supplement_modified",
+    "actor": {
+      "name": "Mina Rao",
+      "roles": [{"id": "uuid", "name": "Doctor"}]
+    },
     "reason": "Dose raised after the repeat panel.",
     "client_visible": false,
     "client_title": null,
     "change_type": null,
     "effective_on": null,
     "protocol_id": "uuid",
+    "protocol_name": "Foundational Health",
     "protocol_version_id": "uuid",
+    "protocol_version_number": 1,
     "before": {
       "supplement": {
         "id": "uuid",
@@ -585,9 +588,9 @@ Item payloads (`supplement_added`, `supplement_modified`, `supplement_removed`, 
 
 Staff audit for one protocol version. Admin or associate. No `X-Center-ID`. Unknown version returns 404 `Protocol version not found.` An inactive protocol still loads.
 
-This is the protocol event list filtered to `protocol_version_id`. Same row, same order, same query. Rows for other versions are omitted. A `superseded` row stored on the replaced version appears on that version. Pagination is independent of the protocol list.
+Same event row as the protocol list, filtered to this version. `protocol_name` / `protocol_version_number` always set. `superseded` stays on the replaced version.
 
-Query: `page`, `limit` (default 10, max 50), `action`. Junk `action` returns 400 `Invalid action.` Newest `created_at`, then `id`. Includes `client_visible` false. `before` and `after` follow the protocol event list.
+Query: `page`, `limit` (default 10, max 50), `action`. Junk `action` → 400 `Invalid action.`
 
 ### [DONE] POST `/supplementation/protocols/<uuid:pk>/versions/`
 
@@ -785,9 +788,9 @@ Writes `extended`, `client_visible` true. `before` and `after` are the version w
 
 ### [DONE] GET `/supplementation/profiles/<uuid:profile_id>/events/`
 
-Staff recent activity for one profile. Admin or associate. No `X-Center-ID`. Active profile or 404.
+Staff audit for one profile. Admin or associate. No `X-Center-ID`. Active profile or 404.
 
-Query: `page`, `limit` (default 10, max 50), `action`. Junk `action` returns 400 `Invalid action.` Newest `created_at`, then `id`. Includes `client_visible` false. A profile with no rows returns an empty page. The row matches the protocol event list.
+Same event row as protocol events (`actor`, `protocol_name`, `protocol_version_number`, …). Null protocol/version → null name/number. Null-version rows are included here (unlike the protocol list). Query: `page`, `limit`, `action`.
 
 ## Client FE contracts
 
@@ -1045,7 +1048,7 @@ Staff list. One row per job, including jobs the worker has not saved yet. Newest
 
 ### [DONE] GET `/supplementation/ai-recommendations/<uuid:pk>/`
 
-Unknown id is 404 `AI recommendation not found.` `status` is `under_review` or `applied`. `protocol_version_id` is null until draft. Items are oldest first. Dose fields are the AI choice. `final_*` is null until accept or modify. Each item has `supplement`: `{id, product_name, brand_name, form, manufacturer}`. `form` is the stored code. `supplement_id` is not returned.
+Unknown id is 404 `AI recommendation not found.` `status` is `under_review` or `applied`. `protocol_version_id` is null until draft. Items are oldest first. Dose fields are the AI choice. `final_*` is null until accept or modify. Each item has `supplement`: `{id, product_name, brand_name, form, manufacturer}`. `form` is the stored code. `supplement_id` is not returned. A held item (Luma will not dose that product) has `dosage`, `frequency`, `custom_frequency`, `timing` and `duration` null, `instructions` "Do not use.", and a `rationale` starting "Caution: ". Accept copies those nulls and cannot be undone, so the draft then returns 400 `An accepted supplement is missing a dose.` Modify or reject a held item instead.
 
 ### [DONE] POST `/supplementation/ai-recommendation-items/<uuid:pk>/accept/`
 

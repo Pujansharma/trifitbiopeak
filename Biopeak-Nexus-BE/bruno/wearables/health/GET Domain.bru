@@ -1,0 +1,23 @@
+meta {
+  name: GET Health Domain
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseURL}}/api/v1/health/{{rook_health_domain}}/?days=30
+  body: none
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Set rook_health_domain (heart, sleep, activity, recovery, body, workouts). Optional window=7d/14d/30d/90d/lifetime.
+}

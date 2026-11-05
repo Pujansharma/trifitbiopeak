@@ -304,4 +304,4 @@ class CenterUUIDCustomerProfilesView(BaseListCreateAPIView):
         )
 
     def perform_create(self, serializer):
-        serializer.save(center_id=self.kwargs["pk"])
+        serializer.save(center_id=self.kwargs["pk"], created_by=self.request.user)

@@ -58,6 +58,8 @@ DRAFT_NONE_ACCEPTED = "Accept at least one supplement before creating the draft.
 DRAFT_MISSING_DOSE = "An accepted supplement is missing a dose."
 INACTIVE_SUPPLEMENT_DETAIL = "Supplement is inactive."
 RECOMMENDATION_SAVE_FAILED = "Could not save the recommendation."
+# Luma sends all five as null on a held item: a product it will not dose.
+HELD_DOSE_FIELDS = ("dosage", "frequency", "custom_frequency", "timing", "duration")
 EXPECTED_ITEM_ORIGIN = {
     True: AiRecommendationItemOrigin.REQUESTED,
     False: AiRecommendationItemOrigin.AI_ADDED,
@@ -125,8 +127,9 @@ def ordered_active_supplements(supplement_ids: list[UUID]) -> list[Supplement]:
 def get_metsights_profile_id(customer_profile: CustomerProfile) -> str | None:
     """
     Customer create stores the Metsights id on profile.data, lead create/update on
-    lead.data (MetsightsProfile is not written). Both run for the main profile only,
-    and Metsights is looked up by phone, so a family profile gets no hint.
+    lead.data. Both run for the main profile only, and Metsights is looked up by
+    phone, so a family profile gets no hint. Luma resolves the id through Nexus API 6
+    (MetsightsProfile) first and falls back to this hint.
     """
     if not customer_profile.is_main:
         return None
@@ -169,8 +172,14 @@ def recommendation_response_data(response: Response) -> dict:
         f"elapsed_seconds={response.elapsed.total_seconds()}"
     )
     if not response.ok:
+        try:
+            error_body = response.json()
+        except JSONDecodeError:
+            error_body = None
+        detail = error_body.get("detail") if isinstance(error_body, dict) else None
         logger.error(
-            f"Luma request failed: {response_context} reason=upstream_http_error"
+            f"Luma request failed: {response_context} reason=upstream_http_error "
+            f"detail={detail}"
         )
         # ponytail: 401/404/409/422 still burn both attempts; add a terminal job
         # state if that retry ever costs anything.
@@ -260,9 +269,7 @@ def parsed_custom_frequency(
     return None
 
 
-def parsed_recommendation_item(raw_item: object) -> dict:
-    if not isinstance(raw_item, dict):
-        raise ProtocolRecommendationError("Luma returned an invalid supplement.")
+def parsed_recommendation_dose(raw_item: dict) -> dict:
     frequency = raw_item.get("frequency")
     timing = raw_item.get("timing")
     if frequency not in ProtocolItemFrequency.values:
@@ -270,8 +277,6 @@ def parsed_recommendation_item(raw_item: object) -> dict:
     if timing not in ProtocolItemTiming.values:
         raise ProtocolRecommendationError("Luma returned an invalid timing.")
     return {
-        "supplement_id": parsed_supplement_id(raw_item.get("supplement_id")),
-        "origin": raw_item.get("origin"),
         "dosage": required_recommendation_text(raw_item, "dosage", "dosage"),
         "frequency": frequency,
         "custom_frequency": parsed_custom_frequency(
@@ -280,6 +285,23 @@ def parsed_recommendation_item(raw_item: object) -> dict:
         ),
         "timing": timing,
         "duration": required_recommendation_text(raw_item, "duration", "duration"),
+    }
+
+
+def parsed_recommendation_item(raw_item: object) -> dict:
+    if not isinstance(raw_item, dict):
+        raise ProtocolRecommendationError("Luma returned an invalid supplement.")
+    held = all(
+        field in raw_item and raw_item[field] is None for field in HELD_DOSE_FIELDS
+    )
+    if held:
+        dose = dict.fromkeys(HELD_DOSE_FIELDS)
+    else:
+        dose = parsed_recommendation_dose(raw_item)
+    return {
+        "supplement_id": parsed_supplement_id(raw_item.get("supplement_id")),
+        "origin": raw_item.get("origin"),
+        **dose,
         "instructions": required_recommendation_text(
             raw_item,
             "instructions",
@@ -521,6 +543,8 @@ def open_recommendation_item(item: AiRecommendationItem):
 
 
 def accept_recommendation_item(item: AiRecommendationItem) -> AiRecommendationItem:
+    # ponytail: a held item (null dose) can be accepted, which then blocks the draft
+    # with DRAFT_MISSING_DOSE; add a 400 here if the FE hiding Accept isn't enough.
     assert_item_open(item)
     updated = open_recommendation_item(item).update(
         decision=AiRecommendationItemDecision.ACCEPTED,

@@ -22,7 +22,8 @@ docs {
   GET /pre-consultation/result/<user_id>/raw-data/
   
   Flattened layer answers for audit/export.
-  patient_baseline includes height (cm) and weight (kg) from CustomerProfile (null until set).
+  patient_baseline includes height (cm), weight (kg), and nested address
+  (line_1, line_2, city, state, pin_code, residency_type) from CustomerProfile.
   
   Reference: docs/pre_consultation/api-pre-consultation-result.md
 }

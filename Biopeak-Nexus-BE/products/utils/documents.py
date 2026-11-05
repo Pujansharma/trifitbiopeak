@@ -4,7 +4,6 @@ from .constants import ProductCallbackFunction, ProviderCallbackFunction
 
 AllowedDocumentTypeMap = dict[str, list[ServiceDocumentType]]
 
-
 BIOPEAK_ALLOWED_DOCUMENTS: AllowedDocumentTypeMap = {
     ProductCallbackFunction.OLIGOSCAN: [ServiceDocumentType.OLIGOSCAN],
     ProductCallbackFunction.BLOOD: [ServiceDocumentType.BLOOD],
@@ -131,6 +130,12 @@ NEUBERG_ANAND_ALLOWED_DOCUMENTS: AllowedDocumentTypeMap = {
     ProductCallbackFunction.BLOOD: [ServiceDocumentType.BLOOD],
 }
 
+MAYR_ALLOWED_DOCUMENTS: AllowedDocumentTypeMap = {
+    ProductCallbackFunction.FUNCTIONAL_MYODIAGNOSTICS: [
+        ServiceDocumentType.FMD
+    ]
+}
+
 PRODUCT_DOCUMENTS_MAP: dict[str, AllowedDocumentTypeMap] = {
     ProviderCallbackFunction.BIOPEAK: BIOPEAK_ALLOWED_DOCUMENTS,
     ProviderCallbackFunction.METFLUX: METFLUX_ALLOWED_DOCUMENTS,
@@ -141,6 +146,7 @@ PRODUCT_DOCUMENTS_MAP: dict[str, AllowedDocumentTypeMap] = {
     ProviderCallbackFunction.STRAND_LIFE_SCIENCES: STRAND_ALLOWED_DOCUMENTS,
     ProviderCallbackFunction.NEUBERG_ANAND: NEUBERG_ANAND_ALLOWED_DOCUMENTS,
     ProviderCallbackFunction.META_OMICS_LABS: META_OMICS_ALLOWED_DOCUMENTS,
+    ProviderCallbackFunction.MAYR: MAYR_ALLOWED_DOCUMENTS,
 }
 
 

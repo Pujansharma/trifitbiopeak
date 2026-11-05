@@ -25,6 +25,7 @@ urlpatterns = [
         views.TherapyProgramAvailableServicesView.as_view(),
     ),
     path("<uuid:pk>/redeem/", views.TherapyProgramRedeemView.as_view()),
+    path("<uuid:pk>/discard/", views.TherapyProgramDiscardView.as_view()),
     path(
         "<uuid:pk>/cancel/",
         views.TherapyProgramCancelView.as_view(),

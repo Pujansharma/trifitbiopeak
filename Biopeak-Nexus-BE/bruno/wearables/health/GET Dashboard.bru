@@ -1,0 +1,23 @@
+meta {
+  name: GET Health Dashboard
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseURL}}/api/v1/health/dashboard/
+  body: none
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Read longitudinal health domain summaries for the authenticated customer.
+}

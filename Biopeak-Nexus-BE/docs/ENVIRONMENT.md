@@ -415,7 +415,7 @@ python manage.py process_communication_outbox
 python manage.py process_appointment_exception_scans
 python manage.py process_google_calendar_channel_expiry_renewal
 python manage.py sweep_protocol_versions
-python manage.py process_protocol_ai_jobs --limit 1
+python manage.py process_protocol_ai_jobs --limit 5
 ```
 
 Without the outbox worker/sweep, WhatsApp and Google Calendar rows stay `PENDING`. Without the exception-scan drain, care-team / roster / block writes enqueue scans that never run.

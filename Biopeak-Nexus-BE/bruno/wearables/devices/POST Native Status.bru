@@ -1,0 +1,33 @@
+meta {
+  name: POST Native Status
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{baseURL}}/api/v1/devices/native-status/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "data_source": "Apple Health",
+    "sdk_linked": true,
+    "permission_status": "granted",
+    "capabilities": ["sleep", "heart"]
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Native ROOK SDK status (Apple Health example); choose a supported native source and valid permission_status according to client SDK.
+}

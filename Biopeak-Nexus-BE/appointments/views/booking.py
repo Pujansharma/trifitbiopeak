@@ -304,6 +304,7 @@ class AppointmentSlotFindView(AppointmentBookingMixin, BaseGenericAPIView):
                     modality=validated["modality"],
                     slot_date=validated["date"],
                     preferred=validated.get("preferred"),
+                    include_past=validated.get("include_past", False),
                 )
         except DjangoValidationError as exc:
             self.raise_bad_request(exc.messages[0])

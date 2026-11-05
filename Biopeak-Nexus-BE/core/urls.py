@@ -4,7 +4,6 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.contrib.auth import views as auth_views
 from django.urls import path, include
-from django.urls import path, include
 from wearables.oauth_callback import rook_oauth_callback
 admin.site.site_header = "Biopeak Nexus Admin Dashboard"
 admin.site.site_title = "Biopeak Nexus Dashboard"

@@ -15,17 +15,17 @@ class Command(BaseCommand):
 
     def handle(self, *args: object, **options: object) -> None:
         cancelled_services = TherapyProgramService.objects.filter(
-            program_service__is_active=False
+            program_service__is_active=False, is_discarded=False,
         ).update(sessions_cancelled=F("sessions_count") - F("sessions_used"))
 
         reset_services = TherapyProgramService.objects.filter(
-            program_service__is_active=True
+            program_service__is_active=True, is_discarded=False,
         ).update(sessions_cancelled=Value(0))
 
         sessions_count_subquery = Coalesce(
             Subquery(
                 TherapyProgramService.objects.filter(
-                    program_service__program=OuterRef("program")
+                    program_service__program=OuterRef("program"), is_discarded=False,
                 )
                 .values("program_service__program")
                 .annotate(total=Sum("sessions_count"))
@@ -36,7 +36,7 @@ class Command(BaseCommand):
         sessions_used_subquery = Coalesce(
             Subquery(
                 TherapyProgramService.objects.filter(
-                    program_service__program=OuterRef("program")
+                    program_service__program=OuterRef("program"), is_discarded=False,
                 )
                 .values("program_service__program")
                 .annotate(total=Sum("sessions_used"))
@@ -47,7 +47,7 @@ class Command(BaseCommand):
         sessions_cancelled_subquery = Coalesce(
             Subquery(
                 TherapyProgramService.objects.filter(
-                    program_service__program=OuterRef("program")
+                    program_service__program=OuterRef("program"), is_discarded=False,
                 )
                 .values("program_service__program")
                 .annotate(total=Sum("sessions_cancelled"))
@@ -58,6 +58,7 @@ class Command(BaseCommand):
         services_cancelled_subquery = Coalesce(
             Subquery(
                 ProgramService.objects.filter(program=OuterRef("pk"), is_active=False)
+                .exclude(therapy_service__is_discarded=True)
                 .values("program")
                 .annotate(count=Count("pk"))
                 .values("count")
@@ -71,7 +72,19 @@ class Command(BaseCommand):
             sessions_cancelled=sessions_cancelled_subquery,
         )
 
+        services_count_subquery = Coalesce(
+            Subquery(
+                ProgramService.objects.filter(program=OuterRef("pk"))
+                .exclude(therapy_service__is_discarded=True)
+                .values("program")
+                .annotate(count=Count("pk"))
+                .values("count")
+            ),
+            Value(0),
+        )
+
         updated_programs = Program.objects.update(
+            services_count=services_count_subquery,
             services_cancelled=services_cancelled_subquery,
         )
 

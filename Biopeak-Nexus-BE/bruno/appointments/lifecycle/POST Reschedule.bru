@@ -79,6 +79,7 @@ docs {
   Allowed from confirmed or checked_in. Lands confirmed. Not from in_progress.
   Auth: staff or customer JWT. Customer may only reschedule their own profile's appointments (else 404).
   When program_service_id set (customer or staff): new start same as book (now+4h … now+7d).
+  New start before now → 400 "Date cannot be in the past." for every caller, including staff walk-in.
   Also blocked when now > existing.start − 4h → 400
   "Reschedule is only allowed until 4 hours before the appointment start."
   Same flattened contract as POST Book Appointment (full body, not PATCH).

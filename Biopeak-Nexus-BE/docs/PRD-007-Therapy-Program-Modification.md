@@ -8,10 +8,10 @@ Authorization: Bearer <token>. Associates continue to send their valid X-Center-
 
 1. **List available program redeemable centers** — Discover the customer profile's linked centers and identify existing selections and the home center before adding redemption locations.
 2. **List available therapy services** — Discover global therapy services and services assigned to the program's redeemable centers, including existing selections.
-3. **Modify therapy program** — PATCH the already loaded program with changed metadata and additions; the response contains the same detail shape as GET on this URL.
-4. **List program redeemable centers** — Retrieve the complete paginated selections when the three-center program preview is insufficient.
+3. **Modify therapy program** — PATCH the already loaded program with changed metadata and additions. The response contains the same detail shape as GET, but its services preview may be stale. After success, GET the same URL for current service data.
+4. **List program redeemable centers** — Retrieve the complete paginated selections when the five-center program preview is insufficient.
 5. **List assigned therapy services** — Retrieve service lines beyond the five-service preview and their assigned program-service IDs.
-6. **Retrieve assigned therapy service** — Retrieve all selected centers for one service line when its three-center preview is insufficient.
+6. **Retrieve assigned therapy service** — Retrieve all selected centers for one service line when its five-center preview is insufficient.
 
 ## API Requests
 
@@ -158,7 +158,7 @@ Use `?exists=0` to discover services not yet in the program, or `?exists=1` to l
 available catalogue scope. The filter uses the same membership subquery as the response flag and combines with
 search and active filters before pagination.
 
-centers preserves the catalogue preview of up to three active centers, restricted to this program's redeemable centers.
+centers preserves the catalogue preview of up to five active centers, restricted to this program's redeemable centers.
 The stored centers_count remains the catalogue-wide total, so it can exceed the preview length. Global services
 normally have an empty centers array. care_template and created_by may be null; created_by is a user UUID when present.
 The catalogue's write-only add_centers and remove_centers fields do not appear in this GET response.
@@ -335,7 +335,9 @@ Zero assigned sessions provide no redemption allowance. Positive additions to an
 }
 ```
 
-The response previews at most five services, three program centers, and three service centers, ordered by the existing newest-first conventions. Counts refer to the complete collections. service.centers contains this program-service line's stored selections, including selections that later become unavailable. can_redeem reflects the requested X-Center-ID when provided; otherwise it checks whether any selected center can currently redeem. active_appointment is null here because no open appointment exists; a populated value follows the existing appointment contract.
+The response previews at most five services, five program centers, and five service centers, preserving each collection's existing ordering. Counts refer to the complete collections. The PATCH response reuses the services preview loaded before the update; it is not queried again after saving. That preview can therefore contain stale service lines, counters, center selections, nested program data, and can_redeem values, and may omit newly added services. Clients must GET `<baseURL>/programs/therapy-programs/<program_id>/` after a successful PATCH to obtain current service data.
+
+On GET, service.centers contains this program-service line's stored selections, including selections that later become unavailable. can_redeem reflects the requested X-Center-ID when provided; otherwise it checks whether any selected center can currently redeem. active_appointment is null here because no open appointment exists; a populated value follows the existing appointment contract.
 
 #### Errors
 
@@ -491,7 +493,7 @@ Retrieve the program's service lines; use service.id for add_services[].id and t
 }
 ```
 
-The centers array in each service remains a preview of up to three stored selections. No center removal or service deletion operation exists in this modification flow.
+The centers array in each service remains a preview of up to five stored selections. No center removal or service deletion operation exists in this modification flow.
 
 ### 6. Retrieve assigned therapy service
 

@@ -191,11 +191,11 @@ null
 
 ### 4.6 Preview semantics
 
-`centers` is a preview containing at most three assigned centers. It is an
+`centers` is a preview containing at most five assigned centers. It is an
 empty array when no center is assigned. `centers_count` is the authoritative
 total and can be greater than `centers.length`.
 
-For assessment services, `products` is also a preview containing at most three
+For assessment services, `products` is also a preview containing at most five
 assigned products. It is an empty array when none is assigned.
 `products_count` is the authoritative total and can be greater than
 `products.length`.

@@ -1,0 +1,23 @@
+meta {
+  name: GET SDK Config
+  type: http
+  seq: 6
+}
+
+get {
+  url: {{baseURL}}/api/v1/devices/sdk-config/
+  body: none
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Available only for approved native SDK provisioning and a started native device connection; sensitive response must not be logged or shared.
+}

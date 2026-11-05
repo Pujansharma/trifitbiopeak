@@ -13,6 +13,7 @@ from appointments.utils.redemption import (
 )
 from programs.therapy.eligibility import ensure_therapy_service_center
 from programs.models import (
+    Program,
     RedemptionHistory,
     TherapyProgram,
     TherapyProgramService,
@@ -107,54 +108,50 @@ def redeem_all_program_services(
     redeemed_by,
     redeemed_date=timezone.localdate(),
 ) -> int:
-    services = list(
-        TherapyProgramService.objects.filter(
-            program_service__program=program_id,
-            program_service__is_active=True,
-        )
-        .filter(sessions_used__lt=F("sessions_count"))
-        .select_related("program_service__program")
-    )
-    if not services:
-        return 0
-
     now = timezone.now()
     center = Center.objects.filter(pk=center_id).first()
     total_quantity = 0
     histories = []
-
-    for therapy_program_service in services:
-        ensure_therapy_service_center(therapy_program_service.program_service, center_id)
-        if get_open_appointment_for_program_service(therapy_program_service.pk) is not None:
-            raise serializers.ValidationError(
-                "An open appointment exists for this service. Complete or cancel it before redeeming all sessions."
-            )
-        remaining = (
-            therapy_program_service.sessions_count
-            - therapy_program_service.sessions_used
-        )
-        total_quantity += remaining
-        histories.append(
-            RedemptionHistory(
-                therapy_program_service=therapy_program_service,
-                redeem_center=center,
-                redeemed_at=now,
-                quantity=remaining,
-                redeemed_by=redeemed_by,
-                redeemed_date=redeemed_date,
-            )
-        )
-
+    therapy_program_service_identifiers = []
     with transaction.atomic():
-        therapy_program_service_identifiers = [
-            therapy_program_service.pk for therapy_program_service in services
-        ]
+        Program.objects.filter(pk=program_id).update(updated_at=timezone.localtime())
+        services = TherapyProgramService.objects.filter(
+            program_service__program=program_id,
+            program_service__is_active=True,
+            is_discarded=False,
+            program_service__program__therapy_program__is_discarded=False,
+            sessions_used__lt=F("sessions_count"),
+        ).select_related("program_service__program")
+        for therapy_program_service in services:
+            ensure_therapy_service_center(therapy_program_service.program_service, center_id)
+            if get_open_appointment_for_program_service(therapy_program_service.pk) is not None:
+                raise serializers.ValidationError(
+                    "An open appointment exists for this service. Complete or cancel it before redeeming all sessions."
+                )
+            remaining = (
+                therapy_program_service.sessions_count
+                - therapy_program_service.sessions_used
+            )
+            total_quantity += remaining
+            therapy_program_service_identifiers.append(therapy_program_service.pk)
+            histories.append(
+                RedemptionHistory(
+                    therapy_program_service=therapy_program_service,
+                    redeem_center=center,
+                    redeemed_at=now,
+                    quantity=remaining,
+                    redeemed_by=redeemed_by,
+                    redeemed_date=redeemed_date,
+                )
+            )
+        if not therapy_program_service_identifiers:
+            return 0
         TherapyProgramService.objects.filter(
-            pk__in=therapy_program_service_identifiers
+            pk__in=therapy_program_service_identifiers, is_discarded=False,
         ).update(
             sessions_used=F("sessions_count")
         )
-        TherapyProgram.objects.filter(program=program_id).update(
+        TherapyProgram.objects.filter(program=program_id, is_discarded=False).update(
             sessions_used=F("sessions_used") + total_quantity
         )
         RedemptionHistory.objects.bulk_create(histories)

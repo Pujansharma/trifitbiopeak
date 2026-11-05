@@ -1,273 +1,111 @@
 # Biopeak Nexus — Project Memory
 
-Non-obvious decisions, agent prefs, traps. No code dumps. No CLAUDE.md / CODING_RULES.md clones. Specs in `docs/`.
+Non-obvious decisions, agent prefs, traps. No code dumps. No CODING_RULES clones. Specs in `docs/`.
+
+Pointers: appointments → [`appointments-frontend-api.md`](appointments-frontend-api.md). Google Calendar → [`google-calendar-integration.md`](google-calendar-integration.md). Results → [`result-fetch-flow.md`](result-fetch-flow.md). Supplementation → [`supplementation-plan.md`](supplementation-plan.md) + [`supplementation-client-api.md`](supplementation-client-api.md).
 
 ---
 
 ## User Preferences
 
-- Short, plain answers. No long explanations unless asked.
-- Code explain → clickable `[file.py:42](path/to/file.py#L42)` every mention.
-- Never revert/alter code user manually edited. User change-back = final.
-- Never `select_for_update()`. Ordinary ORM. No row locks.
-- Never write migration files. Never `makemigrations`. User owns migrations.
-- UUID detail URLs: `<uuid:pk>/`.
-- No fn return/output type annotations unless asked.
-- Prefer `timezone.localtime()` for persisted timestamps.
-- No `transaction.atomic()` inside helpers unless asked.
-- ePRDs: concrete request/response JSON + integration logic. No TypeScript / base-type / interface decls.
-- Prefer explicit `BaseModelSerializer` + `Meta.model` + declared fields. No `to_representation()` delegate.
-- Keep related-object fields nested. Don't flatten.
-- Don't repeat explicit `read_only=True` fields in `Meta.read_only_fields`.
-- Never put derived service-document module-category props/display on model. Serializers compute code+label from `ServiceResult.document_type`.
-- API add/change → update `bruno/` same change. Source of truth = `bruno/`. Envs: `bruno/environments/{Development,Production}.bru`. No folder vars (folder > env → blank tokens).
-- **Bruno auth (2026-09-12):** 401 `"Authorization header must contain two space-delimited values"` = empty Bearer. Empty runtime `access_token` masks env. Never `auth: bearer` + `{{access_token}}`. Collection `bruno/collection.bru` pre-request sets `Authorization` from env → collection → runtime (skip empty; skip `/webhooks/` + Google callback + `/auth/login` so a stale Bearer cannot 401 phone/OTP/password login). Requests/folders `auth: inherit`. Pre-consultation folder overwrites w/ `customer_access_token`. Login Phone Direct: `bru.deleteVar('access_token')` before set. Empty optional query → `~param:`.
-- **Bruno Find Slots (2026-09-15):** `POST .../appointments/slots/` preferred keys `room_id`, `equipment_id`, `care_team_id`, `doctor_id`, `specialty_id`. `health_coach_id` → 400. Empty interpolated UUIDs strip in pre-request. `care_team_id` XOR `doctor_id`/`specialty_id`. Room with ≥1 bookable equipment → `equipment_id` required. Env: `slot_date`, `doctor_id`, `specialty_id`.
-- List filter query = `active=0|1`. Model/body/response stays `is_active`. Never `is_active` as query name.
-- Center resource lists (associates + v2 room-types / equipment-types / rooms / equipment / services): omit `active` → both. `active=0|1` still filters. Availability lists default-active-only.
-- Don't send empty UUID query params. Disable w/ `~room_type_id: {{room_type_id}}`. Junk UUID on rooms list → 400 `"Invalid room_type_id."`
-- **Rooms `type_active`:** `GET /centers/<uuid>/v2/rooms/?type_active=0|1`. `1` = `room_type_ref` set + `RoomType.is_active`. `0` = type null or inactive. Omit/junk = no filter. Independent of room `active=`.
-- **Equipment `type_active` + `room_allotted`:** `GET /centers/<uuid>/v2/equipments/?type_active=0|1&room_allotted=0|1`. Independent AND. `type_active` same as rooms. `room_allotted=1` = `room` set + `Room.is_active`. `0` = room null or inactive. Omit/junk = no that filter. Independent of equipment `active=`.
-- **Success envelope (mandatory):** `{detail, data}` via `send_response` / `response_format` / `Base*APIView`. `data` = object, list, or omit. Never top-level array. Never nest `{detail, data}` inside `data`. Never raw `Response(payload)`. List-creates: `data` = array; client uses `data[0].id`. No `success` key (pre-consult only). Custom list-create: override `post()` + `send_response(..., status=201)`. Do **not** `send_response` inside `create()` on `BaseListCreateAPIView` → nested envelope.
+- Short answers. Long only if asked.
+- Code cite: `[file.py:42](path/to/file.py#L42)`.
+- Never revert user manual edits. User change-back = final.
+- Never `select_for_update()`. Never agent `makemigrations` / migration files. User owns migrations.
+- UUID URLs: `<uuid:pk>/`. No return-type hints unless asked.
+- Persist timestamps: `timezone.localtime()`. No `transaction.atomic()` in helpers unless asked.
+- ePRDs: concrete JSON + logic. No TS/interfaces.
+- Serializers: explicit `BaseModelSerializer` + `Meta.model` + fields. No `to_representation()` delegate. Nested related objects. Don't repeat `read_only=True` in `Meta.read_only_fields`.
+- Derived service-doc module-category: serializers only, not model.
+- API change → same-change `bruno/`. Source of truth = `bruno/`. Envs: `bruno/environments/{Development,Production}.bru`. No folder vars.
+- Bruno auth: never `auth: bearer` + `{{access_token}}`. Collection pre-request sets `Authorization` (skip empty; skip `/webhooks/`, Google callback, `/auth/login`). Requests `auth: inherit`. Pre-consult uses `customer_access_token`. Empty optional query → `~param:`.
+- List filter query `active=0|1`; model/body stays `is_active`. Center resource lists: omit `active` → both. Availability lists default active-only.
+- Empty UUID query: disable `~room_type_id:`. Junk UUID rooms → 400 `"Invalid room_type_id."`
+- Rooms `type_active=0|1`. Equipment `type_active` + `room_allotted` independent AND.
+- Success envelope `{detail, data}` via `send_response` / `Base*APIView`. Never top-level array. Never nest envelope in `data`. No `success` key (pre-consult only). List-create: `data` = array. Custom create: override `post()` + `send_response(..., status=201)`. Do **not** `send_response` inside `create()` on `BaseListCreateAPIView`.
 
 ---
 
-## 2026-09-11 — Multi-role associates, multi room types, preference-only booking
+## Agent traps (cross-cutting)
 
-- Migrations: `associates.0020` add `AssociateCenterAssignmentRole`, copy `role_id` rows, drop `AssociateCenterAssignment.role`; `services.0008` add `CenterServiceRoomTypeRequirement`, copy `required_room_type_id` rows, drop `CenterServiceAssignment.required_room_type`; `appointments.0019` `AppointmentAssociate` UniqueConstraint `(appointment, associate)`. Schema bootstrap removed from tests. 0020/0008 applied w/o copy → rollback those apps then remigrate.
-- Associate API hard-break: write `role_ids[]` only; response `role_ids` + `roles[]`; no singular `role`/`role_id`. Admin still no care roles. RBAC `AssociateFeaturePermission` = OR across multi-roles.
-- `CustomerAssociateSerializer` exposes `roles`/`role_ids` from `current_center_assignment` through-links.
-- Care team member still one `role_id` per row; role ∈ associate's live roles at center.
-- Slots/book/reschedule: FE sends staff+room+equipment IDs. Find Slots nests under `preferred`; book/reschedule flatten top-level. No `associates[]` pin. No auto-fill from service role/room pools. `health_coach_id` → 400 use `specialty_id`. `specialty_id` = service-mapped person; `doctor_id` may be extra. `doctor_id` stamps unique live `"doctor"`-in-name hat. `specialty_id` stamps live non-doctor hat ∩ service active role reqs (many specialty hats OK). Zero overlap / no service role reqs → 400. Two+ mapped → stamp one (stable `pk`). Same person both IDs → 400. Dup associate on apt → 400 (+ DB unique).
-- Room types on assignment: OR eligibility. Write via `RoomType.filter_active(center=...)`. Center service V2 write/read `required_room_type_ids[]` (not singular).
-
-## 2026-09-15 — Flattened book/reschedule; chosen equipment
-
-- Book/reschedule body: `start`, `end`, `customer_profile_id`, `service_id`, `modality`, `room_id`, `equipment_id`, `doctor_id`, `specialty_id`, `care_team_id`, `notes`. No nested `preferred`, no `associates[]` pin. Hats from doctor/specialty/care_team IDs.
-- Find Slots keeps `preferred` nest; add `equipment_id`. Room w/ ≥1 bookable equipment → required; else omit. Bookable = active + `equipment_type` set + type active + `room` = chosen room.
-- Room type must be active; mapped to service room-type reqs when those exist (OR). No preferred-room override of unmapped types.
-- `specialty_id` hat = live non-doctor role ∩ active service role reqs (many hats OK). No unique-hat 400. No `role_id` in body. Service w/ 0 role reqs + `specialty_id` → 400. `doctor_id` still unique `"doctor"`-in-name hat, not service-mapped.
-- Find Slots each slot: nested `care_team` / `doctor` / `specialty` (`role` on specialty) / `room` / `equipment` `{id, name}` — omit key if not in preferred. No `associates[]`. No bare `*_id`. Book still flattened IDs from those `id`s.
-
-## 2026-10-06 — Customer booking window (tomorrow…today+7)
-
-- Superseded 2026-10-11 by datetime windows below.
-
-## 2026-10-15 — Staff optional program_service_id on book/reschedule
-
-- Staff (admin/associate) may send `program_service_id` on book/reschedule/slots.
-- **Book:** present → same resolve + 4h–7d as customer; omit → walk-in.
-- **Reschedule:** therapy-linked apt → staff must send matching `program_service_id` (omit → `"program_service_id is required when rescheduling a therapy-linked appointment."`); walk-in omit OK. Present → match + window + cutoff.
-- **Slots:** staff + `program_service_id` → same date window + therapy expiry + start clip as customer (`apply_program_service_slot_gates`); preferred still required. Staff omit → walk-in slots (no window).
-- Removed `STAFF_PROGRAM_SERVICE_FORBIDDEN_MESSAGE`.
-
-## 2026-10-11 — Customer program_service booking windows (datetime)
-
-- Scope: whenever `attrs["program_service"]` set (customer always; staff when body sends `program_service_id`). Staff walk-in omit → no window/cutoff.
-- **Slots:** customer JWT always; staff when `program_service_id` set — `date` overlaps `now+24h`…`now+7d` (center local via `ensure_customer_slot_date`); serializer sets `earliest_start`/`latest_start` from `customer_slot_bounds()` into validated data; v2 clips each `start`.
-- **Book / reschedule new start:** `now+4h`…`now+7d` via `ensure_customer_booking_start` when `attrs["program_service"]` set. Intentional: slots hide &lt;24h; book allows 4–24h.
-- **Reschedule gate:** `ensure_customer_reschedule_cutoff` when `attrs["program_service"]` set — `now ≤ existing.start − 4h`. Reschedule `apply_program_service_rules` sets `attrs["program_service"]` after match so book window applies.
-- **Idempotent book vs window:** `AppointmentBookView` looks up unexpired `Idempotency-Key` **before** serializer/`ensure_customer_booking_start`. Same key+payload → 200 without re-running the 4h–7d window (TTL 24h otherwise fights the 4h lead on retry). Customer JWT still must own the stored apt’s profile (`assert_customer_may_replay_idempotent_appointment`) — else 404 (early + IntegrityError replay paths). Staff unchanged.
-- Messages: slot date / booking window / reschedule cutoff constants in `appointments/serializers/booking.py`. Cutoff error keyed as `start` (same shape as book window).
-- `center_local_date` lives in `appointments/utils/calendar.py` (today = settings.TIME_ZONE until Center has TZ).
-
-## 2026-10-07 — Therapy book vs package expiry (issue #111)
-
-- Product: **block** booking/slots/reschedule/complete when appointment local date `> program.expires_at` (null expiry = open-ended). Not “valid today → any future date”.
-- `ensure_program_covers_appointment_date` + `resolve_bookable_therapy_program_service(..., appointment_date=)` in `appointments/utils/redemption.py`. Message: `"This package expires on {D Mon YYYY}. Please choose a date on or before it."` (f-string; no `.format`).
-- Customer slots: optional `program_service_id`; omit → ORM block only if every matching active therapy line for customer+service expires before `date`.
-- Reschedule (customer + staff therapy-linked): same expiry vs new `start`. Complete gate only in lifecycle `validate` + `force_complete_appointment` (before status flip) — not inside `complete_appointment_redemption`.
-
-## 2026-10-06 — App download QR redirect
-
-- Public `GET /app/` (`integrations.communications.app_download.AppDownloadRedirectView`). Wire: `core/api/urls.py` → `integrations.communications.urls`.
-- Shipped QR = `https://biopeak.app/scan` (frozen). Must DNS/CDN 302/rewrite → Nexus `/app/` (optional `src`). This BE has no `/scan` route.
-- UA: Android → Play; iOS (`iphone`/`ipad`/`ipod` or `macintosh`+`mobile` for iPadOS) → App Store (`https://apps.apple.com/app/biopeak/id6759485756`, no `/in/`); else HTML `assets/templates/app_download/Biopeak_App_Download.html`.
-- Query `platform=android|ios` overrides UA (chooser store badges re-hit `/app/` so store pick is tracked). Junk/other ignored. QR URL never gains `platform`.
-- `AppDownloadClick.entry`: `ua` (mobile UA → store), `chooser` (fallback HTML), `platform_query` (badge `?platform=`). Derived server-side.
-- Best-effort insert first (`platform`, `entry`, `destination_url`, UA, IP, `src`/`campaign`, referer) — `DatabaseError` logged, redirect/HTML still returned. Skip insert when UA matches `APP_DOWNLOAD_BOT_USER_AGENT_PATTERN`.
-- IP: `get_request_ip_address` uses **last** `X-Forwarded-For` hop (ALB-appended) + `ipaddress` validate; invalid → null. `AppDownloadThrottle.get_ident` uses same helper.
-- Throttle: scope `app_download` `60/min` via LocMem (per-process; no Redis). Soft limit only — tighten at ALB/WAF if needed.
-- Admin: `AppDownloadClick` add/change denied (append-only list/delete).
-- Chooser render uses `request._request` (Django `HttpRequest`). Store hrefs = `/app/?platform=…&src=…` track URLs, not raw store URLs.
-- No agent migration — user `makemigrations integrations` (`entry` + `(entry, created_at)` index; fold into `0011` if not applied yet).
-
-## 2026-10-06 — QR redeem + open appointment
-
-- QR `SINGLE` with open apt: `try_complete_open_appointment_for_single_redeem` — complete+burn; CAS miss + already `completed`+`REDEEM` → idempotent success; never fall through to classic `redeem_program_service` after open apt observed (cancelled → 400, no classic burn).
-- Open apt may be at any center; body `center_id` only needs service available there (QR redeemable cross-center by design).
-- `increment_therapy_sessions_used` no-ops when finite and would exceed remaining; `force_complete_appointment` invalidates ops cache.
-- Partial unique `uniq_open_appt_per_ps`: dedupe open appts per `program_service` before migrate if leftovers.
-
-## 2026-09-24 — Unified Find Slots + customer self-serve
-
-- Single `POST /centers/<id>/appointments/slots/`: staff **must** send `preferred`; customer **must not** (auto-assign via `find_appointment_slots_v2`). Empty/`{}` preferred = missing for staff, forbidden if key present for customer.
-- Dropped `/v2/slots/` (unused). Engines stay separate.
-- `GET /appointments/customer-appointments/<customer_profile_id>/` — customer only; owned profile (all centers). Optional `therapy_service_program=0|1`: `1` = `program_service` set; `0` = null; omit/junk = all. Sort: in_progress → confirmed → checked_in → completed → cancelled → no_show, then start ascending.
-- Book / cancel / reschedule — staff **or** customer (own profiles; cancel/reschedule other → 404).
-- Center resolve for customers requires active `CustomerCenterAssignment`.
-
-## 2026-09-22 — Find Slots auto-assign engine (least-busy)
-
-- Engine `find_appointment_slots_v2` (invoked from unified slots when customer, no preferred).
-- Pools from service maps: active role requirements → eligible associates (multi-role via `role_links`); `in_person` rooms from active room-type requirements (OR). Equipment = bookable units on chosen room (no service↔equipment-type map).
-- Per slot window: pick least-busy free resource. Busy metric = `len` busy appointment intervals that day. Ties: associate `created_at`+`pk`; room/equipment `code`+`pk`.
-- ≤1 doctor-named role on the service. Multiple specialty (non-doctor) roles OK. Slot `specialty` = one object when 1 specialty, array when 2+. `in_person` needs ≥1 room-type req. No care-team auto-pick.
-- Book/reschedule: `specialty_id` = UUID | UUID[]. Each id stamps a distinct service-mapped non-doctor hat. Preferred-path slots stay single `specialty_id` UUID.
-
-## 2026-09-15 — GoogleCalendarConnection
-
-- Tokens off `Associate` onto `GoogleCalendarConnection` (1:1 `User` PK). Admin or associate may own shared calendar. `/complete/` match `User.email` + active Admin/Associate. Status/disconnect/refresh = `IsAdminUser | IsAssociateUser`. Success `user_id` not `associate_id`.
-- User writes migration: create table, copy live Associate google cols, drop Associate google cols + `uniq_associate_google_email`. No `makemigrations` from agent. `integrations.0003` copies then `associates.0021` depends on it.
-- Evict stale `google_email`: ORM-evict + save **inside** `/complete/` `atomic()` first; revoke copied stale refresh grants **after** commit (`InvalidToken`/HTTP fail still fine — local already cleared). Status/refresh connected = `is_active` + `google_refresh_token`. Disconnect still revokes if tokens exist on soft-off row.
-- `/complete/` unique-email `IntegrityError`: this user already connected as that email → 200 (code spent). Else retry persist once. Still colliding → 400. Never tell reconnect just cos one-time code used.
-- `get_valid_access_token()` `invalid_grant`: re-read row; retry once if `google_refresh_token` changed; only `deactivate_google_calendar_connection()` when token we sent still stored (see 2026-09-17 rename/behavior change below).
-
-## 2026-09-17 — Personal Google Calendar connect + availability sync
-
-- Separate from shared-organizer; same table (`GoogleCalendarConnection`, 1:1 `User`) + `last_synced_at`. `/personal/connect/`+`/personal/complete/` (JWT `IsAdminUser|IsAssociateUser`) → any staff connect own Google — no `User.email` match required; tokens save onto `request.user` row. 400 if connected account == `GOOGLE_CALENDAR_ID`. Read-only scope (`calendar.events.readonly`) — never writes personal calendar. Shared `/connect/`+`/complete/`+`/callback/` thread `state` (`shared`/`personal`, `google_oauth.OAUTH_STATE_*`) via `build_auth_url()`→Google→`/callback/` so FE knows which `/complete/` — routing hint only, not CSRF.
-- `AssociateAvailabilityBlock` gained `google_event_id` (blank = manual). `POST /google-calendar/sync/` (`integrations/google_calendar/availability_sync.py`) pulls caller Google events (`events.list`, `singleEvents=false` — RRULE master, not expanded) rolling **30-day** (`SYNC_WINDOW_DAYS`), reuses `create_associate_availability_block()` — never reimpl. **No overlap check**. Skips: cancelled, `transparency=transparent`, all-day (no `dateTime`), self-declined.
-- Recurring import: plain never-ending weekly RRULE only (`FREQ=WEEKLY`, no `INTERVAL`>1, no `UNTIL`/`COUNT`, `BYDAY` weekday tokens) — else skip, never approx. One-off Google → one-off block.
-- Associate active at N centers → block at **every** active center (vs primary-only). Real-world unavail not center-scoped though `AssociateAvailabilityBlock.center` required FK (no `AssociateLeave`-style `ALL_CENTERS` for blocks).
-- Re-sync reconciles (vs additive-only): per Google event id vs previously-imported active rows — unchanged (same center-set+time/day/reason) → skip; new/edited → replace+create inside **one short `atomic()` per event**; gone from Google → removed. (Overlap-conflict skipping removed; see 2026-09-21.)
-- Each created block runs `apply_availability_exception_hooks(source_type=ASSOCIATE_BLOCK)` parity w/ manual.
-- `last_synced_at` only after sync **succeeds**.
-- Model adds: `integrations.GoogleCalendarConnection.last_synced_at`, `appointments.AssociateAvailabilityBlock.google_event_id`. **No agent migration** — user `makemigrations`/`migrate`.
-- FE (`Biopeak-Nexus-Admin-FE`): no Google Calendar UI yet — first build in `SettingsPage`, card/`createMutation`+`createQuery`/Zustand-auth patterns from scratch.
-- **Follow-up:** `/callback/` no longer forwards raw `code`/`state` — signs `{code, state}` opaque ticket (`google_oauth.sign_oauth_redirect()`/`resolve_oauth_ticket()`, `django.core.signing`, 10-min expiry, no DB/cache — stateless off `SECRET_KEY`) → redirect `#t=<ticket>` only. `/complete/` + `/personal/complete/` take `{"ticket": ...}` not `{"code": ...}`; `resolve_oauth_ticket()` checks `state` matches endpoint (shared vs personal) — no cross-flow replay. Bruno: `google_oauth_code` → `google_oauth_ticket`.
-- **Bug caught:** FE OAuth-callback hook only in `ProtectedLayout`, but `ADMIN_FRONTEND_URL` → `/` renders `<Login/>` — authed user hits `Login.tsx:125-128` `<Navigate to={resolveLoginRedirect(...)} replace/>` before `ProtectedLayout` → drop hash. Fix: capture `#t=...` sync at `App.tsx` module scope (`captureGoogleCalendarOAuthTicket()`, same spot as `hydrateFromToken()`), stash `sessionStorage`, strip hash. `ProtectedLayout` hook consumes+clears sessionStorage once auth confirmed.
-- **Follow-up — personal scope read/write:** grant write upfront. `PERSONAL_SCOPES` (`calendar.events.readonly`) removed; personal connect uses `google_oauth.SCOPES` (`calendar.events`) same as shared — `build_auth_url()` dropped unused `scopes` override. Sync (`availability_sync.py`) still read-only. Future write-back → no reconnect for old read-only grant holders.
-- **Follow-up — merge `/callback/` + `/complete/`:** `GoogleCalendarCompleteView`/`GoogleCalendarPersonalCompleteView` + `/complete/`/`/personal/complete/` deleted — `GoogleCalendarCallbackView.get()` (`AllowAny`) does exchange+email+flow+user+save then redirect. `sign_oauth_redirect()`/`unsign_oauth_redirect()` → `sign_oauth_state()`/`unsign_oauth_state()` — `state` carries `{"flow": "shared"|"personal", "user_id": ...}`, signed at connect time, echoed by Google. Only way `/callback/` knows Biopeak user for personal (no JWT on Google redirect). Shared still resolves by email; both sign `state` so tampered flow/user_id rejected.
-  - **Follow-up — personal email must match Biopeak login:** `_complete_personal_connection()` `if google_email.lower() != user.email.lower(): return "Connect the same Google account you log into Biopeak with.", None` after `GOOGLE_CALENDAR_ID` check. Product policy not security (tokens already only on `request.user` row). Tradeoff: staff Gmail ≠ Biopeak login blocked.
-  - **Follow-up, 2026-09-17 — supersedes lines above on gone/overlap:** (1) "Gone": one-off `google_event_id` deactivation candidate only if `end_datetime > time_min` (recurring always candidates — never-ending `FREQ=WEEKLY` always in window). Else past one-offs miscounted "removed". Biopeak-created (`google_event_id=""`) already `.exclude(google_event_id="")`. (2) `assert_associate_block_no_overlap()` off sync path — overlapping blocks allowed. Per-event savepoint + `skipped_conflicts`/`DRFValidationError` catch removed; `create_associate_availability_block()` unconditional. `"skipped_conflicts"` dropped from return. Manual create still overlap-checked.
-  - Refactor: Complete views → `_persist_connection()`, `_complete_shared_connection()`, `_complete_personal_connection()`.
-  - `/callback/` redirect: `#gcal_connected=1` or `#gcal_error=<message>` only — never ticket/tokens/email. FE gets `google_email` from `GET /google-calendar/`.
-  - FE: `capture-oauth-ticket.ts` → `capture-oauth-result.ts` (`captureGoogleCalendarOAuthResult`/`consumeGoogleCalendarOAuthResult`) — `{status: 'connected'} | {status: 'error', message}`. Hook: toast + `queryClient.invalidateQueries(googleCalendarKeys.status)` only. `useCompleteGoogleCalendarConnect` + `googleCalendarApi.complete()` deleted.
-  - Bruno: `Complete.bru`/`PersonalComplete.bru` deleted; Connect/PersonalConnect/Callback docs rewritten; `google_oauth_ticket` → `google_oauth_code`/`google_oauth_state`.
+- Never `SomeView.as_view()(request)` from another DRF view → re-wrap → 500. Use `dispatch_to_view`.
+- Never `FilteredRelation` + `prefetch_related` on that alias → `ValueError` 500.
+- ORM in serializers/utils: `filter(...).first()`, not `.get()`.
+- Serializer `create`/`update` own persistence. Views: `serializer.save(...)`; no capture/reload for write-response unless create needs nested prefetch.
+- `utils/db.py` = mutations only. Views: `*ViewMeta` + `filter_kwargs`. No `http_method_names`.
+- M2M write: `{id}` lists; remove before add. Spec: [`m2m-serializer-pattern.md`](m2m-serializer-pattern.md).
+- django-debug-toolbar v7 + `CompressedManifestStaticFilesStorage`: need `collectstatic` or toolbar 500. Tests: `APIRequestFactory` + `as_view()` (toolbar middleware breaks `APIClient` in development).
+- Paginated list: `response.data["data"]` list, not `["data"]["results"]`.
 
 ---
 
-## 2026-09-18 — Google Calendar push-notification webhook
+## Booking / slots / therapy
 
-- Real-time trigger for `sync_google_events_to_availability_blocks()` (personal only — shared organizer never watched). Prev: manual `POST /sync/` only. New: `POST /google-calendar/webhook/` (public, channel id + resource id verify — see `docs/google-calendar-integration.md`).
-- **Blocked on migration agent can't run:** `GoogleCalendarConnection` gained `watch_channel_id`/`watch_resource_id`/`watch_channel_token`/`watch_expires_at`. `makemigrations --check --dry-run` → one `integrations` migration needed — not generated. `integrations/tests/test_google_calendar_webhook.py` → `UndefinedColumn` until `uv run manage.py makemigrations integrations && uv run manage.py migrate`.
-- Renewal cmd `process_google_calendar_channel_expiry_renewal` (was `renew_google_calendar_watch_channels`) — daily like `process_communication_outbox`. Also self-heal on every `POST /sync/` via `ensure_watch_channel_active()`.
-- Watch channels not renewable in place — `ensure_watch_channel_active()` start new then stop old (best-effort). (Superseded 2026-09-21: used to stop first; failed start → no channel.)
-- Webhook = bare "changed, look" signal → full-window sync, not incremental `events.list`. No `sync_token` (deferred efficiency).
-- Webhook always 200 — even unknown channel / failed sync (`GOOGLE_SYNC_ERRORS`, logged). Non-2xx → Google retry → channel may stop.
-- Bruno: `google_calendar/Webhook.bru` (`auth: none`); `collection.bru` JWT-skip also `/google-calendar/webhook`.
-- **Follow-up — `watch_channel_token` removed (supersedes above):** channel id = server `uuid.uuid4()`; `find_connection_for_watch_channel()` on channel+resource id enough. Removed field (migration `0006_remove_googlecalendarconnection_watch_channel_token`), `channel_token_is_valid()`, Google `token`, header check. Debug `print()`/`logger.info()` left (user testing).
-
-## 2026-09-21 — Personal Google Calendar outbound (Biopeak → Google)
-
-- Manual associate block / recurring series / leave create+update+soft-off enqueue `CommunicationOutbox` (`channel=google_calendar`, event `associate_block_sync` / `associate_leave_sync`). Worker desired-state via `personal_outbound.sync_*` → `send_google_calendar_outbound_event` (personal tokens only).
-- Loop fence: (1) `AvailabilityOrigin` on block+leave (`manual`|`google`) — inbound reconcile / `_deactivate` only `origin=google`; enqueue + outbound skip non-manual. (2) Outbound insert/patch stamps private `extendedProperties.private.biopeakOutbound=1`; inbound `build_spec_from_event` skips those. Recurring create mints shared `series_id` (one Google RRULE). Outbox: nullable `appointment` + exactly-one target + partial unique on open PENDING/FAILED per series/block/leave target.
-- Not connected → outbox SKIPPED `"Personal Google Calendar not connected"`. No agent migrations — user `makemigrations` appointments+integrations then migrate.
+- Book → `confirmed`. Cancel/reschedule from `confirmed`|`checked_in`. `in_progress` not reversible. No-show from `confirmed` only.
+- Find Slots: staff **must** `preferred`; customer **must not** (v2 auto-assign). `health_coach_id` → 400 use `specialty_id`. `care_team_id` XOR doctor/specialty. Room w/ ≥1 bookable equipment → `equipment_id` required.
+- Staff find-slots = 15-min grid (`find_appointment_slots`). Customer v2 = service length. Slot `end` = start+15m; book `end` = start+duration.
+- Book/reschedule flatten top-level IDs. Slots nest `care_team`/`doctor`/`specialty`/`room`/`equipment`.
+- Customer overlap GiST **global**. Concurrent book: GiST room/equip/associate → loser `"Slot no longer available."`
+- Invalid center profile/service → 400 no existence oracle.
+- Staff preferred Find Slots: `include_past=True`. Staff walk-in past book OK; skip confirm WA/GC if `start` < now. Customer book + any reschedule: no past `start`.
+- Therapy `program_service`: customer always; staff optional (omit = walk-in). Windows: slots `now+24h…+7d`; book `now+4h…+7d`; reschedule cutoff `now ≤ start−4h`. Idempotent book lookup **before** window validate.
+- Block book/slots/reschedule/complete when apt local date `> program.expires_at` (null = open).
+- `Appointment.program_service` partial unique one open apt per line. Complete → redeem + `sessions_used`+1.
+- Idempotent book: same key+payload → 200 no re-check; different payload → 409.
 
 ---
 
-## 2026-09-20 — Google sync: Google repeat options → Biopeak payloads
+## Identity / leads / profiles
 
-- `availability_sync.py` maps Google recurrence → Biopeak recurring-block: `FREQ=DAILY` → all 7 days; `FREQ=WEEKLY` (every 1) + `BYDAY` → those days; `UNTIL` → `effective_until` (last occurrence start date, UTC→local). Support only payload-matched: `COUNT`, `INTERVAL`>1, monthly, yearly **skipped**. `EXDATE` ignored (over-blocks).
-- All-day (non-recurring) or `eventType=outOfOffice` → `AssociateLeave` (`scope=all_centers`, `center=null`, all-day end = 23:59:59 not `time.max`). Recurring all-day stays recurring block. Leave reconciles per `google_event_id` like blocks; hooks per active center.
-- Model add: `AssociateLeave.google_event_id`. **No agent migration** — user `makemigrations appointments`/`migrate` (`UndefinedColumn` on leave until then).
-- **Tests (2026-09-20):** `integrations/tests/test_google_calendar_availability_sync.py` (48 tests, `Test` prefix). `manage.py test` w/ no/app label breaks (`'tests' module incorrectly imported`); run: `uv run manage.py test integrations.tests.test_google_calendar_availability_sync`. Pre-existing fail `appointments.tests.test_associate_google_calendar` (`..._cannot_view_another_associates_status`, `..._cannot_sync_via_admin_only_endpoint`, 400 not 403) on clean HEAD too — fixed 2026-09-29 (renamed).
-- **Live gotcha:** watch channel live → Google edits trigger webhook seconds later → manual `POST /sync/` often `0/0/0`. Check DB state, not counts.
-
----
-
-## 2026-09-12 — Center associate list role filter
-
-- `GET /centers/<uuid>/associates/?role=0|1` uses `Exists` on `AssociateCenterAssignmentRole`. Never `role_links__` JOIN — N active roles → N duplicate assignments.
-
-## 2026-09-12 — Care teams `members_live`
-
-- `GET /centers/<uuid>/care-teams/?members_live=0|1`. `1` = every member live at center w/ mapped role active. `0` = ≥1 broken (inactive user/assignment/unmapped role link/inactive `AssociateRole`). Omit/junk = no filter. Independent of team `active=`. `Exists` on members, not JOIN. Same live rules as booking `members_with_live_center_role`. Team always ≥2 members (write + `members_count>=2`); filter no empty special-case. `1` ≠ bookable-team picker — booking still expands leftover live members.
+- Onboarding complete flag = `CustomerProfile.is_onboarding_completed` only (not Lead). Both `is_onboarding_sent` default False.
+- Leads write `/leads/v2/` (POST create+shell). v1 GET/POST/PATCH → 400. Login-phone-direct = User lookup only.
+- Associate write `role_ids[]`; RBAC OR across roles. Care-team member still one `role_id`.
+- Unassigned admin (no associate / zero assignments) may hit any center. Associate zero assignments → denied.
+- Customer associate list: `X-Center-ID` exclusive when present.
+- **CustomerProfile.unique_id (2026-11-03):** renamed from `code`. Format `BP-YYMMXXX` (e.g. `BP-2611001`). Global seq `customer_profiles`, `fill_length=3`, never monthly-reset; `YYMM` is create-time stamp only. After `999` digits grow (`1000`…). Unique, nullable until backfill. UUID stays PK/URLs/headers. Helper `accounts/customers/utils/unique_ids.py`. Assign on create (center serializers + lead v2 shell/convert). Do **not** blanket-expose APIs — add per endpoint when asked. Backfill: `assets/scripts/backfill_customer_profile_unique_ids.sql` (Asia/Kolkata). User owns rename migration.
 
 ---
 
-## Non-obvious decisions
+## Communications / Google
 
-Pointers: appointments+availability → [`docs/appointments-frontend-api.md`](appointments-frontend-api.md). Google Calendar → [`docs/google-calendar-integration.md`](google-calendar-integration.md). Result fetch → [`docs/result-fetch-flow.md`](result-fetch-flow.md).
-
-**API / tenancy**
-
-- Customer associate list: `X-Center-ID` present → exclusive center filter; `center_id` query only if header absent. Role join vs each returned customer-assignment center; keep nested roles; no multi-center fan-out.
-- **Never** `FilteredRelation` + `prefetch_related` on that alias → Django `ValueError` 500. Prefetch `associate__center_assignments` + `active_role_links_prefetch`; resolve via `assignment_for_center(associate, center_id)`.
-- `POST .../link-associates/`: profile missing → 404; dedupe `add`/`remove` IDs before `bulk_create` (dup IDs → Postgres ON CONFLICT 500).
-- `Associate.centers_count` = all `AssociateCenterAssignment` rows (any active). Assignment mutations refresh via subquery; center delete bulk-updates before cascade.
-- Admin `GET`/`POST /associates/`: max-three center preview, no assignment flags. Create needs non-empty `add_centers`; each `is_admin` and/or `is_care_staff`; dup center UUID = last wins. Create `centers_count` may be stale — FE refetch.
-- Hours/closures write: `/centers/<uuid>/availability/operating-hours/` GET/PATCH bulk upsert; `/closures/` GET/POST + PATCH soft reopen. `CenterClosure.type`=`holiday`|`manual` + `reason`. Closures GET `.order_by("-date")` only. Availability URL `<uuid:center_id>` so resource `pk` no collide. Center calendar default `granularity=week`.
-- Unassigned admin (no associate profile, or zero active assignments) may hit any center. Associate w/ zero active assignments denied — last-assignment offboard revokes, no escalate.
-
-**Programs / composites / results**
-
-- `CompositeTemplate.code` = required unique user-entered SKU; no sequence UID.
-- `ProgramService` line shared: keep `sessions_count`/`sessions_used`/`sessions_cancelled`. Therapy runtime + `RedemptionHistory` → `TherapyProgramService`. Cancel/redemption only if `Program.program_type` is `THERAPY`. `wellness_*` = API aliases.
-- Composite add-ons: keep repeated `add_services`; no pricing change; no inherit template prerequisites. Authoritative list: `profiles/<profile_uuid>/programs/composite-program-services/`.
-- Composite prerequisites: singleton `CompositeServicePrerequisite` on `CompositeTemplateService`; empty M2M OK; default `require_any`. Spec: [`docs/composite-service-prerequisites-frontend-prd.md`](composite-service-prerequisites-frontend-prd.md).
-- Program UID: `P`-prefix ≥4-digit sequence on active therapy+composite create; API `uid` read-only; nullable; no DB unique. `backfill_program_uids` **not run yet**.
-- `ServiceResult` belongs to `ProgramService`. Module-category on serializer, not model. Unmapped → `unknown`. Invalid `module_category` query → no rows.
-- Counters persist via ORM subquery (include inactive/cancelled); API reads never annotate. Repair: `recompute_service_document_counts`.
-- ProgramService cancel: active flag + audit only; result/doc rows unchanged. Therapy cancel needs `X-Center-ID`. Legacy last-service writes parent cancel metadata w/o deactivating parent/subtype.
-- Global service → empty `GET /services/<uuid>/centers/`. Spec: [`docs/service-centers-products-frontend-eprd.md`](service-centers-products-frontend-eprd.md).
-
-**Assessments / fetch (2026-09-08/10)**
-
-- `ResultRequest` parent of 1+ `ServiceResult`. Provider via `ResultRequest.product.provider`. Layout: `integrations/<provider>/{sdk,tasks,utils/results}.py`. BugSpeaks = reference. Unknown provider → `None`; unknown product → no-op. Fetch/refetch start `ResultRequestThread`. Refetch reuses request, deletes `ServiceResult`+docs, re-queues. Cancel: `status`+`updated_at` only. Reject completed/already-cancelled. FE does **not** poll.
-- Strand NutriDNA + Genomic Health Insights: persist any PDF/VCF/JSON. All present → `completed`; ≥1 missing → `partially_fetched` + `failure_detail`; never `failed` w/o `ServiceResult`. Partial may cancel (keep results) or destructive refetch.
-- EVO 360: `client_id`/`client_secret`/`center_id` + `profile_data.email`. One-way PDF only if provider status `found`; else `failed` (no poll). Store `found` in `ServiceResult.data`; don't persist temp PDF URL.
-- `ProgramService.fetch_count` = all result requests; `fetch_results_count`/`fetch_documents_count` via `result_mode=fetch`; `fetch_pending_count` excludes completed/failed/cancelled (partial still pending). Hooks refresh 4 together; `recompute_service_document_counts` repairs.
-
-**Leads / onboarding / inventory**
-
-- Onboarding completion only `CustomerProfile.is_onboarding_completed` (not Lead). Both `is_onboarding_sent` default `False`. Admin/associate may PATCH `is_onboarding_completed` on `PATCH /profiles/{id}/` (`CenterCustomerProfileDetailSerializer`); center home list serializer still read-only. Pre-consult complete also sets it. `is_invited` independent. Ready: lead `sent=True` and (no profile or profile incomplete).
-- Leads writes `/leads/v2/` (POST create+shell, PATCH update+shell sync). v1 GET/POST/PATCH → 400; v1 DELETE still `/leads/{id}/`. `/auth/login-phone-direct/` = User lookup only, no shell.
-- Emergency contact fields dropped from `CustomerProfile` + pre-consult baseline.
-- Test kit: app `test_kit_inventory`. Global APIs, no `X-Center-ID`. One active kit/`CustomerProfile`. Eligible = completed pre-consult + no active kit. POST `/assign` `assigned_to` = non-empty profile UUID array; one txn; any fail → none; response `detail` only. `Product.is_assignable` default `False`. QC acks `qc_ack_packaging` / `qc_ack_all_components` write-gate on `Item`.
-- Room/equip codes globally unique: `{EQ|RM}-{center.code}-{seq}`. Old `EQ-0005` rows keep format. Seq names stay `equipments_{center_id}` / `rooms_{center_id}`.
-- `Service.name` unique catalog-wide, case-insensitive. `Room.name` / `Equipment.name` unique per center, case-insensitive. Same row may keep name. Inactive still occupy name. Existing dups block migrate.
-
-**Diagnostics (Orange Labs)**
-
-- App `diagnostics_orders`. National `CatalogItem` (`test_id` int unique). No city prices / category / fasting / pincode ranges.
-- Create: `diagnostic_tests` = int array; Orange splits by `is_custom_package` — `False` → `tests:[{test_id:str}]`, `True` → `packages:[{package_id:str}]`. Local lines all `DiagnosticOrderLine.test_id`. Unique `(order_customer, test_id)`. Token never in FE.
-- Auth: `IsAdminUser | IsAssociateUser` (no feature gate; `X-Center-ID` optional by design).
-- Webhook `POST /webhooks/orange-labs/`: HMAC `X-OH-Signature` (raw body, SHA256 hex); idempotency `X-OH-Event-Id`; lookup `payload.request.city_request_id` (fallback `payload.order.city_request_id`); status = top-level `event`.
-- Eligible customers: active + onboarding completed + active center assignment + no open (non-terminal) order. No program / pre-consult join.
-- Migration `0005` first apply **wipes** diagnostics orders + catalog (irreversible; empty = no-op). Re-seed via `POST /add-test-package/`.
-
-**Pre-consult**
-
-- Envelope: `success` top-level only; never in `data`. `pre_consultation_response()` strips stray `success`.
-- Baseline v2 PUT requires `height` (cm) + `weight` (kg); persists `CustomerProfile.height_cm` / `weight_kg`. GET returns them (null until set). No unit fields. v1 baseline unchanged.
+- Spec: [`google-calendar-integration.md`](google-calendar-integration.md). WhatsApp secrets env-only; template names in `WHATSAPP_TEMPLATE_BY_EVENT`.
+- Book/cancel/reschedule enqueue only (`on_commit`). Outbox fail must not roll back apt.
+- Outbox claim = conditional `update`, no row locks. Stale WA `SENDING` → SKIPPED; stale Google `SENDING` → FAILED.
+- Shared organizer = `GOOGLE_CALENDAR_ID` on `GoogleCalendarConnection`. Connected = `is_active` + refresh token. Disconnect soft-off only (`is_active=False`).
+- Deactivate tokens only on Google `invalid_grant` when sent token still stored.
+- Google invite attendees = associates only (no customer email). Description = staff summary fields only — no apt code/date/time/mode/equipment/care-team list.
+- Personal inbound: skip Biopeak-marked / shared-organizer events. Edited/gone = soft-off + recreate Google-origin rows.
+- Webhook always 200. Watch: start new then stop old.
+- Sweep: `assets/scripts/sweep_jobs.sh` (reminders → outbox → exceptions → Google renew → protocol AI `--limit 5`).
 
 ---
 
-## Appointments / availability traps
+## Supplementation / AI (traps only — contracts in docs/)
 
-Canonical contract: [`docs/appointments-frontend-api.md`](appointments-frontend-api.md).
-
-- Book lands `confirmed`. Cancel/reschedule from `confirmed` or `checked_in`; reschedule lands `confirmed`. `in_progress` not reversible (ack-only exceptions). No-show from `confirmed` only.
-- Never `SomeView.as_view()(request)` from another DRF view → re-wrap `Request` → `AssertionError` 500. Dispatch via view instance handler (`dispatch_to_view`).
-- Customer overlap GiST **global** (any center) on busy exclusive range. Python busy map: customer, no center filter. Concurrent book: GiST also on room / equipment / associate. Loser `IntegrityError` → `"Slot no longer available."` No `select_for_update()`.
-- Slot/book IDs: `customer_profile_id` / `service_id` vs this center's active assignment. Miss/inactive/other-center → 400 `"Invalid customer profile for this center."` / `"Invalid service for this center."` (no existence oracle).
-- Find Slots `date` < `timezone.localdate()` (`Asia/Kolkata`) → 400 `"Date cannot be in the past."` (not empty `slots`). Today still OK; elapsed starts today still omitted in `find_appointment_slots`. Direct book/reschedule `start` < `timezone.now()` → same 400.
-- Idempotent book: look up `Idempotency-Key` **before** serializer validation / `resolve_booking_combo`. Same key+payload → 200 `"Appointment retrieved."` without re-checking the slot or customer 4h–7d window. Same key+different payload → 409.
-- Slots return **one combo** per start/end. Slot body nested `care_team`/`doctor`/`specialty`/`room`/`equipment` (omit absent). Book/reschedule flatten `doctor_id`/`specialty_id`/`care_team_id`/`room_id`/`equipment_id` (no pin `associates[]`). `care_team_id` XOR doctor/specialty. `doctor_id` outside service roles → extra, not 400. `specialty_id` must map a live non-doctor hat to this service’s role reqs. in_person always needs room else 400. Room must have active `room_type_ref`; if assignment has room-type reqs, type ∈ that set (OR). Equipment: FE pick; room with ≥1 bookable (active + type active + on that room) → `equipment_id` required; 0 bookable → omit; no first-unit auto-pick. Virtual: no room/equipment. `end` == `start` + assignment duration.
-- `Appointment.notes` writable on book/reschedule; omit/`null` on reschedule keeps existing; `""` clears. Not passed raw to Google — wrapped via `build_appointment_*_notes()`.
-- List `?search=`: customer name/email/phone, apt `code`, service name. `search` w/o `start` = all dates, newest first. Hard-cap 500. `associate_id`/`role_id` match `associates[]`; together = **OR**.
-- Exceptions `status` query `open`|`resolved`; junk → 400.
-- Care team: name unique per center case-insensitive. Member write rejects inactive `AssociateRole` (`400` `"Role is inactive."`). Expand live assignment does **not** 400 when team misses a service role — leftover roles searched. Empty live members + `care_team_id` → 400 `"Care team has no live members at this center."`.
-- Availability: PATCH `is_active=false`; no DELETE. Recurring POST `days_of_week` `"0"`…`"6"` → 1 row/day; 201 `{detail, data}` `data` = list. Assoc one-off = datetimes; room/equip one-off + downtime = `date`+`start_time`+`end_time` (`settings.TIME_ZONE`). `scope=all_centers` leave stores `center=null`. Leave wins vs associate block. Downtime wins vs room/equip block.
-- Roster ⊆ center hours: write 400 if before open / after close / closed day / missing hours. Hours PATCH 400 if shrink/close would leave active roster outside. Codes: `before_opening`, `after_closing`, `center_closed`, `center_hours_missing`, `roster_on_closed_day`. Inclusive edges. Existing out-of-range rows stay until next save. Roster POST/PATCH enqueues async `associate_roster` scan; response top-level `exception_scan`.
-- Care-team calendar base = intersect live members' (center ∩ roster). Team blocks subtract from member associate calendars + slots + ops capacity. Overlap only vs other active blocks on **same** team. `ExceptionSourceType.CARE_TEAM_BLOCK` matches `Appointment.care_team` only (not solo member apts). `PATCH is_active=false` also soft-deactivates that team's active blocks **and resolves** those open `care_team_block` exceptions; reactivate does not revive. One-off ExclusionConstraint; recurring Python-only.
-- Exception scans: PATCH of window fields (`start_datetime`/`end_datetime`/`date`/`start_time`/`end_time`/`day_of_week`/`effective_from`/`effective_until`/recurring times) retriggers detection. Scan also **closes** open exceptions that no longer overlap. Create / reactivate / deactivate still hooked.
-- Operations dashboards: junk `start`/`end` → 400 `"Invalid start|end date. Use YYYY-MM-DD."`; junk `granularity` → 400 `"Invalid granularity. Use day, week, or month."`; end before start → 400. Booked minutes/hours/counts/utilization/bottleneck dependents = busy statuses only (`confirmed`/`checked_in`/`in_progress`).
+- Spec tracker: [`supplementation-plan.md`](supplementation-plan.md). Don't put unbuilt routes in tracker.
+- Global app; admin|associate; no center on most staff routes. Customer plan: `IsCustomerUser` + `X-Customer-Profile-ID`.
+- No `select_for_update`. Draft version numbers retry unique (5×). Approve/publish = conditional status updates.
+- AI: `ProtocolAiJob` → Luma `POST .../clients/<uuid>/protocol-recommendation`. Wake FIFO dedup = job id. Processing >2 min → back to pending.
+- Luma errors: map by HTTP status; body `detail` logged only (2026-11-02). 401/404/409/422 + else → "Luma is unavailable." Failures burn attempts.
+- **Held AI items (2026-11-03):** all five dose fields JSON null + instructions `"Do not use."`. Partial null fails job. `ProtocolItem` stays NOT NULL. Accept of held → draft 400 missing dose; FE hide Accept. Deploy Nexus before Luma #250.
 
 ---
 
-## Communications / Google Calendar traps
+## Other product traps
+
+- Pre-consult envelope: top-level `success` only. Baseline v2: height cm + weight kg on profile.
+- Diagnostics: Orange catalog int `test_id`. Webhook HMAC `X-OH-Signature`. Migration `0005` first apply wipes orders+catalog.
+- Test kit: global, one active kit/profile. Assign `assigned_to` array = all-or-nothing txn.
+- Consent: latest form = newest active `ConsentForm`. Accept atomic + required-name unique. Upload PDF admin-only.
+- App download: public `GET /app/`. Shipped QR `https://biopeak.app/scan` must CDN→`/app/`. IP = last `X-Forwarded-For` hop.
+- Program UID `P`+seq; `backfill_program_uids` not run yet. `CompositeTemplate.code` = user SKU.
+- Service/room/equipment name uniques case-insensitive; inactive still occupy name.
+- Room/equip codes `{EQ|RM}-{center.code}-{seq}`; seq names `equipments_{center_id}` / `rooms_{center_id}`.
+
+---
+
+## Conventions (extra vs CODING_RULES)
+
 
 Canonical: [`docs/google-calendar-integration.md`](google-calendar-integration.md).
 
@@ -278,7 +116,8 @@ Canonical: [`docs/google-calendar-integration.md`](google-calendar-integration.m
 - Outbox `CommunicationOutbox` (`channel=whatsapp|google_calendar`). Worker `process_communication_outbox` (SQS wake + 15 min sweep). Claim via conditional `update` (no `select_for_update`). Stale WhatsApp `SENDING` → **SKIPPED**; stale Google `SENDING` → **FAILED** (retry). HTTP WhatsApp success w/o parsable `wamid` still ACCEPTED; max 2 attempts then SKIPPED.
 - **WA vs Meet (Option A, 2026-09-30):** Book/cancel/reschedule enqueue **GC then WA**. Confirm/reschedule virtual WA defers only while Meet blank **and** same-apt Google still open (`PENDING`/`FAILED` retryable/`SENDING`). Meet already set (reschedule) → no wait. Cancel / reminder / no-show never defer for Meet. In-person never waits. Rebuild `template_parameters` at WA send from live apt. After apt GC `ACCEPTED`/`SKIPPED`, wake if pending WA remains. Reminder/no-show stay WA-only.
 - Unique `(appointment, channel, event_type)` for terminal events: confirmed, cancelled, reminder, no_show, **pre_care, post_care** — while status in pending/sending/accepted/sent/delivered/read/**failed** (blocks dup while worker retries). Reminder/pre/post also anti-join **any** existing row (incl. SKIPPED). Google coalesces one open row per appointment. Webhook `get_or_create` on `event_key`; `IntegrityError` → dup. Webhook `GET|POST /webhooks/whatsapp/`.
-- Ops: SQS wake + EventBridge `rate(15 minutes)` `assets/scripts/sweep_jobs.sh` (reminders → outbox → exception scans → Google watch renewal). Env `*_COMMUNICATION_OUTBOX_WAKE_QUEUE_URL`. **Not** in `deploy-aws.yml`.
+- Ops: SQS wake + EventBridge `rate(15 minutes)` `assets/scripts/sweep_jobs.sh` (reminders → outbox → exception scans → Google watch renewal → protocol/AI → short wearable jobs). Env `*_COMMUNICATION_OUTBOX_WAKE_QUEUE_URL`. **Not** in `deploy-aws.yml`.
+- ROOK schedules (must provision in ECS/EventBridge separately; deploy-aws.yml does not manage schedules): keep existing shared `rate(15 minutes)` target `bash assets/scripts/sweep_jobs.sh` and **add** an independent `rate(15 minutes)` ECS task running `bash assets/scripts/process_health_recovery.sh`. Both entrypoints use distinct PostgreSQL session advisory locks to skip overlapping invocations across ECS tasks. The shared lock protects all existing queue drains; recovery lock enforces one running recovery task globally while normal normalization/freshness work proceeds independently. Recovery runs `--only-recovery --limit 1`, stops at 80 minutes (job lease >=90 minutes); later ticks skip while it is active. Enqueue is oldest-first capped at 2/tick and at most 10 open recovery jobs. Configure both tasks against the same PostgreSQL primary and verify IAM/environment/CloudWatch logs. Do **not** schedule an unguarded `process_health_jobs --only-recovery` task or put recovery back into the shared tick. The code does not create EventBridge schedules automatically.
 - Google: one fixed shared organizer (`GOOGLE_CALENDAR_ID`). Tokens on `GoogleCalendarConnection` (1:1 `User`, admin or associate). Resolve via `google_email__iexact` + connection/user active + live admin/associate profile + live `google_refresh_token` (not email alone — disconnect keeps `google_email`).
 - Sync best-effort async. Never Google HTTP on request path. `GOOGLE_SYNC_ERRORS` = `(requests.RequestException, ValueError, InvalidToken, ImproperlyConfigured)` — exclude `KeyError`/`TypeError` (our bugs must crash).
 - Event id = appointment UUID hex. Book title `"Appointment Confirmed"`; reschedule `"Appointment Rescheduled"`. Cancel does **not** clear `google_event_id`/`google_meet_link`. Leave virtual → clear Meet (`clear_meet_link=True`). Insert/patch success then `appointment.save` `DatabaseError` → log+swallow; do **not** delete Google event.
@@ -419,4 +258,8 @@ Canonical: [`docs/google-calendar-integration.md`](google-calendar-integration.m
 - **AI protocol recommendations (2026-10-29):** `POST /supplementation/profiles/<uuid>/protocols/ai/` writes `ProtocolAiJob` (`pending`) and wakes SQS (`*_PROTOCOL_AI_WAKE_QUEUE_URL`, body `process_protocol_ai_jobs --job-id <uuid>`). It does not create a protocol. Worker `process_protocol_ai_jobs` (wake + `sweep_jobs.sh`) claims with a conditional update, calls Luma `POST /luma/v1/integrations/nexus/clients/<uuid>/protocol-recommendation` (`X-API-Key`, body carries `metsights_profile_id`), and saves `AiRecommendation.model` plus items. 1 try and 1 retry, then the job stays `failed`. A Luma request error, a save clash, or any other error marks that job `failed` and the worker continues. FIFO wake dedup id is the job id. That wake runs only that job. A `processing` row older than 2 minutes returns to `pending` and that attempt is not counted. `sweep_jobs.sh` runs `process_protocol_ai_jobs --limit 1`. No migration file — user `makemigrations supplementation`. List is one row per job from queue time: `processing`, `failed` (`error`), then `pending` while any item is `pending` or `modified`, else `completed`. `recommendation_status=pending` also includes in-flight jobs. Detail `status` is `under_review` or `applied`. Detail and modify item responses use `supplement` `{id, product_name, brand_name, form, manufacturer}` (`form` is the stored code) and omit `supplement_id`. Modify stores the edit on `final_*` and still needs accept or reject. Draft copies accepted `final_*` onto a new protocol draft v1. An inactive accepted product → 400 `Supplement is inactive.` and the applied claim rolls back. User owns the migration.
 - `POST /supplementation/protocols/<uuid:pk>/versions/` creates the next draft on that protocol. `201`. `data` is `{new_protocol_version_id}` only. Unknown protocol → 404. Inactive protocol still loads. Body is `summary_notes` (optional; omit or blank stores null on `ProtocolVersion.summary_notes`). Omit `source_version_id` for an empty draft. Send it to clone items from a version on the same customer profile (else 404 `Protocol version not found.`). Source status must be `approved`, `scheduled`, `active`, `superseded`, `expired`, or `cancelled`. `draft` or `under_review` → 400 `Protocol version can only be copied once it is approved.` An inactive product on the source → 400 `source_version_id` `Supplement is inactive.` and no draft is saved. New row is `draft`, next `version_number`, dates null, `notes` null, `is_ongoing` false. `current_version` stays. `name` and `purpose` stay on `Protocol` (migration `0005` backfills them from version 1, then drops the version columns). One `version_drafted` event, `client_visible` false. `after.source_version_id` only when cloned. Lock the protocol row, then `Max(version_number) + 1`.
 - **Protocol AI → Luma (2026-10-30):** `post_protocol_recommendation` reads `settings.LUMA_BASE_URL` and `settings.LUMA_NEXUS_API_KEY`. Settings load `DEV_` / `STG_` / `PRD_` `LUMA_BASE_URL` and `LUMA_NEXUS_API_KEY`, same pattern as `PROTOCOL_AI_WAKE_QUEUE_URL`. Same key as #113's GET. Luma reads only its own Mongo, never Metflux. Nexus maps non-2xx by status only and never reads Luma's body: 401 key, 404 client not found, 409 identity, 422 no usable report data, anything else plus timeout or connection error is "Luma is unavailable." Every failure, 4xx included, burns both attempts (`ponytail:` marker). `get_metsights_profile_id` is a copy of #113's helper (`ponytail:` marker), to be deduped once both merge. Accepted for v1: Luma still doses a product that conflicts with a constraint, and its `rationale` starts with "Caution: …".
+
+- Representation uses prefetched `to_attr`.
+- Route getters take no id args; `get_object_or_404` from `self.kwargs["pk"]`.
+- Hours/closures: availability URLs use `<uuid:center_id>` so resource `pk` no collide.
 

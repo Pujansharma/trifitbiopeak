@@ -47,6 +47,14 @@ class CustomerProfile(BaseUUIDModel, AbstractUserProfile):
     customer = models.ForeignKey(
         Customer, on_delete=models.PROTECT, related_name="profiles"
     )
+    unique_id = models.CharField(
+        max_length=20,
+        unique=True,
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="Public customer profile code. Format BP-YYMMXXX.",
+    )
     is_main = models.BooleanField(default=False, editable=False)
 
     is_legacy = models.BooleanField(default=False)

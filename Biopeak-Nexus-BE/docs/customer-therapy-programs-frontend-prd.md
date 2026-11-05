@@ -7,7 +7,7 @@ Provide a profile-scoped frontend experience for:
 - Listing therapy programs assigned to a customer profile.
 - Filtering programs by active, completion, and expiry state.
 - Creating a therapy program for a customer profile as an admin or associate.
-- Displaying summary counts plus previews of up to five services and three redeemable centers.
+- Displaying summary counts plus previews of up to five services and five redeemable centers.
 
 The customer profile is identified by the URL. Do not send `profile_id` in the request payload.
 
@@ -127,9 +127,9 @@ Both GET list entries and the POST response use this object structure.
 
 - `services` contains at most five services.
 - `services_count` contains the total number of assigned services.
-- `redeemable_centers` contains at most three centers.
+- `redeemable_centers` contains at most five centers.
 - `redeemable_centers_count` contains the total number of redeemable centers.
-- Each nested `service.centers` contains at most three selected centers for that assigned service; selections remain visible if availability later changes.
+- Each nested `service.centers` contains at most five selected centers for that assigned service; selections remain visible if availability later changes.
 - Preview arrays are incomplete when their corresponding total exceeds the preview limit.
 
 ## 4. GET Therapy Programs
@@ -398,4 +398,4 @@ The frontend error normalizer must therefore support string, array, and nested-o
 - Every new service's selected centers belong to `add_redeemable_centers` and currently offer that service.
 - List filters serialize booleans as `0` or `1`.
 - Pagination uses the API's `count`, `next`, `previous`, and `data` fields.
-- Program cards do not treat the five-service and three-center previews as complete related lists.
+- Program cards do not treat the five-service and five-center previews as complete related lists.

@@ -17,7 +17,7 @@ from wearables.services.client import (
 )
 from wearables.services.connections import refresh_authorizing_connections
 from wearables.services.lifecycle import can_ingest_source
-from wearables.services.job_queue import enqueue_health_job, finished_health_jobs
+from wearables.services.job_queue import enqueue_or_reuse_orphaned_normalization_job, finished_health_jobs
 from wearables.services.ingestion import (
     ingest_rook_document, normalize_health_document, remap_member_local_days,
 )
@@ -411,7 +411,11 @@ def process_health_job(job: HealthProcessingJob) -> dict:
     return handler(job)
 
 
-def process_pending_health_jobs(*, limit: int = 50) -> list[dict]:
+def process_pending_health_jobs(
+    *, limit: int = 50, skip_recovery: bool = False, only_recovery: bool = False,
+) -> list[dict]:
+    if skip_recovery and only_recovery:
+        raise ValueError("Cannot skip and exclusively process recovery jobs.")
     reset_stale_health_jobs()
     if limit <= 0:
         return []
@@ -420,6 +424,10 @@ def process_pending_health_jobs(*, limit: int = 50) -> list[dict]:
         scheduled_at__lte=timezone.now(),
         attempt_count__lt=MAXIMUM_JOB_ATTEMPTS,
     )
+    if skip_recovery:
+        ready_jobs = ready_jobs.exclude(job_type=HealthJobType.RECOVERY_PULL)
+    elif only_recovery:
+        ready_jobs = ready_jobs.filter(job_type=HealthJobType.RECOVERY_PULL)
     # Always prioritize accepted webhook normalization, even under a large
     # freshness backlog. If normalization does not fill the sweep, reserve at
     # most one slot for recovery so hourly freshness jobs cannot starve it.
@@ -471,20 +479,6 @@ def process_pending_health_jobs(*, limit: int = 50) -> list[dict]:
     return results
 
 
-def profiles_requiring_freshness_check():
-    return (
-        WearableConnection.objects.filter(
-            status__in=[
-                ConnectionStatus.ACTIVE,
-                ConnectionStatus.IDLE,
-                ConnectionStatus.PARTIAL,
-            ]
-        )
-        .values_list("customer_profile_id", flat=True)
-        .distinct()
-    )
-
-
 def eligible_freshness_profiles(*, limit: int, now=None):
     """Select oldest due profiles, skipping open work without scanning in Python.
 
@@ -505,8 +499,16 @@ def eligible_freshness_profiles(*, limit: int, now=None):
     latest = finished_health_jobs(freshness).filter(
         completed_at__isnull=False,
     ).order_by("-completed_at", "-pk")
+    active_connection = WearableConnection.objects.filter(
+        customer_profile_id=OuterRef("pk"),
+        status__in=[
+            ConnectionStatus.ACTIVE,
+            ConnectionStatus.IDLE,
+            ConnectionStatus.PARTIAL,
+        ],
+    )
     return (
-        CustomerProfile.objects.filter(pk__in=profiles_requiring_freshness_check())
+        CustomerProfile.objects.filter(Exists(active_connection))
         .annotate(
             has_open_freshness=Exists(open_work),
             last_freshness_at=Subquery(latest.values("completed_at")[:1]),
@@ -590,12 +592,6 @@ def enqueue_orphaned_normalization_jobs(*, grace_minutes: int = 10, limit: int =
         ).exists():
             exhausted_count += 1
             continue
-        enqueue_health_job(
-            job_type=HealthJobType.NORMALIZE_DOCUMENT,
-            idempotency_key=(f"orphan-normalize:{document.pk}:"
-                             f"{document.document_version}:{document.content_hash[:16]}"),
-            customer_profile=document.customer_profile,
-            document=document,
-        )
-        queued_count += 1
+        if enqueue_or_reuse_orphaned_normalization_job(document=document):
+            queued_count += 1
     return {"queued": queued_count, "requiresOperatorReview": exhausted_count}

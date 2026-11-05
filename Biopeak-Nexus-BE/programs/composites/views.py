@@ -47,6 +47,7 @@ from programs.composites.serializers import (
     CompositeTemplateServiceSerializer,
 )
 from programs.models import CompositeProgram, Program, ProgramService
+from programs.serializers import ProgramAvailableRedeemableCenterSerializer
 from programs.services.models import (
     CenterServiceAssignment,
     ServiceProductAssignment,
@@ -86,7 +87,7 @@ class CompositeTemplateServiceViewMeta(BaseGenericAPIView):
                 ),
                 Prefetch(
                     "prerequisite__related_services",
-                    queryset=related_services[:3],
+                    queryset=related_services,
                     to_attr="related_service_preview",
                 ),
             )
@@ -102,7 +103,7 @@ class CompositeTemplateViewMeta(CompositeTemplateServiceViewMeta):
         ).prefetch_related(
             Prefetch(
                 "services",
-                queryset=composite_template_services[:3],
+                queryset=composite_template_services,
                 to_attr="service_preview",
             )
         )
@@ -136,7 +137,7 @@ class CompositeServicePrerequisiteViewMeta(BaseGenericAPIView):
                     "related_services",
                     queryset=CompositeTemplateService.objects.select_related(
                         "service"
-                    )[:3],
+                    ),
                     to_attr="related_service_preview",
                 )
             )
@@ -166,7 +167,7 @@ class CompositeProgramViewMeta(BaseGenericAPIView):
                 "program__program_services",
                 queryset=self.get_composite_program_service_queryset(
                     center_identifier
-                )[:3],
+                ),
                 to_attr="service_preview",
             ),
             Prefetch(
@@ -192,6 +193,21 @@ class CompositeProgramViewMeta(BaseGenericAPIView):
         else:
             filter_kwargs["center__pk"] = None
 
+        selected_center_service_assignments = CenterServiceAssignment.objects.filter(
+            center__pk=OuterRef("pk"),
+            service__pk=OuterRef("redeemable_therapy_services__program_service__service"),
+            is_active=True,
+        )
+        selected_center_programs = Program.objects.filter(
+            Q(composite_program__therapy_redemption_is_global=True)
+            | Q(redeemable_centers__pk=OuterRef("pk")),
+            pk=OuterRef("redeemable_therapy_services__program_service__program"),
+        )
+        selected_centers = Center.objects.filter(
+            Exists(selected_center_service_assignments),
+            Exists(selected_center_programs),
+            is_active=True,
+        ).order_by("-created_at", "-pk")
         program_services = ProgramService.objects.select_related(
             "service",
             "created_by",
@@ -199,7 +215,20 @@ class CompositeProgramViewMeta(BaseGenericAPIView):
             "therapy_service",
             "assessment_service",
             "consultation_service",
-        ).prefetch_related("therapy_service__redeemable_centers")
+        ).prefetch_related(
+            Prefetch(
+                "therapy_service__redeemable_centers",
+                queryset=selected_centers,
+                to_attr="redeemable_center_preview",
+            ),
+            Prefetch(
+                "service__center_assignments",
+                queryset=CenterServiceAssignment.objects.filter(
+                    is_active=True,
+                ).select_related("center").order_by("-created_at", "-pk"),
+                to_attr="active_center_assignments",
+            ),
+        )
         center_service_assignment = CenterServiceAssignment.objects.filter(
             **filter_kwargs
         )
@@ -288,6 +317,21 @@ class CompositeTemplateServicesListView(
         filter_kwargs = {}
         search = Q()
         category = self.request.query_params.get('category', None)
+        active_query = self.request.query_params.get("active")
+        activity_filter = Q()
+        if active_query == "1":
+            activity_filter = Q(is_active=True, service__is_active=True)
+        if active_query == "0":
+            activity_filter = Q(is_active=False) | Q(service__is_active=False)
+        center_filter = Q(pk__in=[])
+        for center_identifier in self.request.query_params.getlist("center_id"):
+            center_filter |= Q(pk__iexact=center_identifier)
+        selectable_centers = Center.objects.filter(center_filter, is_active=True)
+        selectable_assignments = CenterServiceAssignment.objects.filter(
+            center__in=selectable_centers,
+            service__service_category=ServiceCategory.THERAPY,
+            is_active=True,
+        ).select_related("center").order_by("-created_at", "-pk")
         search_params = self.request.query_params.get('search', "").strip()
         if category:
             filter_kwargs['service__service_category'] = category
@@ -296,8 +340,15 @@ class CompositeTemplateServicesListView(
             search |= Q(service__name__icontains=search_params)
         qs = super().get_queryset().filter(
             search,
+            activity_filter,
             composite_template=self.get_composite_template(),
             **filter_kwargs
+        ).prefetch_related(
+            Prefetch(
+                "service__center_assignments",
+                queryset=selectable_assignments,
+                to_attr="selectable_center_assignments",
+            ),
         )
         return qs
 
@@ -355,24 +406,73 @@ class CompositeAvailablePrerequisiteServicesListView(
         )
 
 
+class CompositeProgramAvailableRedeemableCentersView(BaseListAPIView, CompositeProgramViewMeta):
+    serializer_class = ProgramAvailableRedeemableCenterSerializer
+    permission_classes = [IsAdminUser | BaseAssociateRBACPermission]
+
+    def get_composite_program_queryset(self, center_identifier=None):
+        composite_programs = CompositeProgram.objects.select_related("program__customer_profile")
+        if get_user_account_type(self.request.user) == UserType.ASSOCIATE:
+            composite_programs = composite_programs.filter(
+                program__in=self.get_associate_program_queryset(center_identifier),
+            )
+        return composite_programs
+
+    def get_composite_program(self):
+        return get_object_or_404(
+            self.get_composite_program_queryset(getattr(self.request, "center_id", None)),
+            "Composite program not found.",
+            pk=self.kwargs["pk"],
+        )
+
+    def get_queryset(self):
+        program = self.get_composite_program().program
+        filter_kwargs = {"is_active": True}
+        active_parameter = self.request.query_params.get("active")
+        if active_parameter in ["0", "1"]:
+            filter_kwargs["is_active"] = active_parameter == "1"
+        search = Q()
+        search_parameter = self.request.query_params.get("search", "").strip()
+        if search_parameter:
+            search = Q(name__icontains=search_parameter) | Q(code__istartswith=search_parameter)
+        customer_center_assignments = CustomerCenterAssignment.objects.filter(
+            customer_profile=program.customer_profile,
+            center=OuterRef("pk"),
+        )
+        redeemable_centers = Center.objects.filter(
+            pk=OuterRef("pk"),
+            redeemable_programs=program,
+        )
+        return Center.objects.filter(
+            Q(Exists(customer_center_assignments)) | Q(Exists(redeemable_centers)),
+            search,
+            **filter_kwargs,
+        ).annotate(
+            exists=Exists(redeemable_centers),
+            is_home_center=Exists(customer_center_assignments.filter(is_primary=True)),
+        ).order_by("-is_home_center", "-exists", "-created_at", "-pk")
+
+
 class CompositeProgramDetailView(
     BaseRetrieveUpdateAPIView,
     CompositeProgramViewMeta,
 ):
     serializer_class = CompositeProgramDetailSerializer
-    permission_classes = [IsAdminUser | IsAssociateUser]
+    permission_classes = [IsAdminUser | BaseAssociateRBACPermission]
 
     def get_queryset(self):
         filter_kwargs = {}
         center_identifier = getattr(self.request, 'center_id', None)
         account_type = get_user_account_type(self.request.user)
         composite_programs = self.get_composite_program_queryset(center_identifier)
-        qs = composite_programs.filter(**filter_kwargs)
         if account_type == UserType.ASSOCIATE:
             filter_kwargs["program__in"] = self.get_associate_program_queryset(
                 center_identifier
             )
-        return qs
+        return composite_programs.filter(**filter_kwargs)
+
+    def perform_update(self, serializer):
+        serializer.save(created_by=self.request.user)
 
 
 class CompositeProgramServicesListView(
@@ -445,16 +545,26 @@ class CompositeAddOnView(BaseCreateAPIView, CompositeProgramViewMeta):
     serializer_class = CompositeAddOnSerializer
     permission_classes = [IsAdminUser | BaseAssociateRBACPermission]
 
-    def get_serializer_context(self):
-        context = super().get_serializer_context()
+    def get_composite_program_queryset(self):
         center_identifier = getattr(self.request, "center_id", None)
-        composite_programs = self.get_composite_program_queryset(center_identifier)
+        composite_programs = super().get_composite_program_queryset(center_identifier)
         if get_user_account_type(self.request.user) == UserType.ASSOCIATE:
             composite_programs = composite_programs.filter(
                 program__in=self.get_associate_program_queryset(center_identifier)
             )
-        context["composite_program_queryset"] = composite_programs.distinct()
-        return context
+        return composite_programs
+
+    def get_composite_program(self, composite_program_identifier):
+        return self.get_composite_program_queryset().filter(
+            pk=composite_program_identifier,
+        ).first()
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        composite_program = self.get_composite_program(
+            serializer.validated_data["composite_program_id"],
+        )
+        serializer.save(
+            composite_program=composite_program,
+            created_by=self.request.user,
+        )
+        serializer.instance = self.get_composite_program(serializer.instance.pk)

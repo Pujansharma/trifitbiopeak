@@ -26,7 +26,14 @@ docs {
   page, limit (default 10, max 50). Newest created_at first.
   action: optional stored action code. Junk → 400 "Invalid action."
   Includes client_visible false.
-  data[]: id, action, reason, client_visible, client_title, change_type, effective_on,
-  protocol_id, protocol_version_id, before, after, created_at.
+  data[]: id, action, actor {name, roles[{id, name}]}, reason, client_visible,
+  client_title,
+  change_type, effective_on,
+  protocol_id, protocol_name, protocol_version_id, protocol_version_number,
+  before, after, created_at.
+  protocol_name and protocol_version_number are null when that link is null.
+  actor is null when the event has no actor.
+  name is first + last.
+  roles are that associate's active care roles. An admin has roles: [].
   Env: customer_profile_id from GET Profiles customer_profile.id.
 }

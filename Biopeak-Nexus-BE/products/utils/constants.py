@@ -15,6 +15,7 @@ class ProviderCallbackFunction(models.TextChoices):
     NEUBERG_ANAND = "neuberg_anand", "Neuberg Anand"
     META_OMICS_LABS = "meta_omics_labs", "Meta Omics Labs"
     YAAZH_XENOMICS = "yaazh_xenomics", "Yaazh Xenomics"
+    MAYR = "mayr", "Mayr"
 
 
 class ProductCallbackFunction(models.TextChoices):
@@ -53,6 +54,8 @@ class ProductCallbackFunction(models.TextChoices):
     GENOMICS_CANCER_SPOT = "genomics_cancerspot", "Genomics CancerSpot"
     GENOMICS_HEALTH_INSIGHTS = "genomics_health_insights", "Genomics Health Insights"
     GENOMICS_NUTRI_DNA = "genomics_nutri_dna", "Genomics NutriDNA"
+
+    FUNCTIONAL_MYODIAGNOSTICS = "fmd", "Functional Myodiagnostics (FMD)"
 
 
 PROVIDER_PRODUCT_CALLBACK_MAP: dict[str, list[ProductCallbackFunction]] = {
@@ -112,6 +115,9 @@ PROVIDER_PRODUCT_CALLBACK_MAP: dict[str, list[ProductCallbackFunction]] = {
     ],
     ProviderCallbackFunction.NEUBERG_ANAND: [
         ProductCallbackFunction.BLOOD,
+    ],
+    ProviderCallbackFunction.MAYR: [
+        ProductCallbackFunction.FUNCTIONAL_MYODIAGNOSTICS,
     ]
 }
 

@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.core.management.base import BaseCommand
+from django.db.models import F, Q
 
 from accounts.customers.models import CustomerProfile
 from wearables.services.job_processor import (
@@ -8,9 +9,15 @@ from wearables.services.job_processor import (
     eligible_freshness_profiles,
 )
 from wearables.services.oauth import expire_oauth_attempts
-from wearables.models import WearableConnection
-from wearables.utils.constants import ConnectionStatus
+from wearables.models import HealthProcessingJob, WearableConnection
+from wearables.utils.constants import (
+    ConnectionStatus, HEALTH_MAXIMUM_JOB_ATTEMPTS, HealthJobStatus, HealthJobType,
+)
 from wearables.services.job_queue import enqueue_or_reuse_freshness_job, enqueue_or_reuse_recovery_job
+
+
+MAX_RECOVERY_ENQUEUES_PER_SWEEP = 2
+MAX_OPEN_RECOVERY_JOBS = 10
 
 
 class Command(BaseCommand):
@@ -21,9 +28,13 @@ class Command(BaseCommand):
             "--freshness-limit", type=int, default=25,
             help="Maximum new or requeued freshness jobs per sweep (default: 25).",
         )
+        parser.add_argument(
+            "--recovery-limit", type=int, default=MAX_RECOVERY_ENQUEUES_PER_SWEEP,
+            help="Maximum new recovery jobs per sweep (default: 2).",
+        )
 
     def handle(self, *args, **options):
-        if not getattr(settings, "WEARABLES_ENABLED", True):
+        if not getattr(settings, "WEARABLES_ENABLED", False):
             self.stdout.write("Wearable integration is disabled; no jobs enqueued.")
             return
         # Resolve abandoned OAuth attempts without relying on a user polling
@@ -42,8 +53,25 @@ class Command(BaseCommand):
         for customer_profile in eligible_freshness_profiles(limit=freshness_limit).iterator():
             _, queued = enqueue_or_reuse_freshness_job(customer_profile=customer_profile)
             count += int(queued)
+        # Oldest never-synced / delayed connections first, with bounded inserts.
+        # Reserve slots only while the recovery queue has room. A missing or
+        # slow dedicated worker must not accumulate unbounded PENDING rows.
+        open_recovery_count = HealthProcessingJob.objects.filter(
+            job_type=HealthJobType.RECOVERY_PULL,
+        ).filter(
+            Q(status__in=(HealthJobStatus.PENDING, HealthJobStatus.RUNNING))
+            | Q(status=HealthJobStatus.FAILED,
+                attempt_count__lt=HEALTH_MAXIMUM_JOB_ATTEMPTS)
+        ).count()
+        recovery_limit = max(0, min(
+            options["recovery_limit"], MAX_RECOVERY_ENQUEUES_PER_SWEEP,
+            MAX_OPEN_RECOVERY_JOBS - open_recovery_count,
+        ))
         recovery_count = 0
-        for connection in connections_requiring_recovery_pull().iterator():
+        connections = connections_requiring_recovery_pull().order_by(
+            F("last_successful_sync").asc(nulls_first=True), "import_started_at", "pk",
+        )[:recovery_limit]
+        for connection in connections.iterator():
             job, created = enqueue_or_reuse_recovery_job(
                 connection=connection, customer_profile=connection.customer_profile,
             )

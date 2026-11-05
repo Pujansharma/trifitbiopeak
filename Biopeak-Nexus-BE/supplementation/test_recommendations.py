@@ -104,6 +104,20 @@ def ai_dose(supplement_id, *, dosage="1 capsule", origin="requested"):
     }
 
 
+def ai_hold(supplement_id):
+    return {
+        "supplement_id": supplement_id,
+        "origin": "requested",
+        "dosage": None,
+        "frequency": None,
+        "custom_frequency": None,
+        "timing": None,
+        "duration": None,
+        "instructions": "Do not use.",
+        "rationale": "Caution: serving size has no unit; check the label.",
+    }
+
+
 LUMA_ERROR_RESPONSES = {
     401: ({"detail": "Invalid API key."}, "Luma rejected the Nexus API key."),
     404: ({"detail": "Client not found."}, "Luma could not find this client."),
@@ -157,6 +171,40 @@ class ProtocolRecommendationParseTests(TestCase):
                 },
                 {requested_id},
             )
+
+    def test_held_item_keeps_null_dose(self):
+        requested_id = uuid.uuid4()
+        parsed = parse_protocol_recommendation(
+            {"model": "gpt-4.1", "items": [ai_hold(str(requested_id))]},
+            {requested_id},
+        )
+        item = parsed["items"][0]
+        for field in ("dosage", "frequency", "custom_frequency", "timing", "duration"):
+            self.assertIsNone(item[field])
+        self.assertEqual(item["instructions"], "Do not use.")
+        self.assertEqual(
+            item["rationale"],
+            "Caution: serving size has no unit; check the label.",
+        )
+
+    def test_partially_null_dose_fails(self):
+        requested_id = uuid.uuid4()
+        cases = (
+            ({"dosage": None}, "Luma returned an invalid dosage."),
+            ({"frequency": None}, "Luma returned an invalid frequency."),
+        )
+        for overrides, message in cases:
+            with (
+                self.subTest(overrides=overrides),
+                self.assertRaisesMessage(ProtocolRecommendationError, message),
+            ):
+                parse_protocol_recommendation(
+                    {
+                        "model": "gpt-4.1",
+                        "items": [{**ai_dose(str(requested_id)), **overrides}],
+                    },
+                    {requested_id},
+                )
 
 
 class ProtocolAiRecommendationTests(TestCase):
@@ -519,6 +567,28 @@ class ProtocolAiRecommendationTests(TestCase):
         LUMA_NEXUS_API_KEY="nexus-key",
     )
     @patch("supplementation.utils.protocol_ai.Session")
+    def test_luma_held_item_saves_null_dose(self, session):
+        job = self.create_job()
+        session.return_value.post.return_value = luma_response(
+            200,
+            {"model": "gpt-6.1-sol", "items": [ai_hold(str(self.vitamin.pk))]},
+        )
+        process_protocol_ai_job(job.pk)
+        job.refresh_from_db()
+        self.assertEqual(job.status, ProtocolAiJobStatus.COMPLETED)
+        item = AiRecommendation.objects.get(job=job).items.get()
+        self.assertIsNone(item.dosage)
+        self.assertIsNone(item.frequency)
+        self.assertIsNone(item.custom_frequency)
+        self.assertIsNone(item.timing)
+        self.assertIsNone(item.duration)
+        self.assertEqual(item.instructions, "Do not use.")
+
+    @override_settings(
+        LUMA_BASE_URL="http://luma.test",
+        LUMA_NEXUS_API_KEY="nexus-key",
+    )
+    @patch("supplementation.utils.protocol_ai.Session")
     def test_luma_error_status_fails_job_with_mapped_message(self, session):
         for status_code, (body, message) in LUMA_ERROR_RESPONSES.items():
             with self.subTest(status_code=status_code):
@@ -532,6 +602,23 @@ class ProtocolAiRecommendationTests(TestCase):
                 self.assertEqual(job.status, ProtocolAiJobStatus.FAILED)
                 self.assertEqual(job.error_detail, message)
                 self.assertFalse(AiRecommendation.objects.filter(job=job).exists())
+
+    @override_settings(
+        LUMA_BASE_URL="http://luma.test",
+        LUMA_NEXUS_API_KEY="nexus-key",
+    )
+    @patch("supplementation.utils.protocol_ai.Session")
+    def test_luma_error_detail_is_logged(self, session):
+        job = self.create_job()
+        session.return_value.post.return_value = luma_response(
+            404,
+            {"detail": "Unknown client x"},
+        )
+        with self.assertLogs(level="ERROR") as logs:
+            process_protocol_ai_job(job.pk)
+        job.refresh_from_db()
+        self.assertIn("detail=Unknown client x", "\n".join(logs.output))
+        self.assertEqual(job.error_detail, "Luma could not find this client.")
 
     @override_settings(
         LUMA_BASE_URL="http://luma.test",

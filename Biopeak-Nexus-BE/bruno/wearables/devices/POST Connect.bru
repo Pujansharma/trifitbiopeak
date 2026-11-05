@@ -1,0 +1,33 @@
+meta {
+  name: POST Connect
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseURL}}/api/v1/devices/connect/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "data_source": "{{rook_data_source}}",
+    "consent_accepted": true,
+    "consent_version": "v1",
+    "historical_days": 7
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Requires consent; choose a provisioned source. Connect response provides authorizationUrl and ROOK identity; historical_days is capped by source/policy. Optional redirect_url is restricted by server policy.
+}

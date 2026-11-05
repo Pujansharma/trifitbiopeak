@@ -32,7 +32,7 @@ class AssessmentServiceSerializerMeta(BaseServiceSerializerMeta):
 
     def get_products(self, instance):
         product_assignments = getattr(instance, "product_assignments")
-        assignment_instances = product_assignments.all()[:3]
+        assignment_instances = product_assignments.all()[:5]
         qs = [
             assignment_instance.product for assignment_instance in assignment_instances
         ]

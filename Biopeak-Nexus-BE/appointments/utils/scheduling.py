@@ -35,6 +35,7 @@ from appointments.utils.care_teams import (
 )
 from appointments.utils.constants import BUSY_APPOINTMENT_STATUSES
 from appointments.utils.intervals import (
+    UTC,
     datetime_range_for_dates,
     intersect_intervals,
     merge_intervals,
@@ -46,6 +47,7 @@ from inventory.models import Equipment, Room
 from programs.services.models import CenterServiceAssignment
 
 SLOT_CAP_PER_DAY = 200
+STAFF_SLOT_MINUTES = 15
 ASSOCIATES_REQUIRED_FOR_BOOKING = (
     "At least one associate is required. Send care_team_id "
     "and/or doctor_id / specialty_id."
@@ -1297,6 +1299,77 @@ def serialize_pinned_slot(slot_start, slot_end, combo, preferred=None):
     return payload
 
 
+def intersect_interval_groups(interval_groups):
+    if not interval_groups:
+        return []
+    combined = interval_groups[0]
+    for intervals in interval_groups[1:]:
+        combined = intersect_intervals(combined, intervals)
+    return combined
+
+
+PINNED_RESOURCE_WINDOW_SOURCES = (
+    ("extra_associates", "associate"),
+    ("rooms", "room"),
+    ("equipment", "equipment"),
+)
+
+
+def pinned_resource_free_windows(resource_pools, free_window_cache, customer_busy):
+    interval_groups = []
+    for pool_key, cache_key in PINNED_RESOURCE_WINDOW_SOURCES:
+        cache = free_window_cache[cache_key]
+        for resource in resource_pools[pool_key]:
+            interval_groups.append(cache.get(str(resource.pk), []))
+    return subtract_intervals(
+        intersect_interval_groups(interval_groups),
+        customer_busy,
+    )
+
+
+def align_staff_slot_start(window_start, timezone_name):
+    zone = ZoneInfo(timezone_name)
+    local_start = window_start.astimezone(zone)
+    aligned = local_start.replace(second=0, microsecond=0)
+    minute_remainder = aligned.minute % STAFF_SLOT_MINUTES
+    if minute_remainder:
+        aligned += timedelta(minutes=STAFF_SLOT_MINUTES - minute_remainder)
+    if aligned < local_start:
+        aligned += timedelta(minutes=STAFF_SLOT_MINUTES)
+    return aligned.astimezone(UTC)
+
+
+def staff_grid_slots(
+    free_windows,
+    duration_minutes,
+    buffer_before,
+    buffer_after,
+    timezone_name,
+):
+    if not free_windows or duration_minutes <= 0:
+        return []
+    slot_delta = timedelta(minutes=STAFF_SLOT_MINUTES)
+    service_delta = timedelta(minutes=duration_minutes)
+    slots = []
+    for window_start, window_end in free_windows:
+        slot_start = align_staff_slot_start(window_start, timezone_name)
+        while slot_start < window_end:
+            service_end = slot_start + service_delta
+            exclusive_start, exclusive_end = compute_exclusive_bounds(
+                slot_start,
+                service_end,
+                buffer_before,
+                buffer_after,
+            )
+            window = [(window_start, window_end)]
+            if is_interval_contained_in_windows(
+                exclusive_start, exclusive_end, window
+            ):
+                slots.append((slot_start, slot_start + slot_delta))
+            slot_start += slot_delta
+    return sorted(slots, key=lambda item: item[0])
+
+
 def find_appointment_slots(
     center,
     customer_profile,
@@ -1304,6 +1377,7 @@ def find_appointment_slots(
     modality,
     slot_date,
     preferred=None,
+    include_past=False,
 ):
     validate_customer_profile_for_center(customer_profile, center)
     assignment = get_center_service_assignment(center, service)
@@ -1342,40 +1416,33 @@ def find_appointment_slots(
         busy_maps,
     )
 
-    center_hours = expand_center_operating_hours(
-        center, query_start, query_end, timezone_name
-    )
-    closure_intervals, _ = collect_closure_events(
-        center, query_start, query_end, timezone_name
-    )
-    base_windows = subtract_intervals(center_hours, closure_intervals)
-
     duration_minutes = assignment.duration
     buffer_before = assignment.buffer_before
     buffer_after = assignment.buffer_after
-    step_minutes = duration_minutes + buffer_before + buffer_after
-    candidate_slots = split_into_slots(
-        base_windows, duration_minutes, step_minutes
+    free_windows = pinned_resource_free_windows(
+        resource_pools, free_window_cache, customer_busy
+    )
+    candidate_slots = staff_grid_slots(
+        free_windows,
+        duration_minutes,
+        buffer_before,
+        buffer_after,
+        timezone_name,
     )
 
     now = timezone.now()
     slots = []
     truncated = False
     for slot_start, slot_end in candidate_slots:
-        if slot_start < now:
+        if slot_start < now and not include_past:
             continue
+        service_end = slot_start + timedelta(minutes=duration_minutes)
         exclusive_start, exclusive_end = compute_exclusive_bounds(
             slot_start,
-            slot_end,
+            service_end,
             buffer_before,
             buffer_after,
         )
-        if interval_overlaps_any(exclusive_start, exclusive_end, customer_busy):
-            continue
-        if not is_interval_contained_in_windows(
-            exclusive_start, exclusive_end, base_windows
-        ):
-            continue
         combo = resolve_appointment_combo(
             center,
             assignment,

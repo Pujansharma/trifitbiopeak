@@ -22,7 +22,7 @@ docs {
   is draft or under_review. Draft and under_review are never the row.
   A protocol with no such version is omitted. Approved is listed before publish,
   so Protocol.current_version may be null. Newest protocol created_at first.
-  data[]: id (protocol), current_version_id (the chosen version),
+  data[]: id (protocol), name (protocol name), current_version_id (the chosen version),
   version_name (v1, v2, …), supplement_count (ProtocolItem count on that version),
   effective_from (starts_on), stored status.
   Env: customer_profile_id from GET Profiles customer_profile.id.

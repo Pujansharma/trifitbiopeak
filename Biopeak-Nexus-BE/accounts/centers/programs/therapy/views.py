@@ -12,11 +12,12 @@ from core.utils.exceptions import get_object_or_404
 from core.utils.views.main import (
     BaseListCreateAPIView,
 )
-from programs.models import ProgramService, TherapyProgram
+from programs.models import TherapyProgram
 from programs.therapy.serializers import TherapyProgramSerializer
+from programs.therapy.views import TherapyProgramServiceViewMeta
 
 
-class CenterTherapyProgramsView(BaseListCreateAPIView):
+class CenterTherapyProgramsView(BaseListCreateAPIView, TherapyProgramServiceViewMeta):
     serializer_class = TherapyProgramSerializer
     permission_classes = [IsAdminUser | IsAssociateUser]
 
@@ -33,7 +34,7 @@ class CenterTherapyProgramsView(BaseListCreateAPIView):
         )
 
     def get_queryset(self):
-        filter_kwargs = {}
+        filter_kwargs = {"is_discarded": False}
         search = Q()
         associate_query = Q()
         center = self.get_center()
@@ -41,6 +42,10 @@ class CenterTherapyProgramsView(BaseListCreateAPIView):
         active_query_param = self.request.query_params.get("active", None)
         complete_query = self.request.query_params.get("complete", None)
         expired_query = self.request.query_params.get("expired", None)
+        discarded_query = self.request.query_params.get("discarded", "0")
+
+        if discarded_query in ["0", "1"]:
+            filter_kwargs["is_discarded"] = bool(int(discarded_query))
 
         if active_query_param and active_query_param in ["0", "1"]:
             filter_kwargs["is_active"] = bool(int(active_query_param))
@@ -88,6 +93,7 @@ class CenterTherapyProgramsView(BaseListCreateAPIView):
                 **filter_kwargs,
             )
             .select_related(
+                "discarded_by",
                 "program",
                 "program__center",
                 "program__created_by",
@@ -96,13 +102,17 @@ class CenterTherapyProgramsView(BaseListCreateAPIView):
             .prefetch_related(
                 Prefetch(
                     "program__program_services",
-                    queryset=ProgramService.objects.select_related(
-                        "program", "service", "created_by", "therapy_service"
-                    ).prefetch_related("therapy_service__redeemable_centers")
-                    .order_by("-created_at", "-pk")[:5],
+                    queryset=self.get_program_service_queryset().select_related(
+                        "program", "service", "created_by", "therapy_service",
+                        "therapy_service__discarded_by", "program__therapy_program__discarded_by",
+                    ).order_by("-created_at", "-pk"),
                     to_attr="service_preview",
                 ),
-                "program__redeemable_centers",
+                Prefetch(
+                    "program__redeemable_centers",
+                    queryset=Center.objects.all(),
+                    to_attr="redeemable_center_preview",
+                ),
                 Prefetch(
                     "program__customer_profile__center_assignments",
                     queryset=CustomerCenterAssignment.objects.filter(

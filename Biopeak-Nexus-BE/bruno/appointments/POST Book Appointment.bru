@@ -87,7 +87,8 @@ docs {
   are not re-checked; key lookup runs before serializer validation).
   Customer JWT must still own the stored appointment profile (else 404).
   Same key + different body → 409.
-  start in the past → 400 "Date cannot be in the past."
+  Staff walk-in (omit program_service_id): past start allowed; confirm WA/GC not enqueued.
+  Customer, or no account: past start → 400 "Date cannot be in the past."
   When program_service_id set (customer or staff): start in now+4h … now+7d → else 400
   "Start must be between 4 hours and 7 days from now." Staff omit → no upper window.
   Flattened body (no preferred nest, no associates[] pin). Echo Find Slots

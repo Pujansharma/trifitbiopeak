@@ -78,7 +78,7 @@ available = base − blocks − leaves/downtimes − closures − busy appointme
 | Associate | Center hours ∩ roster | Blocks, leaves, closures |
 | Room / equipment | Center hours | Blocks, downtimes, closures |
 
-Slots are computed on demand (not pre-stored). Cap **200 slots/day** (`truncated: true` if more). Slots with `start` before request time are omitted (today’s past windows). Past calendar dates → 400 `"Date cannot be in the past."` Customer JWT (`program_service` path): Find Slots returns only `now+24h` … `now+7d`; book/reschedule new `start` must be `now+4h` … `now+7d`; reschedule also requires `now ≤ existing.start − 4h`.
+Slots are computed on demand (not pre-stored). Cap **200 slots/day** (`truncated: true` if more). Customer Find Slots: past calendar date → 400 `"Date cannot be in the past."`; omits `start` < now. Staff preferred Find Slots: past dates allowed; elapsed starts returned (`include_past`), with or without `program_service_id`. Staff + `program_service_id`: `date` must overlap `now+24h`…`now+7d` (date gate only — preferred path does not clip each `start`). Customer + `program_service_id` (v2): each `start` clipped to that window. Book/reschedule with `program_service`: new `start` in `now+4h`…`now+7d`; reschedule also `now ≤ existing.start − 4h`. Staff walk-in book may use past `start` (no WA/GC confirm enqueue). Customer book and every reschedule reject `start` < now.
 
 ### Preferred (slots) vs flattened book
 
@@ -178,7 +178,7 @@ Base: `/centers/<center_id>/appointments/`
 | Staff (admin/associate) | **Required** — omit/empty → 400 |
 | Customer | **Forbidden** — key present → 400; server least-busy auto-assign |
 
-**Purpose:** One calendar day of bookable combos for a customer + service. Past calendar dates → 400. Past starts today (`start` < now) are omitted. Customer JWT also rejects today and dates after today+7.
+**Purpose:** One calendar day of bookable combos for a customer + service. Customer: past date → 400; starts before now omitted; with `program_service_id`, date must overlap `now+24h`…`now+7d` and each start is clipped. Staff: past dates allowed; elapsed starts returned. Staff + `program_service_id`: same date window as customer; starts are **not** clipped on the preferred engine.
 
 **Body (always required)**
 
@@ -187,7 +187,7 @@ Base: `/centers/<center_id>/appointments/`
 | `customer_profile_id` | UUID | Active profile assigned to this center. Customer JWT: must own profile. |
 | `service_id` | UUID | Active service assigned to this center |
 | `modality` | `"virtual"` \| `"in_person"` | Not `"both"` |
-| `date` | `YYYY-MM-DD` | Staff: today or future in `settings.TIME_ZONE` (`Asia/Kolkata`). Past → 400 `"Date cannot be in the past."` Customer: calendar date must overlap **`now+24h` … `now+7d`** (center local). Outside → 400 `"Date must fall within the customer slot window (from 24 hours to 7 days from now)."` Returned slots also clipped to that datetime window. |
+| `date` | `YYYY-MM-DD` | Staff: any center-local date, including past; elapsed starts returned. Customer: past → 400 `"Date cannot be in the past."` Customer, and staff when `program_service_id` set: date must overlap **`now+24h` … `now+7d`**. Outside → 400 `"Date must fall within the customer slot window (from 24 hours to 7 days from now)."` Customer auto-assign (v2) also clips each `start` to that window; staff preferred path does not. |
 
 #### Staff mode — `preferred` required
 
@@ -231,17 +231,19 @@ Omit empty preferred keys (blank UUID → 400). Never send `care_team_id` with d
 
 Engine: `find_appointment_slots`. Preferred `specialty_id` stays a single UUID.
 
+Staff starts are every 15 minutes on the clock, from the overlap of center hours and the chosen doctor, specialty, care team, room, and equipment. A start is returned only when the service plus its buffers fits entirely in that free time. `17:30` and `17:45` are absent when free time ends at 18:00 and the service is 45 minutes (last start `17:15`). A 25-minute service ends at `17:30`. Each slot `end` is `start` plus 15 minutes. Book `end` is still `start` plus `duration_minutes`. Customer auto-assign stays on the service length.
+
 #### Customer mode — no `preferred` (auto-assign)
 
 Body = four fields only. Do not send `preferred` (even `null`/`{}`).
 
 Server picks least-busy free staff / room / equipment from service mappings (`find_appointment_slots_v2`).
 
-**Booking window (when `program_service_id` links the booking):**
-- **Slots:** customer JWT always; staff when body includes `program_service_id` — `date` overlaps `now+24h`…`now+7d` (center local); each returned `start` in that datetime range. Staff omit → no slot window (walk-in).
-- **Book / reschedule new `start`:** `now+4h` … `now+7d` whenever `program_service` is set (customer always; staff when body includes `program_service_id`). Intentional: slots hide &lt;24h; book still allows 4–24h if client has a start.
-- **Reschedule gate:** `now ≤ existing.start − 4h` else 400 `"Reschedule is only allowed until 4 hours before the appointment start."` (same: when `program_service` set on the request path).
-- Staff walk-ins (omit `program_service_id` on walk-in apt): no upper window; no reschedule cutoff. Therapy-linked apt: staff must send matching `program_service_id`.
+**Booking window (when `program_service_id` is set):**
+- **Slots:** `date` overlaps `now+24h`…`now+7d`. Customer v2 clips each `start`. Staff preferred: date gate only (no per-start clip). Staff omit `program_service_id` → no window; past dates and elapsed starts OK.
+- **Book / reschedule new `start`:** `now+4h` … `now+7d`. Slots hide &lt;24h; book still allows 4–24h.
+- **Reschedule gate:** `now ≤ existing.start − 4h` else 400 `"Reschedule is only allowed until 4 hours before the appointment start."`
+- Staff walk-in book (omit `program_service_id`): past `start` OK; no confirm WA/GC enqueue. Any reschedule to past `start` → 400. Therapy-linked apt: staff must send matching `program_service_id`.
 
 **Therapy package expiry (slots):** optional `program_service_id`. When set (customer or staff), that line’s `expires_at` must be on/after `date`. Customer omit → matching active therapy lines for customer+service checked — blocked only if every line expires before `date`. Staff omit → no expiry gate on slots. Same error string as book.
 
@@ -294,7 +296,7 @@ Server picks least-busy free staff / room / equipment from service mappings (`fi
 
 Each slot = one combo. Nested keys only when present. Auto-assign: no `care_team`; `specialty` may be an array. FE book: extract `id`s into flattened body (`specialty_id` = UUID | UUID[] from auto-assign).
 
-**Common 400:** preferred missing (staff) · preferred sent (customer) · profile not owned · invalid customer/service · modality · room/equipment rules · care_team XOR · no staff · auto-assign mapping failures · start in the past · customer outside slot/book datetime windows.
+**Common 400:** preferred missing (staff) · preferred sent (customer) · profile not owned · invalid customer/service · modality · room/equipment rules · care_team XOR · no staff · auto-assign mapping failures · customer past date · customer outside slot/book datetime windows.
 
 ---
 
@@ -314,7 +316,7 @@ Each slot = one combo. Nested keys only when present. Auto-assign: no `care_team
 | `service_id` | yes | |
 | `program_service_id` | customer yes; staff optional | Therapy `ProgramService` line. Customer omit/null → 400. Staff omit/null → walk-in (`program_service` null). When set (customer or staff): ownership + service match + redeemable center + sessions left; one open apt per line; appointment local date must be on/before `program.expires_at` (null = open-ended). After expiry → 400 `"This package expires on <D Mon YYYY>. Please choose a date on or before it."` |
 | `modality` | yes | `virtual` \| `in_person` |
-| `start` | yes | ISO datetime (from slot). Must be in the future. `end` must equal `start` + assignment duration. Past → 400 `"Date cannot be in the past."` When `program_service_id` set: `start` in **`now+4h` … `now+7d`** → else 400 `"Start must be between 4 hours and 7 days from now."` Staff walk-in (omit): no upper window. |
+| `start` | yes | ISO datetime. `end` = `start` + assignment duration. Customer / no account: past → 400 `"Date cannot be in the past."` Staff walk-in (omit `program_service_id`): past OK; confirm notify skipped. When `program_service_id` set: `start` in **`now+4h` … `now+7d`** else 400 `"Start must be between 4 hours and 7 days from now."` |
 | `end` | yes | |
 | `room_id` | in_person | Forbidden for virtual |
 | `equipment_id` | if room has bookable equipment | null when room has none; forbidden for virtual |
@@ -453,7 +455,7 @@ Reschedule lands `confirmed`. Same flattened body as book. Cannot change `custom
 
 `program_service_id` on reschedule:
 - **Customer:** required; must equal the appointment’s existing `program_service_id` (mismatch → 400). Does **not** re-run book redeemability / open-apt checks; FK unchanged. Customer surfaces only therapy-linked appts — staff walk-ins are not shown. New `start` same book window (`now+4h`…`now+7d`). Also blocked when `now > existing.start − 4h`. New `start` local date must still be on/before package `expires_at`.
-- **Staff:** therapy-linked apt → required match (omit → 400 `"program_service_id is required when rescheduling a therapy-linked appointment."`). Walk-in omit OK. When sent → same match + window + cutoff as customer. FK never rewritten.
+- **Staff:** therapy-linked apt → required match (omit → 400 `"program_service_id is required when rescheduling a therapy-linked appointment."`). Walk-in omit OK. When sent → same match + window + cutoff as customer. A new `start` before now is 400 `"Date cannot be in the past."` for every caller, including staff walk-in. FK never rewritten.
 
 Illegal transition → validation error (`Cannot perform '…' from status '…'`).
 
@@ -884,7 +886,7 @@ Same contracts as rooms:
 | `specialty_id must hold a live non-doctor role mapped to this service.` | specialty_id has no live non-doctor hat on this service’s role reqs (incl. 0 reqs) |
 | `doctor_id matches more than one live doctor role.` | Person has two+ live `"doctor"`-in-name hats |
 | `Slot no longer available.` | Overlap / race on book/reschedule |
-| `Date cannot be in the past.` | Find Slots past `date`, or book/reschedule `start` before now |
+| `Date cannot be in the past.` | Customer Find Slots past `date`. Customer book `start` before now. Any reschedule `start` before now. Staff Find Slots and staff walk-in book allow past; past book skips confirm WA/GC. |
 | `Date must fall within the customer slot window (from 24 hours to 7 days from now).` | Customer Find Slots `date` outside now+24h…now+7d |
 | `Start must be between 4 hours and 7 days from now.` | Customer book/reschedule new `start` outside now+4h…now+7d |
 | `Reschedule is only allowed until 4 hours before the appointment start.` | Customer reschedule when `now > existing.start − 4h` |

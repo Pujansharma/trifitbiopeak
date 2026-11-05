@@ -7,6 +7,7 @@ from accounts.customers.models import (
     CustomerCenterAssignment,
     CustomerProfile,
 )
+from accounts.customers.utils.unique_ids import generate_customer_profile_unique_id
 from accounts.customers.utils.db import (
     create_customer_user_account,
     increment_centers_count,
@@ -123,6 +124,7 @@ def create_shell_customer_from_lead(
         create_customer_user_account(customer)
         customer_profile = CustomerProfile.objects.create(
             customer=customer,
+            unique_id=generate_customer_profile_unique_id(),
             is_main=True,
             is_converted=False,
             is_onboarding_sent=lead.is_onboarding_sent,
@@ -247,6 +249,7 @@ def convert_lead_to_client(lead: Lead, updated_by: User | None) -> CustomerProfi
         if customer_profile is None:
             customer_profile = CustomerProfile.objects.create(
                 customer=customer,
+                unique_id=generate_customer_profile_unique_id(),
                 is_main=True,
                 is_converted=False,
                 created_by=updated_by,

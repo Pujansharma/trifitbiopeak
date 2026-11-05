@@ -12,10 +12,8 @@ from programs.utils.constants import ProgramType
 
 
 class ProgramAuditViewMeta(BaseGenericAPIView):
-    filter_kwargs = {}
-
     def get_program(self) -> Program:
-        programs = Program.objects.filter(**self.filter_kwargs)
+        programs = Program.objects.filter()
         if get_user_account_type(self.request.user) == UserType.ASSOCIATE:
             centers = Center.objects.filter(
                 is_active=True,
@@ -41,10 +39,8 @@ class ProgramAuditHistoryView(BaseListAPIView, ProgramAuditViewMeta):
 
 
 class ProgramPaymentViewMeta(BaseGenericAPIView):
-    filter_kwargs = {}
-
-    def get_program(self):
-        programs = Program.objects.filter(**self.filter_kwargs)
+    def get_program_queryset(self):
+        programs = Program.objects.filter()
         if get_user_account_type(self.request.user) == UserType.ASSOCIATE:
             centers = Center.objects.filter(
                 is_active=True,
@@ -54,15 +50,39 @@ class ProgramPaymentViewMeta(BaseGenericAPIView):
             programs = programs.filter(
                 Q(center__in=centers) | Q(redeemable_centers__in=centers)
             ).distinct()
+        return programs
+
+    def get_program(self):
         return get_object_or_404(
-            programs, "Program not found.", pk=self.kwargs["pk"],
+            self.get_program_queryset(), "Program not found.", pk=self.kwargs["pk"],
         )
 
 
 class TherapyProgramPaymentView(BaseCreateAPIView, ProgramPaymentViewMeta):
     serializer_class = ProgramPaymentHistorySerializer
     permission_classes = [IsAdminUser | BaseAssociateRBACPermission]
-    filter_kwargs = {"program_type": ProgramType.THERAPY, "therapy_program__isnull": False}
+
+    def get_program_queryset(self):
+        filter_kwargs = {
+            "program_type": ProgramType.THERAPY,
+            "therapy_program__isnull": False,
+        }
+        return super().get_program_queryset().filter(**filter_kwargs)
+
+    def perform_create(self, serializer):
+        serializer.save(program=self.get_program(), created_by=self.request.user)
+
+
+class CompositeProgramPaymentView(BaseCreateAPIView, ProgramPaymentViewMeta):
+    serializer_class = ProgramPaymentHistorySerializer
+    permission_classes = [IsAdminUser | BaseAssociateRBACPermission]
+
+    def get_program_queryset(self):
+        filter_kwargs = {
+            "program_type": ProgramType.COMPOSITE,
+            "composite_program__isnull": False,
+        }
+        return super().get_program_queryset().filter(**filter_kwargs)
 
     def perform_create(self, serializer):
         serializer.save(program=self.get_program(), created_by=self.request.user)

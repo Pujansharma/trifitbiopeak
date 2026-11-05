@@ -6,7 +6,12 @@ from accounts.centers.serializers import MinimumCenterSerializer
 from accounts.customers.models import CustomerCenterAssignment
 from accounts.utils.constants import UserType
 from accounts.utils.db import get_user_account_type
-from accounts.utils.permissions import IsAdminUser, IsAssociateUser, IsCustomerUser
+from accounts.utils.permissions import (
+    BaseAssociateRBACPermission,
+    IsAdminUser,
+    IsAssociateUser,
+    IsCustomerUser,
+)
 from appointments.models import Appointment, AppointmentAssociate
 from appointments.utils.redemption import OPEN_APPOINTMENT_STATUSES
 from core.utils.exceptions import get_object_or_404
@@ -24,14 +29,15 @@ from programs.serializers import (
 )
 from programs.services.models import CenterServiceAssignment, Service
 from programs.services.utils.constants import ServiceCategory
-from programs.utils.constants import ProgramType
 from programs.therapy.serializers import (
     TherapyProgramAvailableServiceSerializer,
     TherapyProgramDetailSerializer,
     TherapyProgramCancelSerializer,
+    TherapyProgramDiscardSerializer,
     TherapyProgramRedeemSerializer,
     TherapyProgramServiceSerializer,
 )
+from programs.utils.constants import ProgramType
 
 
 class TherapyProgramServicesView(BaseListAPIView):
@@ -43,16 +49,53 @@ class TherapyProgramServicesView(BaseListAPIView):
         qs = TherapyProgramService.objects.filter(
             redeem_code__iexact=code_query_param
         ).select_related(
+            "discarded_by",
             "program_service",
             "program_service__cancelled_by",
             "program_service__created_by",
             "program_service__program__customer_profile",
+            "program_service__program__therapy_program__discarded_by",
             "program_service__service",
         ).prefetch_related("redeemable_centers")
         return qs
 
 
-class TherapyProgramViewMeta(BaseGenericAPIView):
+class TherapyProgramServiceViewMeta(BaseGenericAPIView):
+    def get_program_service_queryset(self):
+        center_filters = {}
+        center_identifier = self.request.headers.get("X-Center-ID")
+        if center_identifier:
+            center_filters["center__pk"] = center_identifier
+        can_redeem_subquery = CenterServiceAssignment.objects.filter(
+            Q(center__redeemable_therapy_services__program_service__program__expires_at__isnull=True)
+            | Q(center__redeemable_therapy_services__program_service__program__expires_at__gte=timezone.localdate()),
+            service=OuterRef("service"),
+            is_active=True,
+            center__redeemable_programs__pk=OuterRef("program"),
+            center__redeemable_therapy_services__program_service__pk=OuterRef("pk"),
+            center__redeemable_therapy_services__is_active=True,
+            center__redeemable_therapy_services__is_discarded=False,
+            center__redeemable_therapy_services__program_service__is_active=True,
+            center__redeemable_therapy_services__program_service__program__is_active=True,
+            center__redeemable_therapy_services__program_service__program__therapy_program__is_active=True,
+            center__redeemable_therapy_services__program_service__program__therapy_program__is_discarded=False,
+            center__redeemable_therapy_services__sessions_used__lt=F(
+                "center__redeemable_therapy_services__sessions_count"),
+            **center_filters,
+        )
+        return (
+            ProgramService.objects.annotate(can_redeem=Exists(can_redeem_subquery))
+            .prefetch_related(
+                Prefetch(
+                    "therapy_service__redeemable_centers",
+                    queryset=Center.objects.all(),
+                    to_attr="redeemable_center_preview",
+                ),
+            )
+        )
+
+
+class TherapyProgramViewMeta(TherapyProgramServiceViewMeta):
     filter_kwargs = {}
 
     def get_therapy_program_queryset(self):
@@ -63,6 +106,7 @@ class TherapyProgramViewMeta(BaseGenericAPIView):
         return (
             TherapyProgram.objects.filter(**filter_kwargs)
             .select_related(
+                "discarded_by",
                 "program",
                 "program__center",
                 "program__created_by",
@@ -71,13 +115,17 @@ class TherapyProgramViewMeta(BaseGenericAPIView):
             .prefetch_related(
                 Prefetch(
                     "program__program_services",
-                    queryset=ProgramService.objects.select_related(
-                        "program", "service", "created_by", "cancelled_by", "therapy_service"
-                    ).prefetch_related("therapy_service__redeemable_centers")
-                    .order_by("-created_at", "-pk")[:5],
+                    queryset=self.get_program_service_queryset().select_related(
+                        "program", "service", "created_by", "cancelled_by", "therapy_service",
+                        "therapy_service__discarded_by", "program__therapy_program__discarded_by",
+                    ).order_by("-created_at", "-pk"),
                     to_attr="service_preview",
                 ),
-                "program__redeemable_centers",
+                Prefetch(
+                    "program__redeemable_centers",
+                    queryset=Center.objects.all(),
+                    to_attr="redeemable_center_preview",
+                ),
                 Prefetch(
                     "program__customer_profile__center_assignments",
                     queryset=CustomerCenterAssignment.objects.filter(
@@ -207,34 +255,20 @@ class TherapyProgramAvailableServicesView(BaseListAPIView, TherapyProgramViewMet
         )
 
 
-class TherapyProgramServicesListView(BaseListAPIView):
+class TherapyProgramServicesListView(BaseListAPIView, TherapyProgramServiceViewMeta):
     serializer_class = BaseProgramServiceSerializer
     permission_classes = [IsAdminUser | IsAssociateUser | (IsCustomerUser & ReadOnly)]
 
     def get_queryset(self):
         filter_kwargs = {}
+        discarded_query = self.request.query_params.get("discarded")
+        if discarded_query in ["0", "1"]:
+            filter_kwargs["therapy_service__is_discarded"] = bool(int(discarded_query))
         account_type = get_user_account_type(self.request.user)
         if account_type == UserType.CUSTOMER:
             filter_kwargs["program__customer_profile__customer"] = self.request.user.customer
-        subquery_filter_kwargs = {}
-        center_id = self.request.headers.get("x-center-id", None)
-        if center_id:
-            subquery_filter_kwargs["center__pk"] = center_id
-        can_redeem_subquery = CenterServiceAssignment.objects.filter(
-            Q(center__redeemable_therapy_services__program_service__program__expires_at__isnull=True)
-            | Q(center__redeemable_therapy_services__program_service__program__expires_at__gte=timezone.localdate()),
-            service=OuterRef("service"), is_active=True,
-            center__redeemable_programs__pk=OuterRef("program"),
-            center__redeemable_therapy_services__program_service__pk=OuterRef("pk"),
-            center__redeemable_therapy_services__is_active=True,
-            center__redeemable_therapy_services__program_service__is_active=True,
-            center__redeemable_therapy_services__program_service__program__is_active=True,
-            center__redeemable_therapy_services__program_service__program__therapy_program__is_active=True,
-            center__redeemable_therapy_services__sessions_used__lt=F("center__redeemable_therapy_services__sessions_count"),
-            **subquery_filter_kwargs,
-        )
         return (
-            ProgramService.objects.filter(
+            self.get_program_service_queryset().filter(
                 program__therapy_program__pk=self.kwargs["pk"],
                 **filter_kwargs,
             )
@@ -243,17 +277,18 @@ class TherapyProgramServicesListView(BaseListAPIView):
                 "created_by",
                 "service",
                 "therapy_service",
+                "therapy_service__discarded_by",
                 "program__customer_profile__customer__user",
                 "program__therapy_program",
+                "program__therapy_program__discarded_by",
             )
             .prefetch_related(
-                "therapy_service__redeemable_centers",
                 Prefetch(
                     "service__center_assignments",
                     queryset=CenterServiceAssignment.objects.filter(
                         is_active=True,
                         center__redeemable_programs__therapy_program__pk=self.kwargs["pk"],
-                    ).select_related("center"),
+                    ).select_related("center").order_by("-created_at", "-pk"),
                     to_attr="active_center_assignments",
                 ),
                 Prefetch(
@@ -273,9 +308,37 @@ class TherapyProgramServicesListView(BaseListAPIView):
                     to_attr="open_appointments",
                 ),
             )
-            .annotate(can_redeem=Exists(can_redeem_subquery))
             .order_by("-created_at")
         )
+
+
+class TherapyProgramDiscardView(BaseCreateAPIView):
+    serializer_class = TherapyProgramDiscardSerializer
+    permission_classes = [IsAdminUser | BaseAssociateRBACPermission]
+
+    def get_queryset(self):
+        center = self.get_center()
+        return TherapyProgram.objects.select_related("program", "discarded_by").filter(
+            program__center=center,
+            program__program_type=ProgramType.THERAPY,
+        )
+
+    def get_center(self):
+        center_identifier = self.request.headers.get("X-Center-ID")
+        return get_object_or_404(
+            Center.objects.all(), "Invalid center ID provided", pk=center_identifier,
+        )
+
+    def get_therapy_program(self):
+        return get_object_or_404(
+            self.get_queryset(),
+            "Therapy program not found with this ID",
+            pk=self.kwargs["pk"],
+        )
+
+    def perform_create(self, serializer):
+        therapy_program = self.get_therapy_program()
+        serializer.save(therapy_program=therapy_program, discarded_by=self.request.user)
 
 
 class TherapyProgramCancelView(BaseCreateAPIView):

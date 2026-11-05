@@ -10,6 +10,12 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIRequestFactory, force_authenticate
 
+from accounts.associates.models import (
+    Associate,
+    AssociateCenterAssignment,
+    AssociateCenterAssignmentRole,
+    AssociateRole,
+)
 from accounts.centers.models import Center
 from accounts.customers.models import (
     Customer,
@@ -77,8 +83,8 @@ from supplementation.views import (
 )
 
 
-def create_staff_user(email: str, account_type: str) -> User:
-    user = User.objects.create_user(email=email)
+def create_staff_user(email: str, account_type: str, **fields) -> User:
+    user = User.objects.create_user(email=email, **fields)
     UserAccount.objects.create(user=user, account_type=account_type)
     return user
 
@@ -656,7 +662,12 @@ class SupplementationProfileDetailTests(TestCase):
 class SupplementationProfileEventListTests(TestCase):
     def setUp(self):
         self.factory = APIRequestFactory()
-        self.admin = create_staff_user("event-admin@example.com", UserType.ADMIN)
+        self.admin = create_staff_user(
+            "event-admin@example.com",
+            UserType.ADMIN,
+            first_name="Mina",
+            last_name="Rao",
+        )
         self.associate = create_staff_user(
             "event-associate@example.com",
             UserType.ASSOCIATE,
@@ -734,13 +745,16 @@ class SupplementationProfileEventListTests(TestCase):
                 {
                     "id": str(self.replaced.id),
                     "action": "supplement_replaced",
+                    "actor": {"name": "Mina Rao", "roles": []},
                     "reason": "Vegan diet.",
                     "client_visible": True,
                     "client_title": "Fish Oil replaced",
                     "change_type": "replaced",
                     "effective_on": "2026-09-20",
                     "protocol_id": str(self.replaced.protocol_id),
+                    "protocol_name": "Foundational Health",
                     "protocol_version_id": str(self.replaced.protocol_version_id),
+                    "protocol_version_number": 1,
                     "before": {"product_name": "Fish Oil", "strength_amount": "1000"},
                     "after": {
                         "product_name": "Algae Omega-3",
@@ -762,7 +776,10 @@ class SupplementationProfileEventListTests(TestCase):
         self.assertEqual(row["action"], "version_drafted")
         self.assertFalse(row["client_visible"])
         self.assertIsNone(row["protocol_id"])
+        self.assertIsNone(row["protocol_name"])
         self.assertIsNone(row["protocol_version_id"])
+        self.assertIsNone(row["protocol_version_number"])
+        self.assertIsNone(row["actor"])
         self.assertIsNone(row["reason"])
         self.assertIsNone(row["change_type"])
 
@@ -1560,6 +1577,7 @@ class SupplementationProfileCurrentVersionListTests(TestCase):
             ProtocolCurrentVersionSerializer(protocol).data,
             {
                 "id": str(protocol.id),
+                "name": "Sleep & Recovery",
                 "current_version_id": str(self.newer.id),
                 "version_name": "v2",
                 "supplement_count": 0,
@@ -1587,6 +1605,7 @@ class SupplementationProfileCurrentVersionListTests(TestCase):
             response.data["data"][0],
             {
                 "id": str(protocol.id),
+                "name": "Approved only",
                 "current_version_id": str(version.id),
                 "version_name": "v1",
                 "supplement_count": 0,
@@ -1658,6 +1677,8 @@ class ProtocolEventListTests(TestCase):
         self.admin = create_staff_user(
             "protocol-event-admin@example.com",
             UserType.ADMIN,
+            first_name="Mina",
+            last_name="Rao",
         )
         self.associate = create_staff_user(
             "protocol-event-associate@example.com",
@@ -1733,8 +1754,14 @@ class ProtocolEventListTests(TestCase):
         self.inactive_event = ProtocolEvent.objects.create(
             customer_profile=self.profile,
             protocol=self.inactive_version.protocol,
+            protocol_version=self.inactive_version,
             action=ProtocolEventAction.PROTOCOL_CREATED,
             client_visible=False,
+        )
+        ProtocolEvent.objects.create(
+            customer_profile=self.profile,
+            protocol=self.version.protocol,
+            action=ProtocolEventAction.PROTOCOL_CREATED,
         )
 
     def list_events(self, user, protocol_id, **params):
@@ -1765,13 +1792,16 @@ class ProtocolEventListTests(TestCase):
                 {
                     "id": str(self.replaced.id),
                     "action": "supplement_replaced",
+                    "actor": {"name": "Mina Rao", "roles": []},
                     "reason": "Vegan diet.",
                     "client_visible": True,
                     "client_title": "Fish Oil replaced",
                     "change_type": "replaced",
                     "effective_on": "2026-09-20",
                     "protocol_id": str(self.version.protocol_id),
+                    "protocol_name": "Sleep & Recovery",
                     "protocol_version_id": str(self.version.id),
+                    "protocol_version_number": 1,
                     "before": {"product_name": "Fish Oil", "strength_amount": "1000"},
                     "after": {
                         "product_name": "Algae Omega-3",
@@ -1836,6 +1866,42 @@ class ProtocolEventListTests(TestCase):
         response = self.list_events(self.associate, self.version.protocol_id)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
+    def test_associate_actor_includes_active_roles(self):
+        self.associate.first_name = "Mina"
+        self.associate.last_name = "Rao"
+        self.associate.save(update_fields=["first_name", "last_name"])
+        center = Center.objects.create(name="Indiranagar", code="BLR-ACT")
+        role = AssociateRole.objects.create(
+            center=center,
+            name="Doctor",
+            is_active=True,
+        )
+        assignment = AssociateCenterAssignment.objects.create(
+            associate=Associate.objects.create(user=self.associate),
+            center=center,
+        )
+        AssociateCenterAssignmentRole.objects.create(assignment=assignment, role=role)
+        ProtocolEvent.objects.create(
+            customer_profile=self.profile,
+            protocol=self.version.protocol,
+            protocol_version=self.version,
+            actor=self.associate,
+            action=ProtocolEventAction.SUPPLEMENT_MODIFIED,
+        )
+        response = self.list_events(
+            self.admin,
+            self.version.protocol_id,
+            action="supplement_modified",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["data"][0]["actor"],
+            {
+                "name": "Mina Rao",
+                "roles": [{"id": str(role.id), "name": "Doctor"}],
+            },
+        )
+
     def test_customer_is_forbidden(self):
         response = self.list_events(self.customer, self.version.protocol_id)
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
@@ -1851,6 +1917,8 @@ class ProtocolVersionEventListTests(TestCase):
         self.admin = create_staff_user(
             "version-event-admin@example.com",
             UserType.ADMIN,
+            first_name="Mina",
+            last_name="Rao",
         )
         self.associate = create_staff_user(
             "version-event-associate@example.com",
@@ -1959,13 +2027,16 @@ class ProtocolVersionEventListTests(TestCase):
                 {
                     "id": str(self.replaced.id),
                     "action": "supplement_replaced",
+                    "actor": {"name": "Mina Rao", "roles": []},
                     "reason": "Vegan diet.",
                     "client_visible": True,
                     "client_title": "Fish Oil replaced",
                     "change_type": "replaced",
                     "effective_on": "2026-09-20",
                     "protocol_id": str(self.version.protocol_id),
+                    "protocol_name": "Sleep & Recovery",
                     "protocol_version_id": str(self.version.id),
+                    "protocol_version_number": 1,
                     "before": {"product_name": "Fish Oil", "strength_amount": "1000"},
                     "after": {
                         "product_name": "Algae Omega-3",

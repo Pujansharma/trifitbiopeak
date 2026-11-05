@@ -1,5 +1,16 @@
 # Program Service Detail and Cancellation — Frontend ePRD
 
+Therapy detail, list, and preview responses include read-only `is_discarded`.
+Discarded lines remain readable but cannot be extended, redeemed, or cancelled.
+Use the dedicated [therapy discard actions](therapy-program-discard-api.md),
+not detail PATCH, to discard a therapy-owned assignment permanently.
+
+Therapy service detail `redeemable_centers` contains at most five prefetched
+centers for therapy-owned and composite-owned assignments, ordered by newest
+creation date and ID. Use the dedicated `/redeemable-centers/` endpoint for the
+complete paginated list. Prefetch querysets remain unsliced; serializers limit
+these center previews to five items in the response.
+
 ## 1. Purpose
 
 Build the frontend detail and cancellation experience for assigned services
