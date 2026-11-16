@@ -1,5 +1,4 @@
 from corsheaders.defaults import default_headers
-from django.core.exceptions import ImproperlyConfigured
 
 from core.settings.base import *
 from core.settings.rook_static import (
@@ -58,6 +57,7 @@ EMAIL_HOST = config("STG_EMAIL_HOST")
 EMAIL_HOST_USER = config("STG_EMAIL_HOST_USER")
 EMAIL_HOST_PASSWORD = config("STG_EMAIL_HOST_PASSWORD")
 EMAIL_PORT = config("STG_EMAIL_PORT")
+EMAIL_TIMEOUT = 10
 DEFAULT_FROM_EMAIL = config("STG_DEFAULT_FROM_EMAIL")
 
 # Logging
@@ -130,11 +130,14 @@ GOOGLE_REDIRECT_URI = config("STG_GOOGLE_REDIRECT_URI", None)
 GOOGLE_CALENDAR_TOKEN_ENCRYPTION_KEY = config("STG_GOOGLE_CALENDAR_TOKEN_ENCRYPTION_KEY", None)
 GOOGLE_CALENDAR_ID = config("STG_GOOGLE_CALENDAR_ID", None)
 ADMIN_FRONTEND_URL = config("STG_ADMIN_FRONTEND_URL", None)
-COMMUNICATION_OUTBOX_WAKE_QUEUE_URL = config(
-    "STG_COMMUNICATION_OUTBOX_WAKE_QUEUE_URL", default=""
+WHATSAPP_OUTBOX_QUEUE_URL = config(
+    "STG_WHATSAPP_OUTBOX_QUEUE_URL", default=""
 )
-PROTOCOL_AI_WAKE_QUEUE_URL = config(
-    "STG_PROTOCOL_AI_WAKE_QUEUE_URL", default=""
+GOOGLE_CALENDAR_OUTBOX_QUEUE_URL = config(
+    "STG_GOOGLE_CALENDAR_OUTBOX_QUEUE_URL", default=""
+)
+PROTOCOL_AI_OUTBOX_QUEUE_URL = config(
+    "STG_PROTOCOL_AI_OUTBOX_QUEUE_URL", default=""
 )
 LUMA_BASE_URL = config("STG_LUMA_BASE_URL", default="")
 LUMA_NEXUS_API_KEY = config("STG_LUMA_NEXUS_API_KEY", default="")
@@ -149,10 +152,8 @@ WHATSAPP_WABA_ID = config("STG_WHATSAPP_WABA_ID", None)
 WHATSAPP_APP_ID = config("STG_WHATSAPP_APP_ID", None)
 WHATSAPP_TEMPLATE_LANGUAGE = config("STG_WHATSAPP_TEMPLATE_LANGUAGE", "en")
 
-# ROOK / Wearables Phase 1 — additive. All keys remain external to source control.
-# The mobile app may use PostHog to hide the feature UI. Retain this
-# independent backend kill switch for API/webhook/job safety.
-WEARABLES_ENABLED = config("STG_WEARABLES_ENABLED", default=False, cast=bool)
+# ROOK / Wearables Phase 1 — credentials stay in env; quotas hardcoded here.
+# Mobile UI flag is separate (PostHog). Profile gate: WEARABLES_REQUIRE_PROFILE_FEATURE.
 WEARABLES_REQUIRE_PROFILE_FEATURE = config(
     "STG_WEARABLES_REQUIRE_PROFILE_FEATURE", default=True, cast=bool
 )
@@ -174,6 +175,14 @@ ROOK_PREEXISTING_ENABLED = False  # Requires ROOK historical-import entitlement.
 # Review the hardcoded allowlist for this deployment before enabling it.
 ROOK_PROVISIONED_SOURCES = ROOK_PROVISIONED_SOURCE_NAMES
 ROOK_SYNC_DELAY_HOURS = config("STG_ROOK_SYNC_DELAY_HOURS", default=48, cast=int)
+# Outbound ROOK HTTP budget (Postgres RookRequestBudget). Not DRF inbound throttle.
+ROOK_API_REQUESTS_PER_MINUTE = 60
+ROOK_API_REQUESTS_PER_DAY = 1000
+# Same WA/GC pattern: empty locally (drain --limit); deploy injects STG_ via GHA/SSM.
+ROOK_AUTH_OUTBOX_QUEUE_URL = config("STG_ROOK_AUTH_OUTBOX_QUEUE_URL", default="")
+ROOK_DATA_FETCH_OUTBOX_QUEUE_URL = config(
+    "STG_ROOK_DATA_FETCH_OUTBOX_QUEUE_URL", default=""
+)
 ROOK_CONNECT_TIMEOUT_SECONDS = config("STG_ROOK_CONNECT_TIMEOUT_SECONDS", default=5, cast=int)
 ROOK_READ_TIMEOUT_SECONDS = config("STG_ROOK_READ_TIMEOUT_SECONDS", default=12, cast=int)
 ROOK_ALLOW_UNSIGNED_WEBHOOKS = config("STG_ROOK_ALLOW_UNSIGNED_WEBHOOKS", default=False, cast=bool)
@@ -187,25 +196,3 @@ ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS = config(
 HEALTH_TREND_MINIMUM_OBSERVATIONS = config("STG_HEALTH_TREND_MINIMUM_OBSERVATIONS", default=7, cast=int)
 HEALTH_HISTORICAL_GAP_DAYS = config("STG_HEALTH_HISTORICAL_GAP_DAYS", default=7, cast=int)
 TIMELINE_INCLUDE_LEGACY_RESULTS = config("STG_TIMELINE_INCLUDE_LEGACY_RESULTS", default=True, cast=bool)
-
-
-# Use the existing Django/DRF throttle configuration with the default cache.
-# An optional shared Redis URL can replace LocMemCache for cross-worker limits.
-# The separate health cache remains DummyCache and reads database snapshots.
-_shared_redis_url = config("STG_REDIS_URL", default="").strip()
-if _shared_redis_url:
-    if not _shared_redis_url.startswith(("redis://", "rediss://")):
-        raise ImproperlyConfigured("STG_REDIS_URL must use redis:// or rediss://.")
-    CACHES["default"] = {
-        "BACKEND": "django.core.cache.backends.redis.RedisCache",
-        "LOCATION": _shared_redis_url,
-        "KEY_PREFIX": "biopeak:staging",
-        "TIMEOUT": 300,
-        # Bound connection attempts and reads on the request-path DRF throttle.
-        # No ignore_exceptions/fail-open fallback: a Redis outage must not
-        # silently disable shared rate limiting across ECS workers.
-        "OPTIONS": {
-            "socket_connect_timeout": 3,
-            "socket_timeout": 3,
-        },
-    }

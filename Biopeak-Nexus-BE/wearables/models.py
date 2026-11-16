@@ -1,5 +1,7 @@
 # ruff: noqa: RUF012
 
+import uuid
+
 from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models
@@ -120,6 +122,15 @@ class WearableConnection(BaseUUIDModel):
     historical_days_requested = models.PositiveSmallIntegerField(default=29)
     connected_at = models.DateTimeField(null=True, blank=True)
     disconnected_at = models.DateTimeField(null=True, blank=True)
+    # Request/coverage metadata must not be inferred from webhook receipt time.
+    authorization_generation = models.UUIDField(default=uuid.uuid4, editable=False)
+    last_sync_requested_at = models.DateTimeField(null=True, blank=True)
+    # Manual admission is distinct from webhook freshness and completed pulls.
+    last_manual_sync_queued_at = models.DateTimeField(null=True, blank=True)
+    pending_sync_requested_at = models.DateTimeField(null=True, blank=True)
+    last_data_processed_at = models.DateTimeField(null=True, blank=True)
+    last_pull_completed_at = models.DateTimeField(null=True, blank=True)
+    synced_through = models.DateTimeField(null=True, blank=True)
     last_successful_sync = models.DateTimeField(null=True, blank=True)
     last_webhook_received_at = models.DateTimeField(null=True, blank=True)
     import_started_at = models.DateTimeField(null=True, blank=True)
@@ -377,27 +388,27 @@ class HealthDomainSnapshot(BaseUUIDModel):
         return f"{self.customer_profile_id}:{self.domain}"
 
 
-class HealthProcessingJob(BaseUUIDModel):
+class RookOutbox(BaseUUIDModel):
     customer_profile = models.ForeignKey(
         CustomerProfile,
         null=True,
         blank=True,
         on_delete=models.CASCADE,
-        related_name="health_processing_jobs",
+        related_name="rook_outboxes",
     )
     document = models.ForeignKey(
         RookHealthDocument,
         null=True,
         blank=True,
         on_delete=models.CASCADE,
-        related_name="processing_jobs",
+        related_name="rook_outboxes",
     )
     connection = models.ForeignKey(
         WearableConnection,
         null=True,
         blank=True,
         on_delete=models.CASCADE,
-        related_name="processing_jobs",
+        related_name="rook_outboxes",
     )
     job_type = models.CharField(max_length=32, choices=HealthJobType)
     status = models.CharField(
@@ -407,6 +418,11 @@ class HealthProcessingJob(BaseUUIDModel):
     )
     idempotency_key = models.CharField(max_length=128, unique=True)
     payload = models.JSONField(default=dict, blank=True)
+    # Durable SQS notification intent. The job remains authoritative if send fails.
+    wake_version = models.PositiveIntegerField(default=1)
+    wake_sent_version = models.PositiveIntegerField(default=0)
+    wake_next_attempt_at = models.DateTimeField(null=True, blank=True)
+    claim_token = models.UUIDField(null=True, blank=True, editable=False)
     attempt_count = models.PositiveIntegerField(default=0)
     scheduled_at = models.DateTimeField()
     started_at = models.DateTimeField(null=True, blank=True)
@@ -416,6 +432,13 @@ class HealthProcessingJob(BaseUUIDModel):
 
     class Meta:
         ordering = ["scheduled_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["connection"],
+                condition=models.Q(job_type=HealthJobType.FETCH_ROOK_DATA, status=HealthJobStatus.RUNNING),
+                name="uniq_rook_running_fetch",
+            ),
+        ]
         indexes = [
             models.Index(fields=["status", "scheduled_at"], name="w_healthproces_1_idx"),
             models.Index(
@@ -430,3 +453,15 @@ class HealthProcessingJob(BaseUUIDModel):
 
     def __str__(self):
         return f"{self.job_type}:{self.status}:{self.idempotency_key}"
+
+
+class RookRequestBudget(models.Model):
+    """Account-wide HTTP admission; includes calls from web and all worker roles."""
+
+    scope = models.CharField(max_length=64, primary_key=True)
+    revision = models.PositiveBigIntegerField(default=0)
+    next_request_at = models.DateTimeField(null=True, blank=True)
+    blocked_until = models.DateTimeField(null=True, blank=True)
+    budget_date = models.DateField(null=True, blank=True)
+    requests_today = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)

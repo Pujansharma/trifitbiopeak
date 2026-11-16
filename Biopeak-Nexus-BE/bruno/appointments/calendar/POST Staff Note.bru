@@ -1,0 +1,32 @@
+meta {
+  name: POST Staff Note
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseURL}}/appointments/{{appointment_id}}/staff-notes/
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "text": "Patient prefers morning slots"
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 30000
+}
+
+docs {
+  Admin or associate. Append-only staff note on an appointment.
+  Not center-scoped URL; access checked against the appointment's center.
+  No edit or delete. Unbounded.
+  Body: { "text": "..." } — required, non-blank, max 1000 chars.
+  201 data: { id, text, created_by { id, email, full_name }|null, created_at }.
+  Separate from booking `notes` (book/reschedule free text).
+  Staff appointment detail includes `staff_notes` array (oldest first).
+}

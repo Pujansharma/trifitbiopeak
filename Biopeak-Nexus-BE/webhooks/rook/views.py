@@ -1,7 +1,7 @@
 from django.conf import settings
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
-from rest_framework.exceptions import APIException, NotFound
+from rest_framework.exceptions import APIException
 from rest_framework.permissions import AllowAny
 
 from core.utils.views.main import BaseGenericAPIView
@@ -29,8 +29,6 @@ class RookWebhookView(BaseGenericAPIView):
     permission_classes = (AllowAny,)
 
     def validate_signature(self, payload, request) -> bool:
-        if not getattr(settings, "WEARABLES_ENABLED", False):
-            raise NotFound("Wearable integration is not enabled.")
         expected_client = getattr(settings, "ROOK_CLIENT_UUID", "")
         valid_clients = {client for client in (
             expected_client, getattr(settings, "ROOK_SDK_CLIENT_UUID", ""),

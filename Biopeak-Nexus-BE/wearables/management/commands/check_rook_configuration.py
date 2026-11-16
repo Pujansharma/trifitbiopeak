@@ -35,16 +35,30 @@ def validate_rook_callback(value: str) -> bool:
 def rook_readiness_checks() -> list[tuple[str, str, str]]:
     """Return (severity, setting name, advice), without any secret content."""
     checks: list[tuple[str, str, str]] = []
-    if not getattr(settings, "WEARABLES_ENABLED", False):
-        checks.append(("WARN", "WEARABLES_ENABLED", "Feature is disabled in this environment."))
-    elif isinstance(caches["default"], LocMemCache):
-        # DRF ScopedRateThrottle stays active without Redis, but its counters
-        # belong to individual workers and do not enforce a global API budget.
+    for key, maximum in (("ROOK_API_REQUESTS_PER_MINUTE", 100000),
+                         ("ROOK_API_REQUESTS_PER_DAY", 100000000)):
+        value = getattr(settings, key, None)
+        try:
+            approved = int(value) if not isinstance(value, bool) else 0
+        except (TypeError, ValueError, OverflowError):
+            approved = 0
+        if not 1 <= approved <= maximum:
+            checks.append(("ERROR", key, "Set a positive, approved ROOK account budget before enabling HTTP requests."))
+
+    deployment = str(getattr(settings, "SETTINGS_MODULE", "")).rsplit(".", 1)[-1]
+    if deployment in {"staging", "production"}:
+        for key in ("ROOK_AUTH_OUTBOX_QUEUE_URL", "ROOK_DATA_FETCH_OUTBOX_QUEUE_URL"):
+            value = str(getattr(settings, key, "") or "").strip()
+            url = urlsplit(value)
+            if not value or url.scheme != "https" or not url.hostname:
+                checks.append(("ERROR", key, "Configure an HTTPS SQS wake queue URL for both ROOK workers and the API."))
+    if isinstance(caches["default"], LocMemCache):
+        # DRF ScopedRateThrottle counters are per process. Outbound ROOK budget
+        # is separate (Postgres RookRequestBudget + hardcoded settings quotas).
         checks.append((
             "WARN", "WEARABLE_EDGE_RATE_LIMIT",
-            "DRF throttling is active, but the default LocMemCache limits are "
-            "per process. Use BioPeak's approved shared cache if deployment-wide "
-            "request limits are required; edge limits are additional protection.",
+            "DRF throttling is active with LocMemCache (per process). Outbound "
+            "ROOK budgets use Postgres RookRequestBudget, not this cache.",
         ))
     sources = provisioned_sources()
     if not sources:

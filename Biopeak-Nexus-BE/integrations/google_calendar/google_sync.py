@@ -6,6 +6,7 @@ from django.db import Error as DatabaseError
 
 from accounts.associates.models import Associate
 from appointments.models import Appointment
+from appointments.utils.calendar import format_center_datetime
 from appointments.utils.constants import AppointmentStatus
 from appointments.utils.emails import (
     build_appointment_confirmed_notes,
@@ -81,10 +82,19 @@ def appointment_has_reschedule_history(appointment):
     return appointment.history_entries.exists()
 
 
-def google_event_title(has_reschedule_history):
-    if has_reschedule_history:
-        return "Appointment Rescheduled"
-    return "Appointment Confirmed"
+def google_event_title(appointment: Appointment, has_reschedule_history: bool) -> str:
+    status_label = (
+        "Appointment Rescheduled" if has_reschedule_history else "Appointment Confirmed"
+    )
+    profile = appointment.customer_profile
+    names = (profile.first_name, profile.last_name)
+    details = [
+        " ".join(name for name in names if name),
+        appointment.service.name,
+        appointment.center.name,
+        format_center_datetime(appointment.center, appointment.start_datetime),
+    ]
+    return f"{status_label} : {' | '.join(detail for detail in details if detail)}"
 
 
 def google_event_notes(appointment, has_reschedule_history):
@@ -169,7 +179,7 @@ def upsert_event_with_fallback(
 def upsert_google_event(appointment, organizer, access_token):
     associates = associates_for_appointment(appointment)
     has_reschedule_history = appointment_has_reschedule_history(appointment)
-    title = google_event_title(has_reschedule_history)
+    title = google_event_title(appointment, has_reschedule_history)
     notes = google_event_notes(appointment, has_reschedule_history)
     attendee_emails = build_attendee_emails(associates, organizer)
     deterministic_id = google_calendar_event_id(appointment)

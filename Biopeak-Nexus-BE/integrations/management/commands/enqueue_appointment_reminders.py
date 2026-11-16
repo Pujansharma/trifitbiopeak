@@ -4,14 +4,14 @@ from integrations.communications.service import (
     REMINDER_ENQUEUE_LIMIT,
     enqueue_due_appointment_reminders,
 )
-from integrations.utils.constants import CommunicationOutboxStatus
+from integrations.utils.constants import WhatsAppOutboxStatus
 
 
 class Command(BaseCommand):
     help = (
         "Enqueue WhatsApp appointment reminders for confirmed appointments "
-        "starting within the next hour. Does not wake SQS — run "
-        "process_communication_outbox in the same sweep to send."
+        "starting within the next hour. Prefer run_whatsapp_reminder_schedule "
+        "in production (enqueue + SQS dispatch)."
     )
 
     def add_arguments(self, parser):
@@ -29,8 +29,8 @@ class Command(BaseCommand):
             for message in messages
             if message.status
             in {
-                CommunicationOutboxStatus.PENDING,
-                CommunicationOutboxStatus.FAILED,
+                WhatsAppOutboxStatus.PENDING,
+                WhatsAppOutboxStatus.FAILED,
             }
         )
         self.stdout.write(

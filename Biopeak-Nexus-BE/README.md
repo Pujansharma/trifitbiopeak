@@ -79,9 +79,6 @@ The project uses `pyproject.toml` for dependency management instead of `requirem
    PRD_EMAIL_HOST_PASSWORD=your-email-password
    PRD_DEFAULT_FROM_EMAIL=your-email
    
-   # Production Redis (Required)
-   PRD_REDIS_HOST=your-redis-host:6379
-   
    # AWS S3 Storage
    AWS_S3_ACCESS_KEY_ID=your-aws-access-key
    AWS_S3_SECRET_ACCESS_KEY=your-aws-secret-key

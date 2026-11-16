@@ -282,7 +282,19 @@ class CompositeTemplatesView(BaseListCreateAPIView, CompositeTemplateViewMeta):
             filter_kwargs['is_active'] = bool(int(active_query))
 
         if code_params:
-            filter_kwargs = {'code__icontains': code_params}
+            filter_kwargs["code__icontains"] = code_params
+
+        category_count_fields = {
+            "therapy": "therapy_services_count",
+            "assessment": "assessment_services_count",
+            "consultation": "consultation_services_count",
+        }
+        for parameter, count_field in category_count_fields.items():
+            category_query = self.request.query_params.get(parameter)
+            if category_query == "1":
+                filter_kwargs[f"{count_field}__gte"] = 1
+            if category_query == "0":
+                filter_kwargs[count_field] = 0
 
         qs = super().get_queryset().filter(search, **filter_kwargs)
         return qs

@@ -49,7 +49,10 @@ from supplementation.utils.protocol_ai import (
     create_protocol_draft,
     reject_recommendation_item,
 )
-from supplementation.utils.protocol_ai_wake import publish_protocol_ai_wake
+from integrations.protocol_management.outbox import (
+    enqueue_protocol_ai_outbox,
+    publish_protocol_ai_wake,
+)
 from supplementation.utils.protocols import (
     summarize_current_protocols,
     version_supplement_count,
@@ -2074,6 +2077,7 @@ class ProtocolAiQueueSerializer(BaseSerializer):
             status=ProtocolAiJobStatus.PENDING,
             **validated_data,
         )
+        enqueue_protocol_ai_outbox(job)
         transaction.on_commit(partial(publish_protocol_ai_wake, job.pk))
         return job
 

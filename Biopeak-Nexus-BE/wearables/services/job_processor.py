@@ -1,458 +1,70 @@
-from datetime import timedelta
+"""Dispatch ROOK outbox jobs; claims and fetch recovery stay separate."""
+from uuid import UUID
 
 from django.conf import settings
 from django.db import DatabaseError
-from django.db.models import Case, DateTimeField, Exists, F, OuterRef, Q, Subquery, Value, When
+from django.db.models import Case, IntegerField, Value, When
 from django.utils import timezone
 
-from accounts.customers.models import CustomerProfile
-from wearables.models import HealthProcessingJob, RookHealthDocument, WearableConnection, WearableConnectionEvent
-from wearables.services.analytics import (refresh_profile_snapshots, member_today, invalidate_health_dashboard)
-from wearables.services.consent import has_active_wearable_consent
-from wearables.services.config import preexisting_import_enabled
-from wearables.services.client import (
-    RookClient,
-    RookConfigurationError,
-    RookServiceError,
+from integrations.utils.sqs_dispatch import delete_queue_message
+from wearables.models import RookOutbox, RookHealthDocument, WearableConnection
+from wearables.services.authorization_jobs import (
+    process_authorise_rook_connection,
+    process_revoke_rook_connection,
 )
-from wearables.services.connections import refresh_authorizing_connections
-from wearables.services.lifecycle import can_ingest_source
-from wearables.services.job_queue import enqueue_or_reuse_orphaned_normalization_job, finished_health_jobs
-from wearables.services.ingestion import (
-    ingest_rook_document, normalize_health_document, remap_member_local_days,
+from wearables.services.client import RookConfigurationError, RookServiceError
+from wearables.services.job_claims import (
+    LostHealthJobLease,
+    claim_health_job,
+    complete_health_job,
+    defer_health_job,
+    fail_health_job,
+    maximum_rook_outbox_attempts,
+    reset_stale_health_jobs,
+    rook_outbox_retryable_q,
 )
-from wearables.services.signature import rook_metadata_datetime_string
-from wearables.utils.constants import (
-    AuthorizationStatus,
-    ConnectionMethod,
-    ConnectionStatus,
-    DocumentStatus,
-    HealthJobStatus,
-    HealthJobType,
-    HistoricalImportStatus,
-    HEALTH_MAXIMUM_JOB_ATTEMPTS,
+from wearables.services.provider_errors import RookRequestDeferred
+from wearables.services.rate_policy import seconds_until
+from wearables.services.recovery import process_fetch_rook_data
+from wearables.services.runtime import enabled_setting
+from wearables.services.wake import (
+    QUEUE_KIND_AUTH,
+    QUEUE_KIND_DATA_FETCH,
+    queue_kind,
+    schedule_job_wake,
 )
+from wearables.utils.constants import HealthJobStatus, HealthJobType
 
-MAXIMUM_JOB_ATTEMPTS = HEALTH_MAXIMUM_JOB_ATTEMPTS
-# Do not let 21-call recovery pulls monopolize a scheduled sweep.
-MAXIMUM_RECOVERY_PULLS_PER_SWEEP = 1
-STALE_JOB_MINUTES = 15
-# A 7-day API recovery can make up to 21 sequential HTTP calls, followed by
-# local normalization. An independent, long lease and request-level heartbeat
-# prevent premature reclaims while it is still progressing.
-RECOVERY_JOB_LEASE_MINUTES = 90
-
-
-def recovery_lease_minutes() -> int:
-    minimum_http_minutes = (21 * (getattr(settings, "ROOK_CONNECT_TIMEOUT_SECONDS", 5)
-                                  + getattr(settings, "ROOK_READ_TIMEOUT_SECONDS", 12)) + 59) // 60
-    return max(RECOVERY_JOB_LEASE_MINUTES, minimum_http_minutes + 30)
-
-
-def heartbeat_health_job(job: HealthProcessingJob) -> None:
-    """Only the active attempt is authorized to keep its lease alive."""
-    if not getattr(job, "pk", None):
-        return  # Direct testing/manual recovery (no claimed persisted job).
-    updated = HealthProcessingJob.objects.filter(
-        pk=job.pk, status=HealthJobStatus.RUNNING,
-        attempt_count=job.attempt_count,
-    ).update(locked_at=timezone.now(), updated_at=timezone.now())
-    if not updated:
-        raise RookServiceError("Health recovery worker lost its processing lease.")
-
-
-def process_normalize_document(job: HealthProcessingJob) -> dict:
-    if job.document_id is None:
-        raise ValueError("Normalize job has no document.")
-    return normalize_health_document(job.document_id)
-
-
-def process_refresh_analytics(job: HealthProcessingJob) -> dict:
-    if job.customer_profile_id is None:
-        raise ValueError("Analytics job has no customer profile.")
-    cards = refresh_profile_snapshots(job.customer_profile, domains=job.payload.get("domains"))
-    return {"cardCount": len(cards)}
-
-
-def process_refresh_connection(job: HealthProcessingJob) -> dict:
-    if job.customer_profile_id is None:
-        raise ValueError("Connection refresh job has no customer profile.")
-    refresh_authorizing_connections(job.customer_profile)
-    return {"refreshed": True}
-
-
-def process_revoke_connection(job: HealthProcessingJob) -> dict:
-    if job.connection_id is None:
-        raise ValueError("Revoke job has no connection.")
-    connection = WearableConnection.objects.select_related("identity").filter(
-        pk=job.connection_id
-    ).first()
-    if connection is None:
-        raise ValueError("Recovery/revocation connection no longer exists.")
-    # A delayed revoke from a former disconnect must not revoke a new
-    # authorization created before the worker processes the old job.
-    if connection.status != ConnectionStatus.DISCONNECTED:
-        return {"skipped": True, "reason": "connection_reauthorized"}
-    RookClient().revoke_source(
-        rook_user_id=connection.identity.rook_user_id,
-        data_source=connection.data_source,
-    )
-    connection.last_error_code = ""
-    connection.last_error_detail = ""
-    connection.save(
-        update_fields=["last_error_code", "last_error_detail", "updated_at"]
-    )
-    return {"revoked": True}
-
-
-def recovery_document(
-    *,
-    document: dict,
-    rook_user_id: str,
-    health_pillar: str,
-    summary_date: str,
-) -> dict:
-    return {
-        **document,
-        "user_id": rook_user_id,
-        "data_structure": document.get("data_structure")
-        or f"{health_pillar}_health_summary",
-        "datetime": (rook_metadata_datetime_string(document)
-                     or document.get("datetime")
-                     or f"{summary_date}T00:00:00+00:00"),
-    }
-
-
-
-def save_recovery_outcome(connection: WearableConnection, *, fields: list[str]) -> None:
-    """Commit a slow recovery result only to its still-authorized session.
-
-    A member may disconnect/revoke or reconnect while up to 21 network reads
-    are executing. Comparing the original import start avoids reverting that
-    newer state. No row lock is held during upstream I/O.
-    """
-    updates = {name: getattr(connection, name) for name in fields if name != "updated_at"}
-    changed = (WearableConnection.objects.filter(
-        pk=connection.pk,
-        authorization_status=AuthorizationStatus.AUTHORIZED,
-        import_started_at=connection.import_started_at,
-        disconnected_at__isnull=True,
-    ).exclude(status__in=[
-        ConnectionStatus.DISCONNECTED,
-        ConnectionStatus.AUTHORIZATION_EXPIRED,
-        ConnectionStatus.PERMISSION_DENIED,
-    ]).update(**updates, updated_at=timezone.now()))
-    if not changed:
-        raise RookServiceError(
-            "ROOK recovery results were discarded: provider authorization changed during import."
-        )
-
-
-def process_recovery_pull(job: HealthProcessingJob) -> dict:
-    if job.connection_id is None:
-        raise ValueError("Recovery pull job has no connection.")
-    connection = WearableConnection.objects.select_related("identity").filter(
-        pk=job.connection_id
-    ).first()
-    if connection is None:
-        raise ValueError("Recovery/revocation connection no longer exists.")
-    if not can_ingest_source(connection):
-        return {"skipped": True, "reason": "source_not_authorized"}
-    if connection.connection_method != ConnectionMethod.API:
-        return {"skipped": True, "reason": "sdk_history_is_on_device"}
-    if not has_active_wearable_consent(connection.customer_profile):
-        return {"skipped": True, "reason": "consent_revoked"}
-    client = RookClient()
-    imported_count = 0
-    already_processed_count = 0
-    error_count = 0
-    failed_documents = 0
-    unmapped_documents = 0
-    # API-based ROOK Pre-Existing Data is limited to seven days. Native SDK
-    # backfill (up to ~29 days) happens on-device, not through this endpoint.
-
-    today = member_today(connection.customer_profile)
-    requested_days = min(connection.historical_days_requested, 7) if preexisting_import_enabled() else 0
-    # For short-gap reconnects, fetch only affected local days. For gaps
-    # longer than ROOK's historical window, leave old missing days visible.
-    if connection.status == ConnectionStatus.HISTORICAL_REIMPORT:
-        revoked_event = WearableConnectionEvent.objects.filter(
-            connection=connection, event_type="connection_revoked",
-        ).order_by("-created_at").first()
-        if revoked_event:
-            elapsed = max(1, (timezone.now() - revoked_event.created_at).days + 1)
-            requested_days = min(requested_days, elapsed)
-    if requested_days == 0:
-        connection.status = (ConnectionStatus.ACTIVE if connection.last_successful_sync else ConnectionStatus.IDLE)
-        connection.import_status = HistoricalImportStatus.COMPLETED
-        connection.import_completed_at = timezone.now()
-        # This branch can finish after the member disconnects or reauthorizes.
-        # Apply the same session/generation CAS as the actual recovery path;
-        # a stale worker must never restore ACTIVE/IDLE for a revoked source.
-        save_recovery_outcome(connection, fields=[
-            "status", "import_status", "import_completed_at",
-        ])
-        invalidate_health_dashboard(connection.customer_profile)
-        return {"skipped": True, "reason": "preexisting_import_disabled"}
-    for day_offset in range(requested_days):
-        summary_date = (today - timedelta(days=day_offset)).isoformat()
-        for health_pillar in ("physical", "sleep", "body"):
-            heartbeat_health_job(job)
-            try:
-                documents = client.get_processed_summaries(
-                    rook_user_id=connection.identity.rook_user_id,
-                    health_pillar=health_pillar,
-                    summary_date=summary_date,
-                )
-            except RookServiceError:
-                error_count += 1
-                continue
-            heartbeat_health_job(job)
-            for document in documents:
-                heartbeat_health_job(job)
-                # We are already in a retryable worker. Normalize *now* before
-                # updating the import status, otherwise 201/queued can be
-                # mistaken for a completed historical import (PRD section 5.2).
-                try:
-                    result = ingest_rook_document(
-                        recovery_document(
-                            document=document,
-                            rook_user_id=connection.identity.rook_user_id,
-                            health_pillar=health_pillar,
-                            summary_date=summary_date,
-                        ), signature_valid=True, enqueue_normalization=False,
-                    )
-                    if result.get("queued"):
-                        outcome = normalize_health_document(result["documentId"])
-                        if outcome.get("skipped"):
-                            failed_documents += 1
-                        elif outcome.get("alreadyProcessed"):
-                            already_processed_count += 1
-                        elif not outcome.get("v1MetricCount", 0):
-                            # EC-025/EC-074: an otherwise well-formed ROOK
-                            # document without V1 measurements is not a local
-                            # normalization failure. Retain it for drift audit.
-                            unmapped_documents += 1
-                        else:
-                            imported_count += 1
-                    elif result.get("reason") in ("exact_replay", "same_version_conflict"):
-                        # Already-processed duplicates must not be re-imported.
-                        already_processed_count += 1
-                    else:
-                        failed_documents += 1
-                except (ValueError, RookServiceError) as error:
-                    # A partial import must remain visible; never report a
-                    # clean COMPLETED when normalization failed.
-                    failed_documents += 1
-                    continue
-    request_count = requested_days * 3
-    if error_count == request_count:
-        connection.status = ConnectionStatus.PROVIDER_ERROR
-        connection.import_status = HistoricalImportStatus.FAILED
-        connection.last_error_code = "recovery_unavailable"
-        connection.last_error_detail = (
-            f"All {request_count} recovery requests were unavailable. Stored history is safe."
-        )
-        save_recovery_outcome(connection, fields=[
-            "status", "import_status", "last_error_code", "last_error_detail",
-        ])
-        raise RookServiceError(
-            "ROOK recovery data was unavailable. Stored health history is safe."
-        )
-    connection.authorization_status = AuthorizationStatus.AUTHORIZED
-    # A 200 response with no summaries does not demonstrate successful live
-    # synchronization; preserve the actual last received measurement time.
-    if failed_documents and not imported_count and not already_processed_count and not error_count:
-        connection.status = ConnectionStatus.PROVIDER_ERROR
-        connection.import_status = HistoricalImportStatus.FAILED
-        connection.last_error_code = "recovery_normalization_failed"
-        connection.last_error_detail = (
-            f"All {failed_documents} ROOK documents failed V1 normalization; "
-            "previously stored history remains safe."
-        )
-    elif error_count or failed_documents:
-        connection.status = ConnectionStatus.PARTIAL
-        connection.import_status = HistoricalImportStatus.PARTIAL
-        connection.last_error_code = "recovery_partial"
-        connection.last_error_detail = (
-            f"{error_count} of {request_count} recovery requests unavailable; "
-            f"{failed_documents} documents failed validation or normalization."
-        )
-    else:
-        connection.status = (
-            ConnectionStatus.ACTIVE if (imported_count or connection.last_successful_sync)
-            else ConnectionStatus.IDLE
-        )
-        connection.import_status = HistoricalImportStatus.COMPLETED
-        connection.last_error_code = ""
-        connection.last_error_detail = ""
-        connection.import_completed_at = timezone.now()
-    save_recovery_outcome(connection, fields=[
-        "authorization_status", "status", "import_status", "last_error_code",
-        "last_error_detail", "import_completed_at",
-    ])
-    invalidate_health_dashboard(connection.customer_profile)
-    return {
-        "importedDocumentCount": imported_count,
-        "partial": bool(error_count or failed_documents),
-        "errorCount": error_count,
-        "failedDocumentCount": failed_documents,
-        "unmappedDocumentCount": unmapped_documents,
-        "alreadyProcessedCount": already_processed_count,
-    }
-
-
-def process_remap_timezone(job: HealthProcessingJob) -> dict:
-    if job.customer_profile_id is None:
-        raise ValueError("Timezone remap job has no customer profile.")
-    result = remap_member_local_days(job.customer_profile)
-    refresh_profile_snapshots(job.customer_profile)
-    return result
-
-
-def process_freshness_check(job: HealthProcessingJob) -> dict:
-    if job.customer_profile_id is None:
-        raise ValueError("Freshness job has no customer profile.")
-    refresh_profile_snapshots(job.customer_profile)
-    return {"refreshed": True}
-
+MAXIMUM_FETCH_ROOK_DATA_PER_SWEEP = 1
 
 JOB_HANDLERS = {
-    HealthJobType.NORMALIZE_DOCUMENT: process_normalize_document,
-    HealthJobType.REFRESH_ANALYTICS: process_refresh_analytics,
-    HealthJobType.REFRESH_CONNECTION: process_refresh_connection,
-    HealthJobType.REVOKE_CONNECTION: process_revoke_connection,
-    HealthJobType.RECOVERY_PULL: process_recovery_pull,
-    HealthJobType.FRESHNESS_CHECK: process_freshness_check,
-    HealthJobType.REMAP_TIMEZONE: process_remap_timezone,
+    HealthJobType.AUTHORISE_ROOK_CONNECTION: process_authorise_rook_connection,
+    HealthJobType.REVOKE_ROOK_CONNECTION: process_revoke_rook_connection,
+    HealthJobType.FETCH_ROOK_DATA: process_fetch_rook_data,
 }
 
 
-def reset_stale_health_jobs() -> int:
-    now = timezone.now()
-    regular_cutoff = now - timedelta(minutes=STALE_JOB_MINUTES)
-    recovery_cutoff = now - timedelta(minutes=recovery_lease_minutes())
-    expired = (Q(job_type=HealthJobType.RECOVERY_PULL, locked_at__lt=recovery_cutoff)
-               | Q(~Q(job_type=HealthJobType.RECOVERY_PULL), locked_at__lt=regular_cutoff))
-    return HealthProcessingJob.objects.filter(
-        status=HealthJobStatus.RUNNING,
-    ).filter(expired).update(
-        status=HealthJobStatus.FAILED,
-        failure_detail="Worker lease expired.",
-        scheduled_at=now,
-        completed_at=Case(
-            When(attempt_count__gte=MAXIMUM_JOB_ATTEMPTS, then=Value(now)),
-            default=F("completed_at"), output_field=DateTimeField(),
-        ),
-        locked_at=None,
-        updated_at=now,
-    )
+def schedule_retry_wake(job: RookOutbox, *, force: bool = False) -> None:
+    """Publish SQS wake after defer, or after fail while attempts remain."""
+    if force:
+        schedule_job_wake(job.pk)
+        return
+    job.refresh_from_db(fields=["attempt_count", "job_type", "completed_at"])
+    if job.completed_at is not None:
+        return
+    if job.attempt_count >= maximum_rook_outbox_attempts(job.job_type):
+        return
+    schedule_job_wake(job.pk)
 
 
-def claim_health_job(job_id) -> HealthProcessingJob | None:
-    now = timezone.now()
-    updated = HealthProcessingJob.objects.filter(
-        pk=job_id,
-        status__in=[HealthJobStatus.PENDING, HealthJobStatus.FAILED],
-        scheduled_at__lte=now,
-        attempt_count__lt=MAXIMUM_JOB_ATTEMPTS,
-    ).update(
-        status=HealthJobStatus.RUNNING,
-        started_at=now,
-        locked_at=now,
-        attempt_count=F("attempt_count") + 1,
-        failure_detail="",
-        updated_at=now,
-    )
-    if not updated:
-        return None
-    return HealthProcessingJob.objects.select_related(
-        "customer_profile",
-        "document",
-        "connection__identity",
-    ).filter(pk=job_id).first()
-
-
-def complete_health_job(job: HealthProcessingJob, result: dict) -> None:
-    HealthProcessingJob.objects.filter(
-        pk=job.pk, status=HealthJobStatus.RUNNING,
-        attempt_count=job.attempt_count,
-    ).update(
-        status=HealthJobStatus.COMPLETED,
-        payload={**job.payload, "result": result},
-        completed_at=timezone.now(),
-        locked_at=None,
-        updated_at=timezone.now(),
-    )
-
-
-def fail_health_job(job: HealthProcessingJob, error: Exception) -> None:
-    now = timezone.now()
-    retry_delay = timedelta(minutes=5 * max(job.attempt_count, 1))
-    HealthProcessingJob.objects.filter(
-        pk=job.pk, status=HealthJobStatus.RUNNING,
-        attempt_count=job.attempt_count,
-    ).update(
-        status=HealthJobStatus.FAILED,
-        failure_detail=str(error)[:512],
-        scheduled_at=now + retry_delay,
-        # A final failed attempt is also terminal work. Keep its finish time
-        # so the scheduler does not immediately restart an exhausted job.
-        completed_at=(now if job.attempt_count >= MAXIMUM_JOB_ATTEMPTS else None),
-        locked_at=None,
-        updated_at=now,
-    )
-
-
-def process_health_job(job: HealthProcessingJob) -> dict:
+def process_health_job(job: RookOutbox) -> dict:
     handler = JOB_HANDLERS.get(job.job_type)
     if handler is None:
         raise ValueError(f"Unsupported health job type: {job.job_type}")
     return handler(job)
 
 
-def process_pending_health_jobs(
-    *, limit: int = 50, skip_recovery: bool = False, only_recovery: bool = False,
-) -> list[dict]:
-    if skip_recovery and only_recovery:
-        raise ValueError("Cannot skip and exclusively process recovery jobs.")
-    reset_stale_health_jobs()
-    if limit <= 0:
-        return []
-    ready_jobs = HealthProcessingJob.objects.filter(
-        status__in=[HealthJobStatus.PENDING, HealthJobStatus.FAILED],
-        scheduled_at__lte=timezone.now(),
-        attempt_count__lt=MAXIMUM_JOB_ATTEMPTS,
-    )
-    if skip_recovery:
-        ready_jobs = ready_jobs.exclude(job_type=HealthJobType.RECOVERY_PULL)
-    elif only_recovery:
-        ready_jobs = ready_jobs.filter(job_type=HealthJobType.RECOVERY_PULL)
-    # Always prioritize accepted webhook normalization, even under a large
-    # freshness backlog. If normalization does not fill the sweep, reserve at
-    # most one slot for recovery so hourly freshness jobs cannot starve it.
-    normalization_job_ids = list(
-        ready_jobs.filter(job_type=HealthJobType.NORMALIZE_DOCUMENT)
-        .order_by("scheduled_at", "pk")
-        .values_list("pk", flat=True)[:limit]
-    )
-    remaining_slots = limit - len(normalization_job_ids)
-    recovery_slots = min(MAXIMUM_RECOVERY_PULLS_PER_SWEEP, remaining_slots)
-    recovery_job_ids = list(
-        ready_jobs.filter(job_type=HealthJobType.RECOVERY_PULL)
-        .order_by("scheduled_at", "pk")
-        .values_list("pk", flat=True)[:recovery_slots]
-    ) if recovery_slots else []
-    other_slots = remaining_slots - len(recovery_job_ids)
-    other_job_ids = list(
-        ready_jobs.exclude(job_type__in=[
-            HealthJobType.NORMALIZE_DOCUMENT, HealthJobType.RECOVERY_PULL,
-        ])
-        .order_by("scheduled_at", "pk")
-        .values_list("pk", flat=True)[:other_slots]
-    ) if other_slots else []
-    job_ids = normalization_job_ids + other_job_ids + recovery_job_ids
-    results = []
+def run_claimed_health_job(job: RookOutbox) -> dict:
     handled_errors = (
         RookServiceError,
         RookConfigurationError,
@@ -461,137 +73,119 @@ def process_pending_health_jobs(
         DatabaseError,
         RookHealthDocument.DoesNotExist,
         WearableConnection.DoesNotExist,
+        LostHealthJobLease,
     )
-    for job_id in job_ids:
-        job = claim_health_job(job_id)
-        if job is None:
-            continue
-        try:
-            result = process_health_job(job)
-        except handled_errors as error:
-            fail_health_job(job, error)
-            results.append(
-                {"jobId": str(job.pk), "status": "failed", "detail": str(error)}
-            )
-            continue
-        complete_health_job(job, result)
-        results.append({"jobId": str(job.pk), "status": "completed", **result})
+    try:
+        result = process_health_job(job)
+    except RookRequestDeferred as error:
+        result = {
+            "deferred": True,
+            "reason": error.reason,
+            "retryAfterSeconds": seconds_until(error.retry_at, timezone.localtime()),
+        }
+        changed = defer_health_job(job, result)
+        if changed:
+            schedule_retry_wake(job, force=True)
+        return {
+            "jobId": str(job.pk),
+            "status": "deferred" if changed else "superseded",
+            **result,
+        }
+    except handled_errors as error:
+        permanent = (
+            getattr(error, "status_code", 0) in {400, 401, 403, 404, 422}
+            or getattr(error, "terminal", False)
+        )
+        if fail_health_job(job, error, terminal=permanent):
+            schedule_retry_wake(job)
+        return {"jobId": str(job.pk), "status": "failed", "detail": str(error)}
+    if result.pop("_jobFinalized", False):
+        outcome = result.pop("_jobOutcome")
+        if outcome == "deferred":
+            schedule_retry_wake(job, force=True)
+        return {"jobId": str(job.pk), "status": outcome, **result}
+    if result.get("authorizationFailed"):
+        fail_health_job(job, RuntimeError(result["reason"]), terminal=True)
+        return {"jobId": str(job.pk), "status": "failed", **result}
+    if result.get("deferred"):
+        changed = defer_health_job(job, result)
+        if changed:
+            schedule_retry_wake(job, force=True)
+        outcome = "deferred" if changed else "superseded"
+    else:
+        changed = complete_health_job(job, result)
+        outcome = (
+            ("skipped" if result.get("skipped") else "completed")
+            if changed
+            else "superseded"
+        )
+    return {"jobId": str(job.pk), "status": outcome, **result}
+
+
+def process_rook_job_ids(
+    job_ids: list[UUID],
+    *,
+    kind: str,
+    queue_url: str = "",
+    receipt_handle: str = "",
+) -> list[dict]:
+    if kind not in {QUEUE_KIND_AUTH, QUEUE_KIND_DATA_FETCH}:
+        raise ValueError("ROOK worker kind must be auth or data_fetch.")
+    for stale_id in reset_stale_health_jobs():
+        schedule_job_wake(stale_id)
+    results = []
+    if not (kind == QUEUE_KIND_DATA_FETCH and enabled_setting("ROOK_PULLS_PAUSED", False)):
+        for job_id in job_ids:
+            job = RookOutbox.objects.filter(pk=job_id).first()
+            if job is None:
+                continue
+            if queue_kind(job.job_type) != kind:
+                continue
+            claimed = claim_health_job(job_id)
+            if claimed is None:
+                continue
+            results.append(run_claimed_health_job(claimed))
+    if receipt_handle and queue_url:
+        delete_queue_message(
+            queue_url=queue_url,
+            receipt_handle=receipt_handle,
+            log_label=f"ROOK {kind}",
+            region=getattr(settings, "AWS_REGION", None),
+        )
     return results
 
 
-def eligible_freshness_profiles(*, limit: int, now=None):
-    """Select oldest due profiles, skipping open work without scanning in Python.
-
-    Subqueries cover the old hourly keys as well as the new reusable key. An
-    oldest-first ordering prevents early-profile starvation under a per-sweep
-    insertion cap.
-    """
-    now = now or timezone.now()
-    freshness = HealthProcessingJob.objects.filter(
-        customer_profile_id=OuterRef("pk"), job_type=HealthJobType.FRESHNESS_CHECK,
-    )
-    open_work = freshness.filter(
-        Q(status__in=(HealthJobStatus.PENDING, HealthJobStatus.RUNNING))
-        | Q(status=HealthJobStatus.FAILED, attempt_count__lt=MAXIMUM_JOB_ATTEMPTS)
-    )
-    # Timestamp for fairness/cooldown is the terminal finish time. A queued
-    # job can remain pending for hours and must still get its full quiet hour.
-    latest = finished_health_jobs(freshness).filter(
-        completed_at__isnull=False,
-    ).order_by("-completed_at", "-pk")
-    active_connection = WearableConnection.objects.filter(
-        customer_profile_id=OuterRef("pk"),
-        status__in=[
-            ConnectionStatus.ACTIVE,
-            ConnectionStatus.IDLE,
-            ConnectionStatus.PARTIAL,
-        ],
-    )
-    return (
-        CustomerProfile.objects.filter(Exists(active_connection))
-        .annotate(
-            has_open_freshness=Exists(open_work),
-            last_freshness_at=Subquery(latest.values("completed_at")[:1]),
-        )
-        .filter(has_open_freshness=False)
-        .filter(Q(last_freshness_at__isnull=True)
-                | Q(last_freshness_at__lte=now - timedelta(hours=1)))
-        .order_by(F("last_freshness_at").asc(nulls_first=True), "pk")[:max(0, limit)]
-    )
-
-
-def connections_requiring_recovery_pull():
-    now = timezone.now()
-    delayed_before = now - timedelta(
-        hours=getattr(settings, "ROOK_SYNC_DELAY_HOURS", 48)
-    )
-    related_jobs = HealthProcessingJob.objects.filter(
-        connection_id=OuterRef("pk"), job_type=HealthJobType.RECOVERY_PULL,
-    )
-    open_jobs = related_jobs.filter(
-        Q(status__in=(HealthJobStatus.PENDING, HealthJobStatus.RUNNING))
-        | Q(status=HealthJobStatus.FAILED, attempt_count__lt=MAXIMUM_JOB_ATTEMPTS)
-    )
-    recent_jobs = finished_health_jobs(related_jobs).filter(
-        completed_at__gt=now - timedelta(hours=1),
-    )
-    return (
-        WearableConnection.objects.select_related("customer_profile")
-        .filter(
-            status__in=[
-                ConnectionStatus.ACTIVE,
-                ConnectionStatus.IDLE,
-                ConnectionStatus.PARTIAL,
-                ConnectionStatus.PROVIDER_ERROR,
-                ConnectionStatus.IMPORTING,
-                ConnectionStatus.HISTORICAL_REIMPORT,
-            ],
-            connection_method=ConnectionMethod.API,
-            authorization_status=AuthorizationStatus.AUTHORIZED,
-        )
-        .filter(
-            Q(last_successful_sync__isnull=True)
-            | Q(last_successful_sync__lt=delayed_before)
-            | (Q(import_status__in=[HistoricalImportStatus.RUNNING, HistoricalImportStatus.PARTIAL])
-               & (Q(import_started_at__isnull=True)
-                  | Q(import_started_at__lt=now - timedelta(hours=4))))
-        )
-        .annotate(has_open_recovery=Exists(open_jobs), recently_attempted=Exists(recent_jobs))
-        .filter(has_open_recovery=False, recently_attempted=False)
-    )
-
-
-
-def enqueue_orphaned_normalization_jobs(*, grace_minutes: int = 10, limit: int = 100) -> dict:
-    """Recover queued documents with no runnable normalization work item.
-
-    A terminated worker or a pre-upgrade on_commit failure can leave accepted
-    webhook data without its processing job. Never retry a document whose
-    normalization already exhausted its bounded attempt budget; alert ops.
-    """
-    cutoff = timezone.now() - timedelta(minutes=max(1, grace_minutes))
-    unprocessed = RookHealthDocument.objects.filter(
-        status=DocumentStatus.QUEUED,
-        received_at__lt=cutoff,
-    ).order_by("received_at")[:max(1, limit)]
-    queued_count = 0
-    exhausted_count = 0
-    for document in unprocessed.iterator():
-        normalize_jobs = HealthProcessingJob.objects.filter(
-            document=document, job_type=HealthJobType.NORMALIZE_DOCUMENT,
-        )
-        if normalize_jobs.filter(
-            Q(status__in=(HealthJobStatus.PENDING, HealthJobStatus.RUNNING))
-            | Q(status=HealthJobStatus.FAILED,
-                attempt_count__lt=MAXIMUM_JOB_ATTEMPTS)
-        ).exists():
+def process_pending_rook_outbox(*, kind: str, limit: int = 5) -> list[dict]:
+    if kind not in {QUEUE_KIND_AUTH, QUEUE_KIND_DATA_FETCH}:
+        raise ValueError("ROOK worker kind must be auth or data_fetch.")
+    for stale_id in reset_stale_health_jobs():
+        schedule_job_wake(stale_id)
+    if kind == QUEUE_KIND_DATA_FETCH and enabled_setting("ROOK_PULLS_PAUSED", False):
+        return []
+    if limit <= 0:
+        return []
+    ready = RookOutbox.objects.filter(
+        status__in=(HealthJobStatus.PENDING, HealthJobStatus.FAILED),
+        scheduled_at__lte=timezone.now(),
+    ).filter(rook_outbox_retryable_q())
+    if kind == QUEUE_KIND_AUTH:
+        ready = ready.exclude(job_type=HealthJobType.FETCH_ROOK_DATA)
+    else:
+        ready = ready.filter(job_type=HealthJobType.FETCH_ROOK_DATA)
+        limit = min(limit, MAXIMUM_FETCH_ROOK_DATA_PER_SWEEP)
+    ready = ready.annotate(priority=Case(
+        When(job_type=HealthJobType.REVOKE_ROOK_CONNECTION, then=Value(0)),
+        When(job_type=HealthJobType.AUTHORISE_ROOK_CONNECTION, then=Value(1)),
+        When(job_type=HealthJobType.FETCH_ROOK_DATA, then=Value(2)),
+        default=Value(6),
+        output_field=IntegerField(),
+    )).order_by("priority", "scheduled_at", "pk")
+    results = []
+    for job_id in list(ready.values_list("pk", flat=True)[:min(max(limit * 5, 10), 50)]):
+        if len(results) >= limit:
+            break
+        job = claim_health_job(job_id)
+        if job is None:
             continue
-        if normalize_jobs.filter(
-            status=HealthJobStatus.FAILED,
-            attempt_count__gte=MAXIMUM_JOB_ATTEMPTS,
-        ).exists():
-            exhausted_count += 1
-            continue
-        if enqueue_or_reuse_orphaned_normalization_job(document=document):
-            queued_count += 1
-    return {"queued": queued_count, "requiresOperatorReview": exhausted_count}
+        results.append(run_claimed_health_job(job))
+    return results

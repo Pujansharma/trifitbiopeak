@@ -8,6 +8,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from django.db import transaction
 from django.db.models import Avg, Count, Max, Min, OuterRef, Q, Subquery, Sum
 from django.utils import timezone
+from wearables.services.coordination import serialize_profile_changes, serialize_connection_changes
+from accounts.customers.models import CustomerProfile
+from wearables.services.job_claims import assert_health_job_owned
 
 from wearables.models import (
     HealthDailySummary,
@@ -21,9 +24,8 @@ from wearables.services.connections import (
     get_or_create_connection,
     record_connection_event,
 )
-from wearables.services.job_queue import enqueue_health_job
 from wearables.services.consent import has_active_wearable_consent
-from wearables.services.analytics import invalidate_health_dashboard
+from wearables.services.analytics import invalidate_health_dashboard, refresh_profile_snapshots
 from wearables.services.client import RookServiceError
 from wearables.services.lifecycle import can_ingest_source, source_permission_for_domain
 from wearables.services.metrics import (
@@ -39,7 +41,6 @@ from wearables.utils.constants import (
     ConnectionStatus,
     DocumentStatus,
     HealthDomain,
-    HealthJobType,
     HistoricalImportStatus,
     PermissionStatus,
     WearableSource,
@@ -181,7 +182,7 @@ def create_receipt(
             "status": status,
             "reason": reason[:128],
             "payload": receipt_payload(payload),
-            "received_at": timezone.now(),
+            "received_at": timezone.localtime(),
         },
     )
     # Rejected source/consent deliveries may be resubmitted after an explicit
@@ -191,7 +192,7 @@ def create_receipt(
         receipt.signature_valid = signature_valid
         receipt.status = status
         receipt.reason = reason[:128]
-        receipt.received_at = timezone.now()
+        receipt.received_at = timezone.localtime()
         receipt.save(update_fields=["document", "signature_valid", "status", "reason", "received_at", "updated_at"])
     return receipt, created
 
@@ -238,7 +239,6 @@ def promote_matching_connections(
             continue
         previous_status = connection.status
         connection.last_webhook_received_at = received_at
-        connection.last_successful_sync = received_at
         connection.connected_at = connection.connected_at or received_at
         connection.available_from = min(
             filter(None, [connection.available_from, observed_at]),
@@ -263,14 +263,13 @@ def promote_matching_connections(
             connection.last_error_detail = ""
         updates = {
             "last_webhook_received_at": connection.last_webhook_received_at,
-            "last_successful_sync": connection.last_successful_sync,
             "connected_at": connection.connected_at,
             "available_from": connection.available_from,
             "available_to": connection.available_to,
             "status": connection.status,
             "last_error_code": connection.last_error_code,
             "last_error_detail": connection.last_error_detail,
-            "updated_at": timezone.now(),
+            "updated_at": timezone.localtime(),
         }
         changed = WearableConnection.objects.filter(
             pk=connection.pk, status=previous_status,
@@ -310,6 +309,7 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool,
                 "accepted": True,
                 "duplicate": True,
                 "reason": existing_receipt.reason or "exact_replay",
+                "documentId": str(existing_receipt.document_id) if existing_receipt.document_id else None,
             }
         # A rejected delivery is still subject to all current source and
         # consent checks below; never blindly trust an old receipt.
@@ -340,6 +340,8 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool,
         )
         return {"accepted": True, "skipped": True, "reason": "unknown_user"}
 
+    # Serialize local consent changes with short ingestion/normalization writes.
+    serialize_profile_changes(identity.customer_profile_id)
     # DPDP: a delayed/replayed webhook must not create new observations after
     # the member has withdrawn all wearable-ingestion consent.
     if not has_active_wearable_consent(identity.customer_profile):
@@ -378,7 +380,7 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool,
     # different table, serializes two concurrent first-time webhook deliveries.
     # Django's get_or_create performs its unique-insert race recovery using a
     # savepoint: an IntegrityError re-fetches the winning row in this txn.
-    received_at = timezone.now()
+    received_at = timezone.localtime()
     document_values = {
         "customer_profile": identity.customer_profile,
         "identity": identity,
@@ -430,7 +432,7 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool,
                         else DocumentStatus.REJECTED),
                 reason=reason, document=document,
             )
-            return {"accepted": True, "skipped": True, "reason": reason}
+            return {"accepted": True, "skipped": True, "reason": reason, "documentId": str(document.pk)}
     receipt, _ = create_receipt(
         receipt_key=receipt_key,
         payload=payload,
@@ -451,22 +453,30 @@ def ingest_rook_document(payload: dict, *, signature_valid: bool,
             "ROOK source authorization changed during ingestion; retry delivery.",
             status_code=503,
         )
-    # Durable DB outbox: create the normalization job in the SAME transaction
-    # as the accepted document. If either write fails, both roll back and ROOK
-    # can safely retry the webhook; no acknowledged document is left unqueued.
+    # Webhook path finishes normalize + analytics in this same accept transaction.
+    # Failure rolls document/receipt back so ROOK can retry; raw body is cleared
+    # after successful processing (see normalize_health_document).
+    processed = None
     if enqueue_normalization:
-        enqueue_health_job(
-            job_type=HealthJobType.NORMALIZE_DOCUMENT,
-            idempotency_key=f"normalize:{document.pk}:{version}:{received_at.isoformat()}",
-            customer_profile=identity.customer_profile,
-            document=document,
+        processed = normalize_health_document(
+            document.pk,
+            enqueue_analytics=True,
         )
+        if processed.get("skipped") and processed.get("reason") not in {
+            "already_processing_or_not_queued",
+        }:
+            raise RookIngestionStateChanged(
+                f"ROOK document could not be normalized: {processed.get('reason')}",
+                status_code=503,
+            )
     return {
         "accepted": True,
-        "queued": True,
+        "queued": not enqueue_normalization,
+        "processed": bool(enqueue_normalization),
         "documentId": str(document.pk),
         "receiptId": str(receipt.pk),
         "version": version,
+        "normalize": processed,
     }
 
 
@@ -643,7 +653,7 @@ def rebuild_daily_summaries(
 
 
 @transaction.atomic
-def normalize_health_document(document_id) -> dict:
+def normalize_health_document(document_id, *, job=None, enqueue_analytics: bool = True) -> dict:
     document = (
         RookHealthDocument.objects
         .select_related("identity", "customer_profile")
@@ -651,6 +661,9 @@ def normalize_health_document(document_id) -> dict:
     )
     if document is None:
         raise ValueError("Health document no longer exists.")
+    serialize_profile_changes(document.customer_profile_id)
+    if job is not None:
+        assert_health_job_owned(job)
     if not RookMemberIdentity.objects.filter(pk=document.identity_id).exists():
         raise ValueError("Wearable identity no longer exists.")
     if document.status == DocumentStatus.PROCESSED:
@@ -661,7 +674,7 @@ def normalize_health_document(document_id) -> dict:
     claimed = RookHealthDocument.objects.filter(
         pk=document.pk, status=DocumentStatus.QUEUED,
         document_version=document.document_version,
-    ).update(status=DocumentStatus.RECEIVED, updated_at=timezone.now())
+    ).update(status=DocumentStatus.RECEIVED, updated_at=timezone.localtime())
     if not claimed:
         return {"skipped": True, "reason": "already_processing_or_not_queued"}
     document.status = DocumentStatus.RECEIVED
@@ -715,18 +728,17 @@ def normalize_health_document(document_id) -> dict:
                      "documentVersion": document.document_version},
         )
     previous = document.observations.filter(is_current=True)
+    # One correlated query replaces one previous-observation query per metric.
+    # Distinct metric pairs remain independent, preserving source-change rules.
+    previous_candidates = HealthObservation.objects.filter(
+        customer_profile=document.customer_profile, is_current=True,
+        domain__in={observation.domain for observation in observations},
+        metric__in={observation.metric for observation in observations},
+        observed_at__lte=document.observed_at,
+    ).order_by("domain", "metric", "-observed_at", "-created_at").distinct("domain", "metric")
+    prior_by_metric = {(item.domain, item.metric): item for item in previous_candidates}
     for observation in observations:
-        prior = (
-            HealthObservation.objects.filter(
-                customer_profile=document.customer_profile,
-                domain=observation.domain,
-                metric=observation.metric,
-                is_current=True,
-                observed_at__lte=observation.observed_at,
-            )
-            .order_by("-observed_at", "-created_at")
-            .first()
-        )
+        prior = prior_by_metric.get((observation.domain, observation.metric))
         if (prior and prior.source_key and observation.source_key
                 and prior.source_key != observation.source_key):
             observation.provenance["sourceChange"] = {
@@ -740,7 +752,7 @@ def normalize_health_document(document_id) -> dict:
     # Append-only: historical versions remain queryable for audit/reprocessing;
     # only the latest version participates in the dashboard and active timeline.
     previous.filter(document_version__lt=document.document_version).update(
-        is_current=False, updated_at=timezone.now()
+        is_current=False, updated_at=timezone.localtime()
     )
     HealthObservation.objects.bulk_create(observations, ignore_conflicts=True)
     if affected_domains:
@@ -750,32 +762,42 @@ def normalize_health_document(document_id) -> dict:
             domains=affected_domains,
         )
     document.status = DocumentStatus.PROCESSED
-    document.processed_at = timezone.now()
+    document.processed_at = timezone.localtime()
     document.failure_detail = ""
+    # Drop the raw ROOK body after analytical rows exist; keep identity/hash only.
+    document.payload = {}
     document.save(
-        update_fields=["status", "processed_at", "failure_detail", "updated_at"]
+        update_fields=[
+            "status",
+            "processed_at",
+            "failure_detail",
+            "payload",
+            "updated_at",
+        ]
     )
     document.receipts.filter(status=DocumentStatus.QUEUED).update(
         status=DocumentStatus.PROCESSED,
-        updated_at=timezone.now(),
+        updated_at=timezone.localtime(),
     )
-    # Every distinct document has its own analytics work item. A date+version
-    # key alone loses a second ROOK pillar delivered on the same day (A03).
-    if affected_domains:
-        # Store the refresh work item atomically with the processed document.
-        # A post-commit scheduling error must not strand completed ingestion.
-        enqueue_health_job(
-            job_type=HealthJobType.REFRESH_ANALYTICS,
-            idempotency_key=(
-                f"analytics:{document.pk}:{document.document_version}:"
-                f"{document.content_hash[:20]}"
-            ),
-            customer_profile=document.customer_profile,
-            document=document,
-            payload={"local_date": local_date.isoformat(), "domains": sorted(affected_domains)},
+    if affected_domains and enqueue_analytics:
+        refresh_profile_snapshots(
+            document.customer_profile,
+            domains=sorted(affected_domains),
         )
+        WearableConnection.objects.filter(
+            customer_profile_id=document.customer_profile_id,
+            data_source__in=document.data_sources,
+            authorization_status=AuthorizationStatus.AUTHORIZED,
+            disconnected_at__isnull=True,
+        ).update(
+            last_data_processed_at=timezone.localtime(),
+            last_successful_sync=timezone.localtime(),
+            updated_at=timezone.localtime(),
+        )
+    if job is not None:
+        assert_health_job_owned(job)
     # Cache evictions are best-effort AFTER commit; the DB snapshot TTL bounds
-    # any transient cache error, while the scheduled refresh remains durable.
+    # any transient cache error after analytical rows are durable.
     transaction.on_commit(partial(invalidate_health_dashboard, document.customer_profile), robust=True)
     return {
         "documentId": str(document.pk),

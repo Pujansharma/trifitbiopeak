@@ -38,17 +38,18 @@ from wearables.services.connections import (
 from wearables.services.identity import resolve_customer_profile
 from wearables.services.oauth import complete_oauth_callback, OAuthStateError
 from wearables.services.consent import has_active_wearable_consent, revoke_wearable_consent
-from wearables.services.job_queue import enqueue_or_reuse_recovery_job
+from wearables.services.job_queue import enqueue_or_reuse_fetch_rook_data_job
+from wearables.services.sync_policy import ManualSyncCooldown, next_manual_sync_at
+from wearables.services.provider_errors import RookRequestDeferred
+from wearables.services.rate_policy import seconds_until
+from wearables.services.progress import attach_connection_progress
+from django.utils import timezone
 from wearables.utils.constants import (HEALTH_DOMAIN_ORDER, ConnectionMethod, ConnectionStatus,
-    HealthJobType, HistoricalImportStatus, WearableSource, NATIVE_WEARABLE_SOURCES)
+    AuthorizationStatus, HealthJobType, HistoricalImportStatus, WearableSource, NATIVE_WEARABLE_SOURCES)
 
 
 class WearablesAPIView(BaseGenericAPIView):
     permission_classes = (IsCustomerUser,)
-
-    def ensure_wearables_enabled(self) -> None:
-        if not getattr(settings, "WEARABLES_ENABLED", False):
-            raise NotFound("Wearable integration is not enabled.")
 
     def ensure_profile_feature_enabled(self, customer_profile) -> None:
         if not getattr(settings, "WEARABLES_REQUIRE_PROFILE_FEATURE", False):
@@ -58,7 +59,6 @@ class WearablesAPIView(BaseGenericAPIView):
             raise NotFound("Wearable integration is not enabled for this profile.")
 
     def get_customer_profile(self):
-        self.ensure_wearables_enabled()
         customer_profile = resolve_customer_profile(self.request)
         self.ensure_profile_feature_enabled(customer_profile)
         return customer_profile
@@ -88,6 +88,10 @@ class DeviceConnectView(WearablesAPIView):
             self.raise_bad_request(str(error))
         except RookConfigurationError as error:
             return self.send_response(str(error), status=503)
+        except RookRequestDeferred as error:
+            response = self.send_response(error.detail, {"retryAt": error.retry_at}, status=429)
+            response["Retry-After"] = str(seconds_until(error.retry_at, timezone.localtime()))
+            return response
         except RookServiceError as error:
             return self.send_response(error.detail, status=error.status_code)
         connection = result["connection"]
@@ -143,6 +147,7 @@ class DeviceListView(WearablesAPIView):
             .filter(customer_profile=customer_profile)
             .order_by("data_source")
         )
+        attach_connection_progress(connections, customer_profile)
         identity = RookMemberIdentity.objects.filter(
             customer_profile=customer_profile
         ).first()
@@ -382,13 +387,27 @@ class DeviceRetrySyncView(WearablesAPIView):
             raise NotFound("Device connection was not found.")
         if connection.status in {ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED}:
             self.raise_bad_request("Reconnect and reauthorize this provider before retrying synchronization.")
+        if connection.authorization_status != AuthorizationStatus.AUTHORIZED:
+            self.raise_bad_request("Wait for provider authorization before requesting sync.")
+        if not has_active_wearable_consent(customer_profile):
+            self.raise_bad_request("Wearable consent is required before requesting sync.")
         if connection.last_error_code == "provider_account_closed":
             self.raise_bad_request("This provider account is closed. Connect a different provider.")
         if connection.connection_method == ConnectionMethod.SDK:
             self.raise_bad_request("Re-run the ROOK native SDK sync on the member's device.")
-        job, created = enqueue_or_reuse_recovery_job(
-            connection=connection, customer_profile=customer_profile, manual=True,
-        )
+        try:
+            job, created = enqueue_or_reuse_fetch_rook_data_job(
+                connection=connection, customer_profile=customer_profile, manual=True, flow="manual",
+            )
+        except ManualSyncCooldown as error:
+            connection.refresh_from_db()
+            return self.send_response(
+                "Manual sync was requested recently. No additional job was queued.",
+                {"jobId": str(error.job_id) if error.job_id else None, "queued": False,
+                 "alreadyQueued": error.job_id is not None, "cooldownActive": True,
+                 "syncRequestAccepted": False, "nextSyncAllowedAt": error.next_allowed_at,
+                 "connection": serialize_connection(connection)}, status=200,
+            )
         if job is None:
             self.raise_bad_request("Device connection changed. Refresh device status and retry.")
         if created:
@@ -404,6 +423,8 @@ class DeviceRetrySyncView(WearablesAPIView):
         return self.send_response(
             "ROOK sync retry queued." if created else "ROOK sync is already queued.",
             {"jobId": str(job.pk), "queued": True, "alreadyQueued": not created,
+             "cooldownActive": False, "syncRequestAccepted": True,
+             "nextSyncAllowedAt": next_manual_sync_at(connection.last_manual_sync_queued_at),
              "connection": serialize_connection(connection)},
             status=202,
         )

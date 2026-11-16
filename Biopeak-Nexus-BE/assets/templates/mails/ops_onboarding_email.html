@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <title>New Client Onboarding</title>
+  </head>
+  <body style="margin:0;padding:0;background-color:#F5F5F5;font-family:Arial,Helvetica,sans-serif;color:#1A1A1A;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#F5F5F5;padding:24px 12px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="640" cellspacing="0" cellpadding="0" border="0" style="max-width:640px;width:100%;background-color:#FFFFFF;border-radius:8px;">
+            <tr>
+              <td style="padding:32px 28px 8px;font-size:15px;line-height:1.5;color:#212121;">
+                Dear Team,<br /><br />
+                Please initiate the onboarding process for the following client.
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:16px 28px 0;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                  <tr>
+                    <td style="font-size:16px;font-weight:700;color:#1A1A1A;padding-bottom:8px;">1. Client Details</td>
+                  </tr>
+                  <tr>
+                    <td style="border-bottom:2px solid #C62828;font-size:0;line-height:0;height:2px;">&nbsp;</td>
+                  </tr>
+                </table>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:12px;">
+                  <tr>
+                    <td width="40%" style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Client Name</td>
+                    <td width="60%" style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ client_name }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Email</td>
+                    <td style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ client_email }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Mobile</td>
+                    <td style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ client_phone }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Date of Birth</td>
+                    <td style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ client_date_of_birth }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Address</td>
+                    <td style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ client_address }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">City / Country</td>
+                    <td style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ client_city_country }}</td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:24px 28px 0;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                  <tr>
+                    <td style="font-size:16px;font-weight:700;color:#1A1A1A;padding-bottom:8px;">2. Programme &amp; Payment Details</td>
+                  </tr>
+                  <tr>
+                    <td style="border-bottom:2px solid #C62828;font-size:0;line-height:0;height:2px;">&nbsp;</td>
+                  </tr>
+                </table>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:12px;">
+                  <tr>
+                    <td width="40%" style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Programme</td>
+                    <td width="60%" style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ package_name }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Programme Value</td>
+                    <td style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ package_value }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Clinic</td>
+                    <td style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ clinic_name }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Payment Status</td>
+                    <td style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ payment_status }}</td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:24px 28px 0;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                  <tr>
+                    <td style="font-size:16px;font-weight:700;color:#1A1A1A;padding-bottom:8px;">3. Therapy Entitlements</td>
+                  </tr>
+                  <tr>
+                    <td style="border-bottom:2px solid #C62828;font-size:0;line-height:0;height:2px;">&nbsp;</td>
+                  </tr>
+                </table>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:12px;">
+                  <tr>
+                    <td style="padding:6px 0;font-size:11px;letter-spacing:0.04em;color:#424242;text-transform:uppercase;">Therapy Type</td>
+                    <td align="center" style="padding:6px 0;font-size:11px;letter-spacing:0.04em;color:#424242;text-transform:uppercase;">Number</td>
+                    <td style="padding:6px 0;font-size:11px;letter-spacing:0.04em;color:#424242;text-transform:uppercase;">Notes</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:8px 0;font-size:14px;color:#1A1A1A;">Paid therapies</td>
+                    <td align="center" style="padding:8px 0;font-size:14px;color:#1A1A1A;">{{ therapy_paid_count }}</td>
+                    <td style="padding:8px 0;font-size:14px;color:#1A1A1A;">{{ therapy_paid_notes }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:8px 0;font-size:14px;color:#1A1A1A;">Complimentary therapies</td>
+                    <td align="center" style="padding:8px 0;font-size:14px;color:#1A1A1A;">{{ therapy_complimentary_count }}</td>
+                    <td style="padding:8px 0;font-size:14px;color:#1A1A1A;">{{ therapy_complimentary_notes }}</td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:24px 28px 0;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                  <tr>
+                    <td style="font-size:16px;font-weight:700;color:#1A1A1A;padding-bottom:8px;">4. Onboarding Requirements</td>
+                  </tr>
+                  <tr>
+                    <td style="border-bottom:2px solid #C62828;font-size:0;line-height:0;height:2px;">&nbsp;</td>
+                  </tr>
+                </table>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:12px;">
+                  <tr>
+                    <td width="40%" style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Typeform Status</td>
+                    <td width="60%" style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ onboarding_status }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Initial Consultation Mode</td>
+                    <td style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ consultation_mode }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Preferred Consultation Date</td>
+                    <td style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ preferred_consultation_date }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Preferred Consultation Time</td>
+                    <td style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ preferred_consultation_time }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Consultation Notes</td>
+                    <td style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ preferred_consultation_notes }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Home Tests &amp; Assessments</td>
+                    <td style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ preferred_home_assessment_notes }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Clinic Assessments</td>
+                    <td style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ preferred_clinic_assessment_notes }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Tentative Assessment Date</td>
+                    <td style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ tentative_assessment_date }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;font-size:14px;color:#424242;vertical-align:top;">Test Kit Delivery Required</td>
+                    <td style="padding:6px 0;font-size:14px;color:#1A1A1A;vertical-align:top;">{{ test_kit_delivery }}</td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:24px 28px 0;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                  <tr>
+                    <td style="font-size:16px;font-weight:700;color:#1A1A1A;padding-bottom:8px;">5. Special Instructions &amp; Important Notes</td>
+                  </tr>
+                  <tr>
+                    <td style="border-bottom:2px solid #C62828;font-size:0;line-height:0;height:2px;">&nbsp;</td>
+                  </tr>
+                </table>
+                <p style="margin:12px 0 0;font-size:14px;line-height:1.5;color:#1A1A1A;">{{ special_instruction_notes }}</p>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:24px 28px 0;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                  <tr>
+                    <td style="font-size:16px;font-weight:700;color:#1A1A1A;padding-bottom:8px;">6. Additional Contacts &amp; Communication</td>
+                  </tr>
+                  <tr>
+                    <td style="border-bottom:2px solid #C62828;font-size:0;line-height:0;height:2px;">&nbsp;</td>
+                  </tr>
+                </table>
+                {% if additional_contacts %}
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:12px;">
+                  {% for contact in additional_contacts %}
+                  <tr>
+                    <td style="padding:8px 0;font-size:14px;color:#1A1A1A;border-bottom:1px solid #E0E0E0;">
+                      <strong>{{ contact.name }}</strong>
+                      ({{ contact.relationship }})<br />
+                      {{ contact.email }} · {{ contact.phone }}
+                    </td>
+                  </tr>
+                  {% endfor %}
+                </table>
+                {% else %}
+                <p style="margin:12px 0 0;font-size:14px;color:#1A1A1A;">—</p>
+                {% endif %}
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:24px 28px 0;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                  <tr>
+                    <td style="font-size:16px;font-weight:700;color:#1A1A1A;padding-bottom:8px;">7. Immediate Action Required from Operations</td>
+                  </tr>
+                  <tr>
+                    <td style="border-bottom:2px solid #C62828;font-size:0;line-height:0;height:2px;">&nbsp;</td>
+                  </tr>
+                </table>
+                <p style="margin:12px 0 0;font-size:14px;line-height:1.5;color:#1A1A1A;">{{ action_note }}</p>
+                <p style="margin:12px 0 0;font-size:14px;color:#1A1A1A;"><strong>Priority:</strong> {{ action_priority }}</p>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:24px 28px 32px;font-size:14px;line-height:1.6;color:#212121;">
+                Kindly review the details and initiate the necessary onboarding activities. Please flag any missing information or dependencies requiring Sales intervention.
+                <br /><br />
+                Lead ID: {{ lead_unique_id }}
+                <br /><br />
+                Regards,<br />
+                {{ triggered_by_name }}
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

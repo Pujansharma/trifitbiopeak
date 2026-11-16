@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from django.conf import settings
 
 from wearables.models import HealthObservation
-from wearables.services import analytics as analytics_service
+from wearables.services.observation_values import observation_value
 from programs.services.models import ServiceResult
 from diagnostics_orders.models import DiagnosticOrderCustomer
 from diagnostics_orders.utils.constants import DiagnosticOrderStatus
@@ -67,7 +67,7 @@ def _wearable_entries(customer_profile, *, start_date, end_date, domain, maximum
             "sourceType": "wearable",
             "domain": obs.domain,
             "metric": obs.metric,
-            "value": analytics_service.observation_value(obs),
+            "value": observation_value(obs),
             "unit": obs.unit,
             "confidence": obs.confidence,
             "provenance": {

@@ -1,5 +1,74 @@
 # Leads Frontend API
 
+## OPTIONS /leads/
+
+Returns DRF field metadata for the leads list/create serializer, plus an
+`ops_onboarding_email` block used by
+`POST /leads/v2/{lead_id}/ops-onboarding-email/`.
+
+```http
+OPTIONS /leads/
+Authorization: Bearer <access_token>
+```
+
+`ops_onboarding_email` includes mail config plus the same DRF field-info shape
+used under `actions.POST` (via `LeadOpsOnboardingEmailSerializer`):
+
+```json
+{
+  "to": ["<OPS_ONBOARDING_EMAIL_TO constant>"],
+  "from": "Care <care@biopeak.health>",
+  "cc": "Authenticated user email (JWT)",
+  "subject_template": "New Client Onboarding | {client_name} | {package_name}",
+  "payment_status": {
+    "type": "choice",
+    "required": false,
+    "label": "Payment status",
+    "choices": [
+      {"value": "COLLECTED", "display_name": "Collected"},
+      {"value": "PENDING", "display_name": "Pending"},
+      {"value": "PARTIALLY_COLLECTED", "display_name": "Partially Collected"}
+    ]
+  },
+  "onboarding_status": {
+    "type": "choice",
+    "required": false,
+    "label": "Onboarding status",
+    "choices": [
+      {"value": "COMPLETED", "display_name": "Completed"},
+      {"value": "PENDING", "display_name": "Pending"},
+      {"value": "NOT_APPLICABLE", "display_name": "Not Applicable"}
+    ]
+  },
+  "consultation_mode": {
+    "type": "choice",
+    "required": false,
+    "label": "Consultation mode",
+    "choices": [
+      {"value": "ONLINE", "display_name": "Online"},
+      {"value": "IN_PERSON", "display_name": "In Person"},
+      {"value": "TO_BE_SCHEDULED", "display_name": "To Be Scheduled"}
+    ]
+  },
+  "action_priority": {
+    "type": "choice",
+    "required": false,
+    "label": "Action priority",
+    "choices": [
+      {"value": "NORMAL", "display_name": "Normal"},
+      {"value": "URGENT", "display_name": "Urgent"},
+      {"value": "CRITICAL", "display_name": "Critical"}
+    ]
+  }
+}
+```
+
+Other body fields (`package_value`, therapy counts, `additional_contacts`, …)
+use the same field-info keys as `actions.POST`. `from` is `DEFAULT_FROM_EMAIL`
+(`DEV_DEFAULT_FROM_EMAIL`, `STG_DEFAULT_FROM_EMAIL`, or `PRD_DEFAULT_FROM_EMAIL`).
+`to` is the hardcoded `OPS_ONBOARDING_EMAIL_TO` constant. `cc` is the
+authenticated user's email.
+
 ## GET /leads/
 
 Request:
@@ -225,6 +294,71 @@ Response:
     "created_at": "2026-07-07T10:30:00+05:30",
     "updated_at": "2026-07-07T10:45:00+05:30"
   }
+}
+```
+
+## POST /leads/v2/{lead_id}/ops-onboarding-email/
+
+Sends the ops onboarding handoff email (SMTP) on the request thread. Does not flip `is_onboarding_sent`. Does not persist `additional_contacts`.
+
+- **To:** hardcoded `OPS_ONBOARDING_EMAIL_TO` in `leads/utils/constants.py`
+- **Cc:** JWT user email (required). Missing email → 400 `"Authenticated user must have an email address to CC."`
+- **From:** `DEFAULT_FROM_EMAIL` from env (`DEV_DEFAULT_FROM_EMAIL`, `STG_DEFAULT_FROM_EMAIL`, or `PRD_DEFAULT_FROM_EMAIL`)
+- **Subject:** `New Client Onboarding | {Client Name} | {Lead.packages labels}`
+
+Server fills client name/email/phone/DOB, address (street, state, pincode) and city/country from default (or latest) `CustomerProfileAddress` when present, programme from `Lead.packages`, clinic from `home_center`, Lead ID, and Regards from JWT full name. Null/omit body fields render as `—`. `payment_status`, `onboarding_status`, `consultation_mode`, and `action_priority` render as choice labels. SMTP failure → 503 `"Could not send the onboarding email."`
+
+Request:
+
+```http
+POST /leads/v2/1f8f96f2-6d7e-4d52-9d1f-6fd7e09b2c10/ops-onboarding-email/
+Authorization: Bearer <access_token>
+Content-Type: application/json
+```
+
+```json
+{
+  "package_value": "₹62,000",
+  "payment_status": "COLLECTED",
+  "therapy_paid_count": 3,
+  "therapy_paid_notes": null,
+  "therapy_complimentary_count": 1,
+  "therapy_complimentary_notes": null,
+  "onboarding_status": "PENDING",
+  "consultation_mode": "TO_BE_SCHEDULED",
+  "preferred_consultation_date": null,
+  "preferred_consultation_time": null,
+  "preferred_consultation_notes": null,
+  "preferred_home_assessment_notes": null,
+  "preferred_clinic_assessment_notes": null,
+  "tentative_assessment_date": null,
+  "test_kit_delivery": false,
+  "special_instruction_notes": null,
+  "additional_contacts": [
+    {
+      "name": "Priya Verma",
+      "relationship": "Spouse",
+      "email": "priya@example.com",
+      "phone": "+919876543210"
+    }
+  ],
+  "action_note": "Schedule IC this week.",
+  "action_priority": "NORMAL"
+}
+```
+
+Enums:
+
+- `payment_status`: `COLLECTED` | `PENDING` | `PARTIALLY_COLLECTED`
+- `onboarding_status`: `COMPLETED` | `PENDING` | `NOT_APPLICABLE`
+- `consultation_mode`: `ONLINE` | `IN_PERSON` | `TO_BE_SCHEDULED`
+- `action_priority`: `NORMAL` | `URGENT` | `CRITICAL`
+
+Response:
+
+```json
+{
+  "detail": "Onboarding email sent."
 }
 ```
 

@@ -1,90 +1,37 @@
-from django.conf import settings
+"""Lightweight reconciliation only; the nightly scheduler owns scheduled pulls."""
 from django.core.management.base import BaseCommand
-from django.db.models import F, Q
 
 from accounts.customers.models import CustomerProfile
-from wearables.services.job_processor import (
-    connections_requiring_recovery_pull,
-    enqueue_orphaned_normalization_jobs,
-    eligible_freshness_profiles,
-)
+from wearables.models import WearableConnection
+from wearables.services.connections import refresh_authorizing_connections
+from wearables.services.job_selection import enqueue_orphaned_normalization_jobs
 from wearables.services.oauth import expire_oauth_attempts
-from wearables.models import HealthProcessingJob, WearableConnection
-from wearables.utils.constants import (
-    ConnectionStatus, HEALTH_MAXIMUM_JOB_ATTEMPTS, HealthJobStatus, HealthJobType,
-)
-from wearables.services.job_queue import enqueue_or_reuse_freshness_job, enqueue_or_reuse_recovery_job
-
-
-MAX_RECOVERY_ENQUEUES_PER_SWEEP = 2
-MAX_OPEN_RECOVERY_JOBS = 10
+from wearables.utils.constants import ConnectionStatus
 
 
 class Command(BaseCommand):
-    help = "Enqueue bounded dashboard freshness checks for active wearable profiles."
+    help = "Reconcile ROOK authorization attempts and orphan QUEUED documents."
 
     def add_arguments(self, parser) -> None:
         parser.add_argument(
-            "--freshness-limit", type=int, default=25,
-            help="Maximum new or requeued freshness jobs per sweep (default: 25).",
-        )
-        parser.add_argument(
-            "--recovery-limit", type=int, default=MAX_RECOVERY_ENQUEUES_PER_SWEEP,
-            help="Maximum new recovery jobs per sweep (default: 2).",
+            "--freshness-limit",
+            type=int,
+            default=5,
+            help="Ignored; retained for deploy script compatibility.",
         )
 
-    def handle(self, *args, **options):
-        if not getattr(settings, "WEARABLES_ENABLED", False):
-            self.stdout.write("Wearable integration is disabled; no jobs enqueued.")
-            return
-        # Resolve abandoned OAuth attempts without relying on a user polling
-        # GET /devices/. This command must be scheduled by the deployment.
-        pending_profile_ids = WearableConnection.objects.filter(
+    def handle(self, *args, **options) -> None:
+        pending_profiles = WearableConnection.objects.filter(
             status__in=(ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING),
-        ).values_list("customer_profile_id", flat=True).distinct()
-        expired_count = 0
-        for profile in CustomerProfile.objects.filter(pk__in=pending_profile_ids).iterator():
-            expired_count += expire_oauth_attempts(profile)
-        # A stable per-profile key is reused after completion instead of
-        # inserting another row every hour. Only oldest eligible profiles are
-        # selected; open and recently attempted jobs are skipped in SQL.
-        count = 0
-        freshness_limit = max(0, min(options["freshness_limit"], 50))
-        for customer_profile in eligible_freshness_profiles(limit=freshness_limit).iterator():
-            _, queued = enqueue_or_reuse_freshness_job(customer_profile=customer_profile)
-            count += int(queued)
-        # Oldest never-synced / delayed connections first, with bounded inserts.
-        # Reserve slots only while the recovery queue has room. A missing or
-        # slow dedicated worker must not accumulate unbounded PENDING rows.
-        open_recovery_count = HealthProcessingJob.objects.filter(
-            job_type=HealthJobType.RECOVERY_PULL,
-        ).filter(
-            Q(status__in=(HealthJobStatus.PENDING, HealthJobStatus.RUNNING))
-            | Q(status=HealthJobStatus.FAILED,
-                attempt_count__lt=HEALTH_MAXIMUM_JOB_ATTEMPTS)
-        ).count()
-        recovery_limit = max(0, min(
-            options["recovery_limit"], MAX_RECOVERY_ENQUEUES_PER_SWEEP,
-            MAX_OPEN_RECOVERY_JOBS - open_recovery_count,
-        ))
-        recovery_count = 0
-        connections = connections_requiring_recovery_pull().order_by(
-            F("last_successful_sync").asc(nulls_first=True), "import_started_at", "pk",
-        )[:recovery_limit]
-        for connection in connections.iterator():
-            job, created = enqueue_or_reuse_recovery_job(
-                connection=connection, customer_profile=connection.customer_profile,
-            )
-            if job is not None and created:
-                recovery_count += 1
-        recovery = enqueue_orphaned_normalization_jobs()
+        ).order_by().values("customer_profile_id")
+        expired = 0
+        for profile in CustomerProfile.objects.filter(pk__in=pending_profiles).order_by("pk")[:100].iterator():
+            expired += expire_oauth_attempts(profile)
+            refresh_authorizing_connections(profile)
+        recovery = enqueue_orphaned_normalization_jobs(limit=25)
         self.stdout.write(
-            self.style.SUCCESS(
-                f"Expired {expired_count} abandoned OAuth attempt(s); "
-                f"enqueued {count} freshness check(s), "
-                f"{recovery_count} recovery pull(s), "
-                f"{recovery['queued']} orphaned normalization(s); "
-                f"{recovery['requiresOperatorReview']} document(s) require operator review."
-            )
+            f"Expired {expired} authorization attempt(s); processed "
+            f"{recovery['queued']} orphan document(s) inline "
+            f"({recovery['requiresOperatorReview']} need review). "
+            f"Scheduled data pulls are queued at midnight."
         )
-

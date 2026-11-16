@@ -45,8 +45,9 @@ class RookClientContractTests(TestCase):
         ROOK_CLIENT_UUID="client-one",
         ROOK_SECRET_KEY="server-secret",
     )
+    @patch("wearables.services.client.reserve_provider_request")
     @patch("wearables.services.client.requests.request")
-    def test_revoke_uses_rook_singular_data_source_endpoint(self, request_mock):
+    def test_revoke_uses_rook_singular_data_source_endpoint(self, request_mock, budget_mock):
         request_mock.return_value = SimpleNamespace(
             status_code=204,
             content=b"",

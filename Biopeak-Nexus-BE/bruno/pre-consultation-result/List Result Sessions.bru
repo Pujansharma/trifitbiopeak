@@ -31,9 +31,14 @@ script:post-response {
   });
   const rows = json.data || [];
   if (rows.length > 0) {
-      test('row has user_id and status', () => {
+      test('row has user_id, status, started_on, completed_on', () => {
           expect(rows[0]).to.have.property('user_id');
           expect(['In Progress', 'Completed']).to.include(rows[0].status);
+          expect(rows[0]).to.have.property('started_on');
+          expect(rows[0]).to.have.property('completed_on');
+          if (rows[0].status === 'In Progress') {
+              expect(rows[0].completed_on).to.eql(null);
+          }
       });
       bru.setCollectionVar('customer_user_id', rows[0].user_id);
   }
@@ -70,6 +75,8 @@ docs {
   - height — CustomerProfile.height_cm (cm), null if missing / no main profile
   - weight — CustomerProfile.weight_kg (kg), null if missing / no main profile
   - status — In Progress | Completed (PreConsultationSession.status)
+  - started_on — session created_at (when pre-consultation started)
+  - completed_on — session completed_at (null while In Progress)
   
   Sets customer_user_id from first row when present.
   

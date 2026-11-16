@@ -625,6 +625,10 @@ def validate_preferred_combo(preferred, modality):
         raise ValidationError({"specialty_id": SPECIALTY_ID_DUPLICATE_MESSAGE})
 
 
+def associate_schedule_windows(center_hours, roster_hours):
+    return intersect_intervals(center_hours, roster_hours)
+
+
 def compute_associate_free_windows(
     center,
     associate,
@@ -638,6 +642,7 @@ def compute_associate_free_windows(
     roster_hours=None,
     block_intervals=None,
     leave_intervals=None,
+    schedule_windows=None,
 ):
     if center_hours is None:
         center_hours = expand_center_operating_hours(
@@ -647,7 +652,8 @@ def compute_associate_free_windows(
         roster_hours = expand_roster_entries(
             center, associate, query_start, query_end, timezone_name
         )
-    base_intervals = intersect_intervals(center_hours, roster_hours)
+    if schedule_windows is None:
+        schedule_windows = associate_schedule_windows(center_hours, roster_hours)
     if block_intervals is None:
         block_intervals, _ = collect_associate_block_events(
             center, associate, query_start, query_end, timezone_name
@@ -673,7 +679,7 @@ def compute_associate_free_windows(
         + team_block_intervals
         + associate_busy
     )
-    return subtract_intervals(base_intervals, busy_intervals)
+    return subtract_intervals(schedule_windows, busy_intervals)
 
 
 def compute_room_free_windows(
@@ -685,12 +691,14 @@ def compute_room_free_windows(
     appointment_busy_map,
     center_hours=None,
     closure_intervals=None,
+    schedule_windows=None,
 ):
     if center_hours is None:
         center_hours = expand_center_operating_hours(
             center, query_start, query_end, timezone_name
         )
-    base_intervals = center_hours
+    if schedule_windows is None:
+        schedule_windows = list(center_hours)
     block_intervals, _ = collect_room_block_events(
         room, query_start, query_end, timezone_name
     )
@@ -705,7 +713,7 @@ def compute_room_free_windows(
     busy_intervals = merge_intervals(
         block_intervals + downtime_intervals + closure_intervals + room_busy
     )
-    return subtract_intervals(base_intervals, busy_intervals)
+    return subtract_intervals(schedule_windows, busy_intervals)
 
 
 def compute_equipment_free_windows(
@@ -717,12 +725,14 @@ def compute_equipment_free_windows(
     appointment_busy_map,
     center_hours=None,
     closure_intervals=None,
+    schedule_windows=None,
 ):
     if center_hours is None:
         center_hours = expand_center_operating_hours(
             center, query_start, query_end, timezone_name
         )
-    base_intervals = center_hours
+    if schedule_windows is None:
+        schedule_windows = list(center_hours)
     block_intervals, _ = collect_equipment_block_events(
         equipment, query_start, query_end, timezone_name
     )
@@ -737,7 +747,7 @@ def compute_equipment_free_windows(
     busy_intervals = merge_intervals(
         block_intervals + downtime_intervals + closure_intervals + equipment_busy
     )
-    return subtract_intervals(base_intervals, busy_intervals)
+    return subtract_intervals(schedule_windows, busy_intervals)
 
 
 def unique_associates_from_resource_pools(resource_pools):
@@ -757,7 +767,7 @@ def unique_associates_from_resource_pools(resource_pools):
     return associates
 
 
-def build_resource_free_window_cache(
+def build_resource_window_caches(
     center,
     resource_pools,
     query_start,
@@ -765,6 +775,7 @@ def build_resource_free_window_cache(
     timezone_name,
     appointment_busy_map,
 ):
+    """One pass: schedule base (center ∩ roster) and free (schedule − busy)."""
     associates = unique_associates_from_resource_pools(resource_pools)
     center_hours = expand_center_operating_hours(
         center, query_start, query_end, timezone_name
@@ -784,9 +795,16 @@ def build_resource_free_window_cache(
     team_blocks_by_associate = team_block_intervals_by_associate(
         center, associates, query_start, query_end, timezone_name
     )
-    associate_windows = {}
+    associate_schedule = {}
+    associate_free = {}
     for associate in associates:
-        associate_windows[str(associate.pk)] = compute_associate_free_windows(
+        associate_key = str(associate.pk)
+        schedule_windows = associate_schedule_windows(
+            center_hours,
+            roster_by_associate.get(associate.pk, []),
+        )
+        associate_schedule[associate_key] = schedule_windows
+        associate_free[associate_key] = compute_associate_free_windows(
             center,
             associate,
             query_start,
@@ -799,10 +817,15 @@ def build_resource_free_window_cache(
             roster_hours=roster_by_associate.get(associate.pk, []),
             block_intervals=blocks_by_associate.get(associate.pk, []),
             leave_intervals=leaves_by_associate.get(associate.pk, []),
+            schedule_windows=schedule_windows,
         )
-    room_windows = {}
+    room_schedule = {}
+    room_free = {}
     for room in resource_pools["rooms"]:
-        room_windows[str(room.pk)] = compute_room_free_windows(
+        room_key = str(room.pk)
+        schedule_windows = list(center_hours)
+        room_schedule[room_key] = schedule_windows
+        room_free[room_key] = compute_room_free_windows(
             center,
             room,
             query_start,
@@ -811,10 +834,15 @@ def build_resource_free_window_cache(
             appointment_busy_map["room"],
             center_hours=center_hours,
             closure_intervals=closure_intervals,
+            schedule_windows=schedule_windows,
         )
-    equipment_windows = {}
+    equipment_schedule = {}
+    equipment_free = {}
     for equipment in resource_pools["equipment"]:
-        equipment_windows[str(equipment.pk)] = compute_equipment_free_windows(
+        equipment_key = str(equipment.pk)
+        schedule_windows = list(center_hours)
+        equipment_schedule[equipment_key] = schedule_windows
+        equipment_free[equipment_key] = compute_equipment_free_windows(
             center,
             equipment,
             query_start,
@@ -823,12 +851,38 @@ def build_resource_free_window_cache(
             appointment_busy_map["equipment"],
             center_hours=center_hours,
             closure_intervals=closure_intervals,
+            schedule_windows=schedule_windows,
         )
     return {
-        "associate": associate_windows,
-        "room": room_windows,
-        "equipment": equipment_windows,
+        "schedule": {
+            "associate": associate_schedule,
+            "room": room_schedule,
+            "equipment": equipment_schedule,
+        },
+        "free": {
+            "associate": associate_free,
+            "room": room_free,
+            "equipment": equipment_free,
+        },
     }
+
+
+def build_resource_free_window_cache(
+    center,
+    resource_pools,
+    query_start,
+    query_end,
+    timezone_name,
+    appointment_busy_map,
+):
+    return build_resource_window_caches(
+        center,
+        resource_pools,
+        query_start,
+        query_end,
+        timezone_name,
+        appointment_busy_map,
+    )["free"]
 
 
 def preferred_room_id(preferred):
@@ -1267,7 +1321,13 @@ def preferred_entry_for_associate(entries, associate_id):
     return None
 
 
-def serialize_pinned_slot(slot_start, slot_end, combo, preferred=None):
+def serialize_pinned_slot(
+    slot_start,
+    slot_end,
+    combo,
+    preferred=None,
+    is_unavailable=False,
+):
     preferred = preferred or {}
     payload = {
         "start": slot_start.isoformat(),
@@ -1296,7 +1356,25 @@ def serialize_pinned_slot(slot_start, slot_end, combo, preferred=None):
     equipment = combo.get("equipment")
     if equipment is not None:
         payload["equipment"] = serialize_named_resource(equipment)
+    if is_unavailable:
+        payload["is_unavailable"] = True
     return payload
+
+
+def combo_from_preferred_pools(resource_pools, modality):
+    room = None
+    equipment = None
+    if modality == AppointmentModes.IN_PERSON:
+        rooms = resource_pools.get("rooms") or []
+        if rooms:
+            room = rooms[0]
+            equipment = resolve_equipment_for_room(room, resource_pools)
+    return {
+        "room": room,
+        "equipment": equipment,
+        "care_team": resource_pools.get("care_team"),
+        "preferred_entries": resource_pools.get("preferred_entries") or [],
+    }
 
 
 def intersect_interval_groups(interval_groups):
@@ -1315,14 +1393,18 @@ PINNED_RESOURCE_WINDOW_SOURCES = (
 )
 
 
-def pinned_resource_free_windows(resource_pools, free_window_cache, customer_busy):
+def pinned_resource_windows(resource_pools, window_cache):
     interval_groups = []
     for pool_key, cache_key in PINNED_RESOURCE_WINDOW_SOURCES:
-        cache = free_window_cache[cache_key]
+        cache = window_cache[cache_key]
         for resource in resource_pools[pool_key]:
             interval_groups.append(cache.get(str(resource.pk), []))
+    return intersect_interval_groups(interval_groups)
+
+
+def pinned_resource_free_windows(resource_pools, free_window_cache, customer_busy):
     return subtract_intervals(
-        intersect_interval_groups(interval_groups),
+        pinned_resource_windows(resource_pools, free_window_cache),
         customer_busy,
     )
 
@@ -1407,7 +1489,7 @@ def find_appointment_slots(
         customer_profile, range_start, range_end
     )
 
-    free_window_cache = build_resource_free_window_cache(
+    window_caches = build_resource_window_caches(
         center,
         resource_pools,
         query_start,
@@ -1415,20 +1497,23 @@ def find_appointment_slots(
         timezone_name,
         busy_maps,
     )
+    schedule_window_cache = window_caches["schedule"]
+    free_window_cache = window_caches["free"]
 
     duration_minutes = assignment.duration
     buffer_before = assignment.buffer_before
     buffer_after = assignment.buffer_after
-    free_windows = pinned_resource_free_windows(
-        resource_pools, free_window_cache, customer_busy
+    schedule_windows = pinned_resource_windows(
+        resource_pools, schedule_window_cache
     )
     candidate_slots = staff_grid_slots(
-        free_windows,
+        schedule_windows,
         duration_minutes,
         buffer_before,
         buffer_after,
         timezone_name,
     )
+    display_combo = combo_from_preferred_pools(resource_pools, modality)
 
     now = timezone.now()
     slots = []
@@ -1443,24 +1528,35 @@ def find_appointment_slots(
             buffer_before,
             buffer_after,
         )
-        combo = resolve_appointment_combo(
-            center,
-            assignment,
-            modality,
-            preferred,
-            exclusive_start,
-            exclusive_end,
-            free_window_cache,
-            busy_maps,
-            resource_pools=resource_pools,
-            query_start=query_start,
-            query_end=query_end,
-            timezone_name=timezone_name,
-            soft=True,
+        is_unavailable = interval_overlaps_any(
+            exclusive_start, exclusive_end, customer_busy
+        ) or (
+            resolve_appointment_combo(
+                center,
+                assignment,
+                modality,
+                preferred,
+                exclusive_start,
+                exclusive_end,
+                free_window_cache,
+                busy_maps,
+                resource_pools=resource_pools,
+                query_start=query_start,
+                query_end=query_end,
+                timezone_name=timezone_name,
+                soft=True,
+            )
+            is None
         )
-        if combo is None:
-            continue
-        slots.append(serialize_pinned_slot(slot_start, slot_end, combo, preferred))
+        slots.append(
+            serialize_pinned_slot(
+                slot_start,
+                slot_end,
+                display_combo,
+                preferred,
+                is_unavailable=is_unavailable,
+            )
+        )
         if len(slots) >= SLOT_CAP_PER_DAY:
             if len(candidate_slots) > len(slots):
                 truncated = True
@@ -1793,12 +1889,6 @@ def validate_appointment_allocation(
         raise ValidationError("Modality is not supported for this service.")
     if not assignment.duration:
         raise ValidationError("Service duration is not configured for this center.")
-
-    expected_end = start + timedelta(minutes=assignment.duration)
-    if end != expected_end:
-        raise ValidationError(
-            "Appointment end time does not match configured duration."
-        )
 
     if associates:
         validate_associate_assignments(center, associates, modality)

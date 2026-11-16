@@ -1,3 +1,5 @@
+import re
+
 from django.db.models import Exists, OuterRef, Prefetch, Q, F, QuerySet, Subquery, Value
 from django.db.models.functions import Coalesce, Concat
 from rest_framework.exceptions import NotFound
@@ -59,6 +61,10 @@ from leads.models import Lead
 from products.models import DocumentCategory, DocumentCategoryAssignment
 from programs.services.models import ServiceDocument
 from programs.services.utils.constants import ServiceReportComponent, get_module_category_document_types
+
+UUID_QUERY_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 
 class CustomerProfileMeta(BaseGenericAPIView):
@@ -366,7 +372,12 @@ class CustomerAvailableAssociateView(BaseListAPIView):
         user = self.request.user
         customer_profile = self.get_customer_profile()
         center_id = self.request.query_params.get("center_id", None)
-        role_id = self.request.query_params.get("role_id", None)
+        role_id = self.request.query_params.getlist("role_id", None)
+        valid_role_ids = []
+        for role_identifier in role_id:
+            role_identifier = role_identifier.strip()
+            if UUID_QUERY_PATTERN.fullmatch(role_identifier):
+                valid_role_ids.append(role_identifier)
         search_params = self.request.query_params.get("search", "")
         search_params = search_params.strip()
 
@@ -380,13 +391,13 @@ class CustomerAvailableAssociateView(BaseListAPIView):
             filter_kwargs["center_id"] = center_id
             subquery_filter_kwargs["center_id"] = center_id
         role_filter = Q()
-        if role_id:
+        if valid_role_ids:
             role_filter = Exists(
                 AssociateCenterAssignmentRole.objects.filter(
                     assignment_id=OuterRef("pk"),
                     is_active=True,
                     role__is_active=True,
-                    role_id=role_id,
+                    role_id__in=valid_role_ids,
                 )
             )
         account = get_user_account_type(user)
@@ -412,7 +423,16 @@ class CustomerAvailableAssociateView(BaseListAPIView):
                     F("associate__user__last_name"),
                 ),
             )
-            .filter(search, role_filter, **filter_kwargs, is_care_staff=True)
+            .filter(
+                search,
+                role_filter,
+                **filter_kwargs,
+                is_care_staff=True,
+                is_active=True,
+                associate__is_active=True,
+                associate__user__is_active=True,
+                center__is_active=True,
+            )
             .order_by("-exists", "-created_at")
         )
 
@@ -483,6 +503,12 @@ class CustomerAssociateListView(BaseListAPIView, CustomerProfileMeta):
         if center_ids:
             filter_kwargs["center__in"] = center_ids
 
+        active_associate_center_assignments = AssociateCenterAssignment.objects.filter(
+            associate__pk=OuterRef("associate__pk"),
+            center__pk=OuterRef("center__pk"),
+            is_active=True,
+        )
+
         qs = (
             CustomerAssociateAssignment.objects.annotate(
                 full_name=Concat(
@@ -494,8 +520,13 @@ class CustomerAssociateListView(BaseListAPIView, CustomerProfileMeta):
             .filter(
                 search,
                 role_filter,
+                Exists(active_associate_center_assignments),
                 customer_profile=self.get_customer_profile(),
                 **filter_kwargs,
+                is_active=True,
+                associate__is_active=True,
+                associate__user__is_active=True,
+                center__is_active=True,
             )
             .select_related("associate__user")
             .prefetch_related(

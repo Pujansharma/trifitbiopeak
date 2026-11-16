@@ -26,3 +26,5 @@ class PreConsultationSessionListItemSerializer(serializers.Serializer):
     height = serializers.FloatField(allow_null=True)
     weight = serializers.FloatField(allow_null=True)
     status = serializers.ChoiceField(choices=["In Progress", "Completed"])
+    started_on = serializers.DateTimeField()
+    completed_on = serializers.DateTimeField(allow_null=True)

@@ -1,0 +1,70 @@
+meta {
+  name: POST Ops Onboarding Email
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseURL}}/leads/v2/{{lead_id}}/ops-onboarding-email/
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "package_value": "₹62,000",
+    "payment_status": "COLLECTED",
+    "therapy_paid_count": 3,
+    "therapy_paid_notes": null,
+    "therapy_complimentary_count": 1,
+    "therapy_complimentary_notes": null,
+    "onboarding_status": "PENDING",
+    "consultation_mode": "TO_BE_SCHEDULED",
+    "preferred_consultation_date": null,
+    "preferred_consultation_time": null,
+    "preferred_consultation_notes": null,
+    "preferred_home_assessment_notes": null,
+    "preferred_clinic_assessment_notes": null,
+    "tentative_assessment_date": null,
+    "test_kit_delivery": false,
+    "special_instruction_notes": null,
+    "additional_contacts": [
+      {
+        "name": "Priya Verma",
+        "relationship": "Spouse",
+        "email": "priya@example.com",
+        "phone": "+919876543210"
+      }
+    ],
+    "action_note": "Schedule IC this week.",
+    "action_priority": "NORMAL"
+  }
+}
+
+vars:pre-request {
+  lead_id: 01a19045-4dc6-774d-a01f-0049adf780c4
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}
+
+docs {
+  Sends ops onboarding handoff email via SMTP on the request thread.
+  To: OPS_ONBOARDING_EMAIL_TO constant. Cc: JWT user email.
+  From: DEFAULT_FROM_EMAIL (env).
+  Server fills client/address (street, state, pincode)/packages/clinic/lead unique_id/regards from Lead + JWT.
+  Choice fields render as labels. SMTP failure → 503.
+  Missing JWT email → 400.
+  Response: { "detail": "Onboarding email sent." } only.
+  Enums: payment_status COLLECTED|PENDING|PARTIALLY_COLLECTED;
+  onboarding_status COMPLETED|PENDING|NOT_APPLICABLE;
+  consultation_mode ONLINE|IN_PERSON|TO_BE_SCHEDULED;
+  action_priority NORMAL|URGENT|CRITICAL.
+  Does not flip is_onboarding_sent. Does not persist additional_contacts.
+}

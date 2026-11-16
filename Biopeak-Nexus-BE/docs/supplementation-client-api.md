@@ -2,6 +2,8 @@
 
 Every response is `{ "detail": string, "data": object | array }`.
 
+Customer JWT. No `X-Center-ID`. No `X-Customer-Profile-ID`. Each plan route uses that user's active main profile. No active main profile returns 404 `Customer profile not found.`
+
 Shared values:
 
 - `supplement.form`: `capsule`, `tablet`, `softgel`, `powder`, `liquid`, `gummy`, `lozenge`, `oil`, `cream`, `spray`, `other`

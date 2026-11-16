@@ -4,7 +4,7 @@ from wearables.models import (
     HealthDailySummary,
     HealthDomainSnapshot,
     HealthObservation,
-    HealthProcessingJob,
+    RookOutbox,
     RookHealthDocument,
     RookMemberIdentity,
     RookWebhookReceipt,
@@ -22,4 +22,4 @@ admin.site.register(RookWebhookReceipt)
 admin.site.register(HealthObservation)
 admin.site.register(HealthDailySummary)
 admin.site.register(HealthDomainSnapshot)
-admin.site.register(HealthProcessingJob)
+admin.site.register(RookOutbox)

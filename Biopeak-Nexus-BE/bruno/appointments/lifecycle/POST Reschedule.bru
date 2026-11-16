@@ -17,7 +17,6 @@ headers {
 body:json {
   {
     "start": "2026-09-05T05:00:00Z",
-    "end": "2026-09-05T05:40:00Z",
     "customer_profile_id": "{{customer_profile_id}}",
     "service_id": "{{service_id}}",
     "program_service_id": "{{program_service_id}}",
@@ -83,6 +82,7 @@ docs {
   Also blocked when now > existing.start − 4h → 400
   "Reschedule is only allowed until 4 hours before the appointment start."
   Same flattened contract as POST Book Appointment (full body, not PATCH).
+  end optional / ignored; server sets end = start + center service duration.
   Staff XOR + room/equipment rules. Empty resource UUIDs stripped in pre-request.
   specialty_id = UUID | UUID[] (same as book). Each id stamps a distinct
   live non-doctor role mapped to this service.

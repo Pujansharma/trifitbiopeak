@@ -1044,6 +1044,8 @@ def serialize_session_list_item(session: PreConsultationSession) -> dict:
         "contact_email": customer.contact_email if customer else None,
         "phone": str(phone) if phone else None,
         "status": session.get_status_display(),
+        "started_on": session.created_at,
+        "completed_on": session.completed_at,
         **_session_list_profile_fields(session, profile),
     }
 

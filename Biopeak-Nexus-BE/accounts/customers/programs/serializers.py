@@ -389,6 +389,9 @@ class CustomerCompositeProgramServiceSerializer(BaseModelSerializer):
 
 
 class CustomerCompositeProgramSerializer(CompositeProgramValidationMixin, BaseModelSerializer):
+    is_part_of_package = serializers.BooleanField(
+        source="program.is_part_of_package", read_only=True,
+    )
     therapy_redemption_is_global = serializers.BooleanField(required=False)
     therapy_services = CompositeTherapyServiceSelectionSerializer(
         many=True, required=False, write_only=True,
@@ -518,6 +521,7 @@ class CustomerCompositeProgramSerializer(CompositeProgramValidationMixin, BaseMo
             "price",
             "redeemable_centers",
             "therapy_redemption_is_global",
+            "is_part_of_package",
             "redeemable_centers_count",
             "services",
             "services_count",

@@ -23,3 +23,7 @@ body:json {
 settings {
   encodeUrl: true
 }
+
+docs {
+  `customer_profile.address` matches GET /leads/v2/{id}/: default address, else newest. Null when the lead has no profile or no address. No latitude or longitude.
+}

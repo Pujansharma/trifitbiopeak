@@ -1,0 +1,23 @@
+meta {
+  name: OPTIONS Leads
+  type: http
+  seq: 0
+}
+
+options {
+  url: {{baseURL}}/leads/
+  body: none
+  auth: inherit
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  OPTIONS /leads/ — DRF field metadata plus ops_onboarding_email:
+  to (OPS_ONBOARDING_EMAIL_TO constant), from (DEFAULT_FROM_EMAIL env), cc (JWT user email),
+  subject_template, then same field-info shape as actions.POST
+  (type/required/label/choices) for LeadOpsOnboardingEmailSerializer fields.
+  GET/POST /leads/ are deprecated (400); use /leads/v2/ for those.
+}

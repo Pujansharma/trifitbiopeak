@@ -26,5 +26,12 @@ settings {
 }
 
 docs {
-  Enqueues a recovery pull; the separate ECS recovery task must be scheduled or the job remains pending.
+  The returned connection includes syncProgress operation metadata. A 202 response means accepted/coalesced, not completed. Poll GET Connected Devices with backoff. A completed_no_new_data outcome does not change latestMeasurementAt. Existing six-hour cooldown and response envelope are preserved.
+  Manual Sync uses the existing endpoint and body. HTTP 202 means a request was accepted; data includes jobId, alreadyQueued, syncRequestAccepted=true, cooldownActive=false and nextSyncAllowedAt. A running job is reused with a newer target retained for a follow-up window; its live plan is never overwritten.
+
+  Within six elapsed hours of the last accepted manual request for this connection, HTTP 200 returns queued=false, cooldownActive=true, syncRequestAccepted=false, jobId (when active) and nextSyncAllowedAt. This is an informational no-op, not a second job. Initial history, webhooks and automatic retries do not spend the manual cooldown.
+
+  Read GET Connected Devices for importStatus, lastManualSyncQueuedAt, lastSyncRequestedAt, lastPullCompletedAt, syncedThrough and pendingSyncRequestedAt. Accepted is not completed. Run a second request immediately to verify cooldown; boundary tests use a controlled staging clock, not repeated production requests.
+
+  Dedicated ROOK health/recovery ECS consumers and reviewed migrations are required. The old 15-minute recovery schedule must be disabled during cutover. All auth is inherited; use environment values only.
 }

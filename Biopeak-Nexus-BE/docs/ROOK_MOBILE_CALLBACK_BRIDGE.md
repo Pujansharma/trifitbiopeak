@@ -58,7 +58,7 @@ To use **this new `/rook/return` flow** instead:
   backend overrides the `redirect_url` supplied by the frontend.
 * Set `PRD_ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS=trifitbiopeak.onrender.com` so
   `DeviceConnectSerializer.validate_redirect_url()` accepts that HTTPS host.
-* Keep your normal ROOK credentials and `WEARABLES_ENABLED` values configured.
+* Keep your normal ROOK credentials configured.
 
 If your ROOK account requires an allowlisted redirect URL, register the exact
 HTTPS base callback there; confirm this with the actual ROOK account settings.

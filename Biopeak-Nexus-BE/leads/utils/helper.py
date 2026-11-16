@@ -14,11 +14,30 @@ from accounts.customers.utils.db import (
 )
 from accounts.organizations.utils.db import increment_organization_clients_count
 from accounts.utils.auth import get_user_model
+from core.utils.log import logger
 from leads.models import Lead
 from leads.utils.db import (
     increment_leads_assigned,
     increment_leads_converted,
 )
+from programs.composites.models import CompositeTemplateService
+from programs.composites.utils.constants import CompositeAssessmentType
+from programs.composites.utils.db import (
+    create_program_service_extensions,
+    update_composite_program_service_counts,
+)
+from programs.composites.validators import (
+    get_available_therapy_center_pairs,
+    get_eligible_customer_centers,
+    get_therapy_template_service_identifiers,
+)
+from programs.models import CompositeProgram, Program, ProgramService
+from programs.utils.constants import ProgramType
+from programs.utils.db import (
+    update_program_redeemable_centers_count,
+    update_program_services_count,
+)
+from programs.utils.helper import generate_program_unique_id
 
 User = get_user_model()
 
@@ -267,3 +286,71 @@ def create_customer_profile_from_lead(
     updated_by: User | None,
 ) -> CustomerProfile:
     return convert_lead_to_client(lead, updated_by)
+
+
+def create_lead_composite_program(
+    lead: Lead,
+    customer_profile: CustomerProfile,
+    template_services: list[CompositeTemplateService],
+    created_by: User | None,
+) -> None:
+    """Assign validated template services within the caller's conversion transaction."""
+    composite_template = lead.composite_program_template
+    home_center = lead.home_center
+    therapy_identifiers = get_therapy_template_service_identifiers(template_services)
+    available_pairs = set()
+    if therapy_identifiers and get_eligible_customer_centers(
+        {home_center.pk}, customer_profile,
+    ).exists():
+        available_pairs = get_available_therapy_center_pairs(
+            therapy_identifiers, {home_center.pk},
+        )
+
+    program = Program.objects.create(
+        uid=generate_program_unique_id(),
+        program_type=ProgramType.COMPOSITE,
+        is_part_of_package=True,
+        is_complimentary=False,
+        customer_profile=customer_profile,
+        center=home_center,
+        created_by=created_by,
+    )
+    if available_pairs:
+        program.redeemable_centers.add(home_center)
+    CompositeProgram.objects.create(
+        program=program,
+        composite_template=composite_template,
+        name=composite_template.name,
+        template_description=composite_template.description,
+        assessment_type=CompositeAssessmentType.BASELINE,
+        therapy_redemption_is_global=False,
+    )
+
+    program_services = []
+    service_quantities = []
+    service_centers = []
+    for template_service in template_services:
+        program_services.append(
+            ProgramService(
+                program=program,
+                service=template_service.service,
+                created_by=created_by,
+            )
+        )
+        service_quantities.append(template_service.quantity)
+        centers = []
+        if (template_service.service.pk, home_center.pk) in available_pairs:
+            centers.append(home_center)
+        service_centers.append(centers)
+    ProgramService.objects.bulk_create(program_services)
+    create_program_service_extensions(
+        program_services, service_quantities, service_centers,
+    )
+    update_program_services_count(program.pk)
+    update_composite_program_service_counts(program.pk)
+    update_program_redeemable_centers_count(program.pk)
+    logger.info(
+        f"create_lead_composite_program: lead={lead.pk} "
+        f"customer_profile={customer_profile.pk} template={composite_template.pk} "
+        f"program={program.pk} services={len(program_services)} outcome=created"
+    )

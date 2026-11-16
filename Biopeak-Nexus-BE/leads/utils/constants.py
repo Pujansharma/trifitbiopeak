@@ -14,3 +14,35 @@ LEAD_V1_CREATE_DEPRECATED = "POST /leads/ is deprecated. Use POST /leads/v2/."
 LEAD_V1_LIST_DEPRECATED = "GET /leads/ is deprecated. Use GET /leads/v2/."
 LEAD_V1_GET_DEPRECATED = "GET /leads/{id}/ is deprecated. Use GET /leads/v2/{id}/."
 LEAD_V1_UPDATE_DEPRECATED = "PATCH /leads/{id}/ is deprecated. Use PATCH /leads/v2/{id}/."
+
+
+class OpsOnboardingPaymentStatus(models.TextChoices):
+    COLLECTED = "COLLECTED", "Collected"
+    PENDING = "PENDING", "Pending"
+    PARTIALLY_COLLECTED = "PARTIALLY_COLLECTED", "Partially Collected"
+
+
+class OpsOnboardingTypeformStatus(models.TextChoices):
+    COMPLETED = "COMPLETED", "Completed"
+    PENDING = "PENDING", "Pending"
+    NOT_APPLICABLE = "NOT_APPLICABLE", "Not Applicable"
+
+
+class OpsOnboardingConsultationMode(models.TextChoices):
+    ONLINE = "ONLINE", "Online"
+    IN_PERSON = "IN_PERSON", "In Person"
+    TO_BE_SCHEDULED = "TO_BE_SCHEDULED", "To Be Scheduled"
+
+
+class OpsOnboardingActionPriority(models.TextChoices):
+    NORMAL = "NORMAL", "Normal"
+    URGENT = "URGENT", "Urgent"
+    CRITICAL = "CRITICAL", "Critical"
+
+
+OPS_ONBOARDING_EMAIL_TO = [
+    "Apoorva.garg@biopeak.health",
+    "runam@biopeak.health",
+    "mohan@biopeak.health",
+]
+OPS_ONBOARDING_EMAIL_EMPTY = "—"

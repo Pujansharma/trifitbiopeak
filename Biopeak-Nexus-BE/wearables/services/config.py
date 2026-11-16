@@ -28,7 +28,8 @@ def provisioned_sources() -> set[str] | None:
         # prefix as the other ROOK credentials. Keep provisioning fail-closed.
         value = config("ROOK_PROVISIONED_SOURCES", default=None)
     if value is None:
-        environment = os.environ.get("DJANGO_SETTINGS_MODULE", "").rsplit(".", 1)[-1]
+        settings_module = getattr(settings, "SETTINGS_MODULE", "") or os.environ.get("DJANGO_SETTINGS_MODULE", "")
+        environment = settings_module.rsplit(".", 1)[-1]
         prefix = {"development": "DEV_", "staging": "STG_", "production": "PRD_"}.get(environment, "")
         if prefix:
             value = config(f"{prefix}ROOK_PROVISIONED_SOURCES", default=None)

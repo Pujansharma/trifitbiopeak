@@ -621,8 +621,8 @@ class CustomerAppointmentAuthTests(TestCase):
             customer_profile_id=self.profile.pk,
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["data"]["total_count"], 1)
-        appointment = response.data["data"]["appointments"][0]
+        self.assertEqual(response.data["count"], 1)
+        appointment = response.data["data"][0]
         self.assertEqual(
             appointment["center"],
             {
@@ -666,7 +666,7 @@ class CustomerAppointmentAuthTests(TestCase):
             customer_profile_id=self.profile.pk,
         )
         self.assertEqual(all_response.status_code, 200)
-        self.assertEqual(all_response.data["data"]["total_count"], 2)
+        self.assertEqual(all_response.data["count"], 2)
 
         program_request = self.factory.get(
             f"/appointments/customer-appointments/{self.profile.pk}/",
@@ -678,9 +678,7 @@ class CustomerAppointmentAuthTests(TestCase):
             customer_profile_id=self.profile.pk,
         )
         self.assertEqual(program_response.status_code, 200)
-        program_ids = [
-            row["id"] for row in program_response.data["data"]["appointments"]
-        ]
+        program_ids = [row["id"] for row in program_response.data["data"]]
         self.assertEqual(program_ids, [program_id])
 
         walk_in_request = self.factory.get(
@@ -693,9 +691,7 @@ class CustomerAppointmentAuthTests(TestCase):
             customer_profile_id=self.profile.pk,
         )
         self.assertEqual(walk_in_response.status_code, 200)
-        walk_in_ids = [
-            row["id"] for row in walk_in_response.data["data"]["appointments"]
-        ]
+        walk_in_ids = [row["id"] for row in walk_in_response.data["data"]]
         self.assertEqual(walk_in_ids, [walk_in_id])
 
     def test_customer_appointments_list_rejects_other_profile(self):

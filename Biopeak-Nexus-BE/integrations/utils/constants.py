@@ -1,11 +1,6 @@
 from django.db import models
 
 
-class CommunicationChannel(models.TextChoices):
-    WHATSAPP = "whatsapp", "WhatsApp"
-    GOOGLE_CALENDAR = "google_calendar", "Google Calendar"
-
-
 class CommunicationEventType(models.TextChoices):
     APPOINTMENT_CONFIRMED = "appointment_confirmed", "Appointment Confirmed"
     APPOINTMENT_CANCELLED = "appointment_cancelled", "Appointment Cancelled"
@@ -18,8 +13,9 @@ class CommunicationEventType(models.TextChoices):
     ASSOCIATE_LEAVE_SYNC = "associate_leave_sync", "Associate Leave Sync"
 
 
-class CommunicationOutboxStatus(models.TextChoices):
+class WhatsAppOutboxStatus(models.TextChoices):
     PENDING = "pending", "Pending"
+    QUEUED = "queued", "Queued"
     SENDING = "sending", "Sending"
     ACCEPTED = "accepted", "Accepted"
     SENT = "sent", "Sent"
@@ -27,6 +23,65 @@ class CommunicationOutboxStatus(models.TextChoices):
     READ = "read", "Read"
     FAILED = "failed", "Failed"
     SKIPPED = "skipped", "Skipped"
+
+
+class GoogleCalendarOutboxStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    QUEUED = "queued", "Queued"
+    SENDING = "sending", "Sending"
+    ACCEPTED = "accepted", "Accepted"
+    FAILED = "failed", "Failed"
+    SKIPPED = "skipped", "Skipped"
+
+
+OUTBOX_WORKER_JOB_IDS_MAX = 10
+
+WHATSAPP_DISPATCH_BATCH_SIZE = OUTBOX_WORKER_JOB_IDS_MAX
+MAX_WHATSAPP_OUTBOX_ATTEMPTS = 2
+STALE_WHATSAPP_SENDING_MINUTES = 5
+STALE_WHATSAPP_QUEUED_MINUTES = 10
+
+GOOGLE_CALENDAR_DISPATCH_BATCH_SIZE = OUTBOX_WORKER_JOB_IDS_MAX
+MAX_GOOGLE_CALENDAR_OUTBOX_ATTEMPTS = 2
+STALE_GOOGLE_CALENDAR_SENDING_MINUTES = 5
+STALE_GOOGLE_CALENDAR_QUEUED_MINUTES = 10
+
+
+class ProtocolAiOutboxStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    QUEUED = "queued", "Queued"
+    SENDING = "sending", "Sending"
+    ACCEPTED = "accepted", "Accepted"
+    FAILED = "failed", "Failed"
+    SKIPPED = "skipped", "Skipped"
+
+
+PROTOCOL_AI_DISPATCH_BATCH_SIZE = OUTBOX_WORKER_JOB_IDS_MAX
+MAX_PROTOCOL_AI_OUTBOX_ATTEMPTS = 1
+STALE_PROTOCOL_AI_OUTBOX_SENDING_MINUTES = 5
+STALE_PROTOCOL_AI_OUTBOX_QUEUED_MINUTES = 10
+
+# Lower runs first. Pre-care waits until confirmed ACCEPTED enqueue.
+WHATSAPP_EVENT_PROCESS_PRIORITY = {
+    CommunicationEventType.APPOINTMENT_CONFIRMED: 0,
+    CommunicationEventType.APPOINTMENT_CANCELLED: 0,
+    CommunicationEventType.APPOINTMENT_RESCHEDULED: 0,
+    CommunicationEventType.APPOINTMENT_REMINDER: 0,
+    CommunicationEventType.APPOINTMENT_NO_SHOW: 0,
+    CommunicationEventType.APPOINTMENT_POST_CARE: 0,
+    CommunicationEventType.APPOINTMENT_PRE_CARE: 1,
+}
+
+TERMINAL_WHATSAPP_OUTBOX_BLOCKING_STATUSES = (
+    WhatsAppOutboxStatus.PENDING,
+    WhatsAppOutboxStatus.QUEUED,
+    WhatsAppOutboxStatus.SENDING,
+    WhatsAppOutboxStatus.ACCEPTED,
+    WhatsAppOutboxStatus.SENT,
+    WhatsAppOutboxStatus.DELIVERED,
+    WhatsAppOutboxStatus.READ,
+    WhatsAppOutboxStatus.FAILED,
+)
 
 
 # Once-per-appointment WhatsApp/Google terminal events (partial unique).
@@ -46,15 +101,13 @@ CARE_WHATSAPP_EVENT_TYPES = frozenset(
     }
 )
 
-# Statuses that block a second terminal outbox row (FAILED still retrying).
-TERMINAL_OUTBOX_BLOCKING_STATUSES = (
-    CommunicationOutboxStatus.PENDING,
-    CommunicationOutboxStatus.SENDING,
-    CommunicationOutboxStatus.ACCEPTED,
-    CommunicationOutboxStatus.SENT,
-    CommunicationOutboxStatus.DELIVERED,
-    CommunicationOutboxStatus.READ,
-    CommunicationOutboxStatus.FAILED,
+# Statuses that block a second terminal Google Calendar outbox row.
+TERMINAL_GOOGLE_OUTBOX_BLOCKING_STATUSES = (
+    GoogleCalendarOutboxStatus.PENDING,
+    GoogleCalendarOutboxStatus.QUEUED,
+    GoogleCalendarOutboxStatus.SENDING,
+    GoogleCalendarOutboxStatus.ACCEPTED,
+    GoogleCalendarOutboxStatus.FAILED,
 )
 
 # Meta-approved WhatsApp template names (not env-driven).

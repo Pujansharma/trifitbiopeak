@@ -8,7 +8,7 @@ from django.db.models import Count, Q
 from django.utils import timezone
 
 from wearables.models import (
-    HealthProcessingJob, RookHealthDocument, RookWebhookReceipt, WearableConnection,
+    RookOutbox, RookHealthDocument, RookWebhookReceipt, WearableConnection,
     WearableConnectionEvent,
 )
 from wearables.utils.constants import ConnectionStatus, DocumentStatus, HealthJobStatus
@@ -32,7 +32,7 @@ class Command(BaseCommand):
         total_receipts = sum(webhook_counts.values())
         rejected = webhook_counts.get(DocumentStatus.REJECTED, 0)
         completed = webhook_counts.get(DocumentStatus.PROCESSED, 0)
-        processing_jobs = HealthProcessingJob.objects.filter(created_at__gte=since)
+        processing_jobs = RookOutbox.objects.filter(created_at__gte=since)
         job_counts = dict(processing_jobs.values_list("status").annotate(n=Count("pk")))
         stalled = WearableConnection.objects.filter(
             import_status="running", import_started_at__lt=now - timedelta(hours=4),
@@ -60,7 +60,7 @@ class Command(BaseCommand):
         if total_receipts >= 20 and rejected / total_receipts > 0.005:
             alerts.append("webhook_rejection_rate_above_0.5_percent")
         if job_counts.get(HealthJobStatus.FAILED, 0) > 0:
-            alerts.append("health_processing_jobs_failed")
+            alerts.append("rook_outboxes_failed")
         if overdue_documents:
             alerts.append("queued_documents_not_normalized")
         if schema_events >= 3:

@@ -30,7 +30,6 @@ dependencies = [
     "pillow",
     "pillow-heif>=1.4.0",
     "psycopg",
-    "psycopg2-binary>=2.9.13",
     "pydantic>=2.0",
     "pymupdf>=1.24",
     "pyotp",

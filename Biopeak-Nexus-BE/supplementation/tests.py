@@ -3538,20 +3538,6 @@ class PlanSummaryTests(TestCase):
             account_type=UserType.CUSTOMER,
         )
         self.admin = create_staff_user("plan-summary-admin@example.com", UserType.ADMIN)
-        self.other = create_profile("plan-summary-other@example.com", "Noah", "Kim")
-        self.empty = CustomerProfile.objects.create(
-            customer=self.profile.customer,
-            first_name="Kid",
-            last_name="Shah",
-            is_main=False,
-        )
-        self.inactive_profile = CustomerProfile.objects.create(
-            customer=self.profile.customer,
-            first_name="Old",
-            last_name="Shah",
-            is_main=False,
-            is_active=False,
-        )
         today = timezone.localdate()
         publish_current_version(
             self.profile,
@@ -3674,34 +3660,39 @@ class PlanSummaryTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["data"]["preparing"], 2)
 
-    def test_empty_profile_returns_zeros(self):
-        response = self.summary(self.customer, str(self.empty.id))
+    def test_empty_main_profile_returns_zeros(self):
+        empty_profile = create_profile("plan-summary-empty@example.com", "Mia", "Shah")
+        empty_user = empty_profile.customer.user
+        UserAccount.objects.create(user=empty_user, account_type=UserType.CUSTOMER)
+        response = self.summary(empty_user)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             response.data["data"],
             {"active": 0, "coming_up": 0, "preparing": 0, "historical": 0},
         )
 
-    def test_missing_header_is_not_found(self):
+    def test_uses_main_profile_without_header(self):
+        response = self.summary(self.customer)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["data"],
+            {"active": 2, "coming_up": 1, "preparing": 2, "historical": 2},
+        )
+
+    def test_sent_profile_header_is_ignored(self):
+        response = self.summary(self.customer, "not-a-uuid")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["data"],
+            {"active": 2, "coming_up": 1, "preparing": 2, "historical": 2},
+        )
+
+    def test_missing_main_profile_is_not_found(self):
+        self.profile.is_main = False
+        self.profile.save(update_fields=["is_main", "updated_at"])
         response = self.summary(self.customer)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(response.data["detail"], "Customer profile not found.")
-
-    def test_other_customers_profile_is_not_found(self):
-        response = self.summary(self.customer, str(self.other.id))
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
-
-    def test_unknown_profile_is_not_found(self):
-        response = self.summary(self.customer, str(uuid.uuid4()))
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
-
-    def test_junk_profile_header_is_not_found(self):
-        response = self.summary(self.customer, "not-a-uuid")
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
-
-    def test_inactive_profile_is_not_found(self):
-        response = self.summary(self.customer, str(self.inactive_profile.id))
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_staff_is_forbidden(self):
         response = self.summary(self.admin, str(self.profile.id))
@@ -4596,20 +4587,12 @@ class PlanRoutineTests(TestCase):
         self.assertIn("Vitamin D3", names)
 
     def test_empty_plan_returns_no_timings(self):
-        empty = CustomerProfile.objects.create(
-            customer=self.profile.customer,
-            first_name="Kid",
-            last_name="Shah",
-            is_main=False,
-        )
-        response = self.routine(self.customer, str(empty.id))
+        empty_profile = create_profile("plan-routine-empty@example.com", "Mia", "Shah")
+        empty_user = empty_profile.customer.user
+        UserAccount.objects.create(user=empty_user, account_type=UserType.CUSTOMER)
+        response = self.routine(empty_user)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["data"], {"timings": []})
-
-    def test_missing_header_is_not_found(self):
-        response = self.routine(self.customer)
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
-        self.assertEqual(response.data["detail"], "Customer profile not found.")
 
     def test_staff_is_forbidden(self):
         response = self.routine(self.admin, str(self.profile.id))
@@ -4812,13 +4795,14 @@ class PlanProtocolListTests(TestCase):
         self.assertNotIn("draft", data)
 
     def test_empty_plan_returns_zeros(self):
-        empty = CustomerProfile.objects.create(
-            customer=self.profile.customer,
-            first_name="Kid",
-            last_name="Shah",
-            is_main=False,
+        empty_profile = create_profile(
+            "plan-protocols-empty@example.com",
+            "Mia",
+            "Shah",
         )
-        response = self.protocols(self.customer, str(empty.id))
+        empty_user = empty_profile.customer.user
+        UserAccount.objects.create(user=empty_user, account_type=UserType.CUSTOMER)
+        response = self.protocols(empty_user)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             response.data["data"],
@@ -4836,10 +4820,6 @@ class PlanProtocolListTests(TestCase):
                 "expired": [],
             },
         )
-
-    def test_missing_header_is_not_found(self):
-        response = self.protocols(self.customer)
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_staff_is_forbidden(self):
         response = self.protocols(self.admin, str(self.profile.id))
@@ -5070,19 +5050,12 @@ class PlanSupplementChangeListTests(TestCase):
         )
 
     def test_empty_plan_returns_an_empty_list(self):
-        empty = CustomerProfile.objects.create(
-            customer=self.profile.customer,
-            first_name="Kid",
-            last_name="Shah",
-            is_main=False,
-        )
-        response = self.changes(self.customer, str(empty.id))
+        empty_profile = create_profile("plan-changes-empty@example.com", "Mia", "Shah")
+        empty_user = empty_profile.customer.user
+        UserAccount.objects.create(user=empty_user, account_type=UserType.CUSTOMER)
+        response = self.changes(empty_user)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["data"], [])
-
-    def test_missing_header_is_not_found(self):
-        response = self.changes(self.customer)
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_staff_is_forbidden(self):
         response = self.changes(self.admin, str(self.profile.id))

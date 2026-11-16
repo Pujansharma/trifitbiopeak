@@ -4,7 +4,7 @@ This file describes the supplementation API that is implemented. A new endpoint 
 
 Envelope on every response: `{ "detail": "...", "data": ... }`. Payloads below are `data`. Paginated lists use `page` and `limit` (default 10, max 50).
 
-Staff means admin or associate (`IsAdminUser | IsAssociateUser`). No `X-Center-ID`. A customer JWT on a staff route is 403. Customer means customer JWT (`IsCustomerUser`). A staff JWT on a plan route is 403. Profile comes from `X-Customer-Profile-ID` and must belong to that user.
+Staff means admin or associate (`IsAdminUser | IsAssociateUser`). No `X-Center-ID`. A customer JWT on a staff route is 403. Customer means customer JWT (`IsCustomerUser`). A staff JWT on a plan route is 403. A plan route uses that user's active main profile. No `X-Customer-Profile-ID`.
 
 Add a supplement only while `ProtocolVersion.status` is `draft`. Edit, replace, and delete a supplement while the status is `draft` or `under_review`. Approve accepts `draft` or `under_review` and requires at least one supplement. Omitted or null `ends_on` on approve stores `starts_on` plus 90 days. That date, and any sent `ends_on`, must be today or later. Publish accepts `approved` only, requires at least one supplement, and requires `starts_on`. Items stay fixed once the version is no longer `draft` or `under_review`. `ends_on` on a `scheduled` or `active` version can move later through extend. Every other status, including `expired` and `cancelled`, cannot be extended.
 
@@ -137,7 +137,7 @@ Writers emit `protocol_created`, `version_drafted`, `supplement_added`, `supplem
 
 ### AI recommendation
 
-`ProtocolAiJob` is the outbox row. `AiRecommendation` is written by the worker. `AiRecommendationItem` is one supplement decision.
+`ProtocolAiJob` is the domain Luma request. `ProtocolAiOutbox` is the SQS dispatch row (1:1 job). `AiRecommendation` is written by the worker. `AiRecommendationItem` is one supplement decision.
 
 | Column | Type | Relation |
 |---|---|---|
@@ -742,7 +742,7 @@ Staff publish one approved protocol version. Admin or associate. No `X-Center-ID
 
 A second live `active` row on this protocol returns 400 `This protocol already has an active version.`
 
-`manage.py sweep_protocol_versions` runs from `assets/scripts/sweep_jobs.sh`. It writes no event. Expire runs before activate. `scheduled` or `active` with `ends_on` before today becomes `expired`. The version stays active on `ends_on` itself. Then each protocol with a `scheduled` version whose `starts_on` is on or before today and whose window is still open activates one row: the due `current_version` when that row is due, otherwise the due row with the highest `version_number`. Other due `scheduled` rows on that protocol become `superseded`. Any other `active` version of that protocol becomes `superseded`. A repeat run changes nothing.
+`manage.py sweep_protocol_versions` runs from EventBridge (`infra/integrations.yaml` scheduled job `protocol_versions`). It writes no event. Expire runs before activate. `scheduled` or `active` with `ends_on` before today becomes `expired`. The version stays active on `ends_on` itself. Then each protocol with a `scheduled` version whose `starts_on` is on or before today and whose window is still open activates one row: the due `current_version` when that row is due, otherwise the due row with the highest `version_number`. Other due `scheduled` rows on that protocol become `superseded`. Any other `active` version of that protocol becomes `superseded`. A repeat run changes nothing.
 
 `data` omitted.
 
@@ -796,7 +796,7 @@ Same event row as protocol events (`actor`, `protocol_name`, `protocol_version_n
 
 ### [DONE] GET `/supplementation/plan/summary/`
 
-Customer JWT. No `X-Center-ID`. Profile is `X-Customer-Profile-ID` and must belong to that user. Missing header, blank header, junk id, unknown id, another customer's profile, or an inactive profile returns 404 `Customer profile not found.` Detail `Protocol summary retrieved successfully.`
+Customer JWT. No `X-Center-ID`. No `X-Customer-Profile-ID`. The profile is that user's active main profile. No active main profile returns 404 `Customer profile not found.` Detail `Protocol summary retrieved successfully.`
 
 Counts are the current version of each active protocol. `under_review` is omitted. A superseded version that is not `current_version` is omitted. An empty plan returns zeros. Buckets are the rules at the top of this file.
 
@@ -814,7 +814,7 @@ Counts are the current version of each active protocol. `under_review` is omitte
 
 ### [DONE] GET `/supplementation/plan/routine/`
 
-Customer JWT. No `X-Center-ID`. Profile is `X-Customer-Profile-ID`, same 404 as the summary. No body. Detail `Active supplements retrieved successfully.`
+Customer JWT. No `X-Center-ID`. No `X-Customer-Profile-ID`. The profile is that user's active main profile. No body. Detail `Active supplements retrieved successfully.`
 
 Items on versions whose stored status is `active`, whose version is active, whose protocol is active, and whose `ends_on` is null or today or later. A stored `scheduled` version is omitted, including one whose window has started. An `active` version whose `ends_on` is before today is omitted until the sweep marks it `expired`. Groups follow `before_breakfast`, `with_breakfast`, `with_lunch`, `with_dinner`, `after_dinner`, `anytime`. An empty timing is omitted. Inside a timing, items are ordered by product name, then `id`. `ends_on` is that version's end date. `duration` is not on this response. No `protocol` key. An empty plan returns `{"timings": []}`.
 
@@ -848,7 +848,7 @@ Items on versions whose stored status is `active`, whose version is active, whos
 
 ### [DONE] GET `/supplementation/plan/protocols/`
 
-Customer JWT. Same profile header as the summary. No body. Detail `Protocols retrieved successfully.`
+Customer JWT. No `X-Center-ID`. No `X-Customer-Profile-ID`. The profile is that user's active main profile. No body. Detail `Protocols retrieved successfully.`
 
 `summary` counts one stored status per active protocol, from `current_version`. `active`, `scheduled`, `draft`, `cancelled`, `expired`. A null `current_version` with a `draft` version counts as `draft`. A later unpublished draft does not add a second count. `approved`, `under_review`, and `superseded` are omitted. Inactive protocols are omitted. An inactive `current_version` is omitted and is not counted as `draft`.
 
@@ -906,7 +906,7 @@ Lists are those protocols except `draft`. Newest `starts_on` first, then newest 
 
 ### [DONE] GET `/supplementation/plan/supplement-changes/`
 
-Customer JWT. Same profile header as the summary. No body. No protocol id. Detail `Supplement changes retrieved successfully.` An empty plan returns `data: []`.
+Customer JWT. No `X-Center-ID`. No `X-Customer-Profile-ID`. The profile is that user's active main profile. No body. No protocol id. Detail `Supplement changes retrieved successfully.` An empty plan returns `data: []`.
 
 One row per active protocol that has an `active` or `scheduled` version. `active` rows first, then `scheduled`, each by name, case-insensitive. If both statuses exist, the row uses the `active` version, even when a `scheduled` version has a higher `version_number`. Otherwise the `scheduled` version with the highest `version_number` is used. `status` is that version.
 

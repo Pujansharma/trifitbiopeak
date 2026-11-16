@@ -26,5 +26,5 @@ settings {
 }
 
 docs {
-  Disconnect this ROOK provider; existing history is retained.
+  Revokes this provider locally immediately; HTTP 200 does not claim remote completion. upstreamRevokePending remains true while the queued worker calls ROOK and verifies the provider grant is absent. Repeated requests coalesce; an explicit repeat can retry failed remote revocation. Existing history is retained.
 }

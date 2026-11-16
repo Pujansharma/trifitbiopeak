@@ -16,18 +16,22 @@ from accounts.models import UserAccount
 from accounts.users.models import User
 from accounts.utils.constants import UserType
 from wearables.models import (
-    HealthDomainSnapshot, HealthProcessingJob, RookHealthDocument,
+    HealthDomainSnapshot, RookOutbox, RookHealthDocument,
     WearableConsent,
 )
 from wearables.serializers import DeviceConnectSerializer
 from wearables.services.analytics import (
+    MAX_LIFETIME_HISTORY_DAYS,
     card_state, confidence_level, dashboard_payload, history_window_availability,
     rolling_averages, trend_payload, invalidate_health_dashboard,
 )
 from wearables.services.connections import get_or_create_connection
 from wearables.services.identity import get_or_create_rook_identity
 from wearables.services.ingestion import ingest_rook_document, normalize_health_document
-from wearables.services.job_processor import process_recovery_pull
+from wearables.services.job_claims import claim_health_job, fail_health_job
+from wearables.services.recovery import process_fetch_rook_data
+from wearables.services.job_queue import enqueue_or_reuse_fetch_rook_data_job
+from wearables.services.client import RookServiceError
 from wearables.services.metrics import extract_metric_values, is_v1_display_metric
 from wearables.services.timeline import timeline_payload
 from wearables.utils.constants import (
@@ -88,7 +92,10 @@ class PhaseOnePureContractTests(SimpleTestCase):
                                 metric="steps", maximum=6000,
                                 last_observed_at=None, updated_at=timezone.now())
                 for i in range(28)]
-        windows = rolling_averages(days, metric="steps", preferred_units="metric", today=today)
+        windows = rolling_averages(
+            days, metric="steps", preferred_units="metric", today=today,
+            history_days=MAX_LIFETIME_HISTORY_DAYS,
+        )
         self.assertFalse(windows["7d"]["available"])
         self.assertFalse(windows["30d"]["available"])
         self.assertTrue(windows["lifetime"]["available"])
@@ -164,27 +171,28 @@ class PhaseOnePersistenceContractTests(TestCase):
     def process_document(self, payload):
         with self.captureOnCommitCallbacks(execute=True):
             received = ingest_rook_document(payload, signature_valid=True)
-        with self.captureOnCommitCallbacks(execute=True):
-            normalized = normalize_health_document(received["documentId"])
-        return received, normalized
+        return received, received.get("normalize") or {}
 
-    def test_two_rook_pillars_same_day_version_receive_distinct_analytics_jobs(self):
+    def test_two_rook_pillars_same_day_version_refresh_snapshots_inline(self):
         self.process_document(self.document(structure="physical_health_summary"))
         self.process_document(self.document(structure="sleep_health_summary"))
-        keys = list(HealthProcessingJob.objects.filter(
-            job_type=HealthJobType.REFRESH_ANALYTICS,
-        ).values_list("idempotency_key", flat=True))
-        self.assertEqual(len(keys), 2)
-        self.assertEqual(len(set(keys)), 2)
+        self.assertFalse(RookOutbox.objects.filter(
+            job_type="refresh_analytics",
+        ).exists())
+        domains = set(HealthDomainSnapshot.objects.filter(
+            customer_profile=self.profile,
+        ).values_list("domain", flat=True))
+        self.assertTrue({"activity", "sleep"}.issubset(domains))
 
     @override_settings(ROOK_PREEXISTING_ENABLED=True)
-    @patch("wearables.services.job_processor.RookClient.get_processed_summaries")
+    @patch("wearables.services.recovery.RookClient.get_processed_summaries")
     def test_import_success_requires_normalized_v1_observations(self, get_summaries):
         get_summaries.side_effect = lambda **kw: ([{
             "source_of_data_string": "Garmin", "accumulated_steps_int": 8000,
         }] if kw["health_pillar"] == "physical" else [])
         with self.captureOnCommitCallbacks(execute=True):
-            result = process_recovery_pull(SimpleNamespace(connection_id=self.garmin.pk))
+            queued, _ = enqueue_or_reuse_fetch_rook_data_job(connection=self.garmin, customer_profile=self.profile, flow="initial")
+            result = process_fetch_rook_data(claim_health_job(queued.pk))
         self.garmin.refresh_from_db()
         self.assertEqual(result["importedDocumentCount"], 1)
         self.assertFalse(result["partial"])
@@ -192,17 +200,18 @@ class PhaseOnePersistenceContractTests(TestCase):
         self.assertTrue(RookHealthDocument.objects.filter(status="processed").exists())
 
     @override_settings(ROOK_PREEXISTING_ENABLED=True)
-    @patch("wearables.services.job_processor.normalize_health_document", return_value={"skipped": True})
-    @patch("wearables.services.job_processor.RookClient.get_processed_summaries")
+    @patch("wearables.services.recovery.normalize_health_document", return_value={"skipped": True})
+    @patch("wearables.services.recovery.RookClient.get_processed_summaries")
     def test_failed_normalization_cannot_be_reported_as_completed(self, get_summaries, normalize):
         get_summaries.side_effect = lambda **kw: ([{
             "source_of_data_string": "Garmin", "accumulated_steps_int": 8000,
         }] if kw["health_pillar"] == "physical" else [])
-        with self.captureOnCommitCallbacks(execute=True):
-            result = process_recovery_pull(SimpleNamespace(connection_id=self.garmin.pk))
+        queued, _ = enqueue_or_reuse_fetch_rook_data_job(connection=self.garmin, customer_profile=self.profile, flow="initial")
+        claimed = claim_health_job(queued.pk)
+        with self.assertRaises(RookServiceError) as failure:
+            process_fetch_rook_data(claimed)
+        fail_health_job(claimed, failure.exception)
         self.garmin.refresh_from_db()
-        self.assertTrue(result["partial"])
-        self.assertEqual(result["failedDocumentCount"], 1)
         self.assertEqual(self.garmin.import_status, HistoricalImportStatus.FAILED)
         self.assertIsNone(self.garmin.import_completed_at)
 

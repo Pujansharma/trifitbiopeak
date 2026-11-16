@@ -14,4 +14,7 @@ docs {
   List/detail + v2 nested customer_profile expose
   is_latest_consent_given (bool): true when profile's latest
   consent-history set (all consent names, same version) matches newest ConsentForm.
+
+  List/detail + v2 nested customer_profile + GET/POST centers/<uuid:pk>/customer-profiles/
+  expose read-only unique_id (string|null, format BP-YYMMXXX). UUID id stays PK/URLs/headers.
 }

@@ -165,7 +165,7 @@ class IngestionSafetyTests(TestCase):
             oura_result = ingest_rook_document(self.payload("Oura"), signature_valid=True)
         self.assertTrue(oura_result.get("queued"))
         self.assertEqual(RookHealthDocument.objects.count(), 1)
-        revoke.assert_called_once()
+        revoke.assert_not_called()
 
     @patch("wearables.services.connections.RookClient.revoke_source")
     def test_revoked_source_cannot_be_restarted_by_delayed_replay(self, revoke):

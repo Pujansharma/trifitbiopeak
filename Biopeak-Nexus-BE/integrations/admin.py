@@ -2,24 +2,40 @@ from django.contrib import admin
 
 from integrations.models import (
     AppDownloadClick,
-    CommunicationOutbox,
     CommunicationWebhookEvent,
+    GoogleCalendarOutbox,
+    WhatsAppOutbox,
 )
 
 
-@admin.register(CommunicationOutbox)
-class CommunicationOutboxAdmin(admin.ModelAdmin):
+@admin.register(GoogleCalendarOutbox)
+class GoogleCalendarOutboxAdmin(admin.ModelAdmin):
     list_display = (
         "id",
         "appointment",
         "event_type",
-        "channel",
+        "status",
+        "attempt_count",
+        "created_at",
+    )
+    list_filter = ("event_type", "status")
+    search_fields = ("error_code", "skip_reason")
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(WhatsAppOutbox)
+class WhatsAppOutboxAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "appointment",
+        "event_type",
         "status",
         "to_phone",
         "wamid",
+        "attempt_count",
         "created_at",
     )
-    list_filter = ("channel", "event_type", "status")
+    list_filter = ("event_type", "status")
     search_fields = ("to_phone", "wamid", "template_name")
     readonly_fields = ("created_at", "updated_at")
 

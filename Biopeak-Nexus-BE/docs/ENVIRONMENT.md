@@ -84,34 +84,19 @@ PRD_EMAIL_HOST_PASSWORD=your-production-email-password
 PRD_DEFAULT_FROM_EMAIL=your-production-email@domain.com
 ```
 
-## DRF API Throttling (Redis Optional)
+## DRF API Throttling
 
-The ROOK API views already use Django REST Framework `ScopedRateThrottle`,
-with rates defined under `REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]` in
-`core/settings/base.py` (`wearable_connect`, `wearable_status`, `health_read`).
-This continues to work without a ROOK-specific Redis service.
+ROOK API views use Django REST Framework `ScopedRateThrottle`, with rates under
+`REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]` in `core/settings/base.py`
+(`wearable_connect`, `wearable_status`, `health_read`).
 
-When no `STG_REDIS_URL` or `PRD_REDIS_URL` is supplied, Django uses the existing
-`CACHES["default"]` `LocMemCache`. This enforces requests **per process**, not
-globally across multiple ECS workers. The ROOK readiness check reports this as
-a warning, not proof of deployment-wide protection. If global limits are
-required, use BioPeak's approved shared-cache configuration and verify it
-across instances before go-live. WAF/gateway caps are additional protection,
-not a replacement for shared DRF counters.
-
-```env
-# Optional: only when a shared Redis default cache is already available.
-STG_REDIS_URL=
-PRD_REDIS_URL=
-```
-
-If configured, Django uses Redis for the default cache with a three-second
-connection and read timeout, without suppressing connection errors. Invalid
-Redis URLs still fail configuration. If URLs are absent, no Redis connection
-is attempted and the existing DRF throttle scopes remain in place.
+`CACHES["default"]` is `LocMemCache` (per-process). Readiness warns about that.
+Outbound ROOK account budgets are hardcoded
+`ROOK_API_REQUESTS_PER_MINUTE` / `ROOK_API_REQUESTS_PER_DAY` on settings modules
+and enforced in Postgres (`RookRequestBudget`), not via Redis.
 
 `CACHES["health"]` remains `DummyCache`; health dashboard snapshots come from
-PostgreSQL, and ROOK ingestion/normalization jobs do not use Redis.
+PostgreSQL.
 
 To verify API throttling and configuration:
 
@@ -245,9 +230,6 @@ DEV_EMAIL_HOST_USER=myemail@gmail.com
 DEV_EMAIL_HOST_PASSWORD=myapppassword
 DEV_DEFAULT_FROM_EMAIL=myemail@gmail.com
 
-# Optional Redis
-DEV_REDIS_HOST=localhost:6379
-
 # Optional Password Reset URL
 DEV_PASSWORD_RESET_URL=http://localhost:3000/reset-password
 ```
@@ -270,9 +252,6 @@ STG_EMAIL_PORT=587
 STG_EMAIL_HOST_USER=apikey
 STG_EMAIL_HOST_PASSWORD=SG.your-sendgrid-api-key
 STG_DEFAULT_FROM_EMAIL=noreply@yourdomain.com
-
-# Staging Redis (Required)
-STG_REDIS_HOST=staging-redis.amazonaws.com:6379
 
 # AWS S3 Storage
 AWS_S3_ACCESS_KEY_ID=<aws-access-key-id>
@@ -308,9 +287,6 @@ PRD_EMAIL_PORT=587
 PRD_EMAIL_HOST_USER=apikey
 PRD_EMAIL_HOST_PASSWORD=SG.your-sendgrid-api-key
 PRD_DEFAULT_FROM_EMAIL=noreply@yourdomain.com
-
-# Production Redis (Required)
-PRD_REDIS_HOST=production-redis.amazonaws.com:6379
 
 # AWS S3 Storage
 AWS_S3_ACCESS_KEY_ID=<aws-access-key-id>
@@ -376,49 +352,51 @@ Reminder / no-show use **positional** `{{1}}`…`{{4}}`.
 
 `clinic_address` value format: `{center.name}, {address lines/city/state/pincode}`.
 
-Retry pending/failed sends: `uv run manage.py process_communication_outbox`
+Retry pending/failed sends locally:
+- `uv run manage.py process_whatsapp_outbox --limit 50`
+- `uv run manage.py process_google_calendar_outbox --limit 50`
 
-Book / cancel / reschedule enqueue **WhatsApp + Google Calendar** outbox rows. Reminder / no-show are **WhatsApp only**. Google is desired-state from the live appointment (insert / patch / delete). Max 2 attempts. Wake: optional SQS (`*_COMMUNICATION_OUTBOX_WAKE_QUEUE_URL`) — one message per API enqueue that has work; FIFO queue uses `MessageGroupId=communication-outbox` and 60s dedup. Reminder enqueue from the 15‑min sweep does **not** wake SQS (same sweep drains outbox). Unset URL = no-op (local: run the management command). User owns DB migrations for `CommunicationOutbox` / `CommunicationWebhookEvent`.
+Book / cancel / reschedule enqueue **WhatsApp** (`WhatsAppOutbox`) + **Google Calendar** (`GoogleCalendarOutbox`). Reminder / no-show / pre/post care are **WhatsApp only**. Google is desired-state from the live appointment (insert / patch / delete). Max 2 attempts each.
+
+- **WhatsApp queue:** `*_WHATSAPP_OUTBOX_QUEUE_URL` — JSON `{"job_ids":["…"]}` (1–10). Package: `integrations/communications/whatsapp/`. Cost: `docs/whatsapp-background-jobs-cost.md`.
+- **Google Calendar queue:** `*_GOOGLE_CALENDAR_OUTBOX_QUEUE_URL` — package `integrations/google_calendar/`.
+- **Protocol AI queue:** `*_PROTOCOL_AI_OUTBOX_QUEUE_URL` — `ProtocolAiOutbox` ids. Package: `integrations/protocol_management/`. Outbox max 1 attempt (no SQS retry); `ProtocolAiJob` still try+retry (max 2) inside that wake.
+- **Exception scans:** no SQS. PENDING jobs drained in-process inside `run_maintenance_job` (package home: `appointments/appointment_integrity/`).
+
+All reclaim/reminder/version/scan hygiene: one Chronos `prd-maintenance_job` → `run_maintenance_job` every 15m Asia/Kolkata. `sweep_jobs.sh` removed.
 
 ```env
-DEV_COMMUNICATION_OUTBOX_WAKE_QUEUE_URL=
+DEV_WHATSAPP_OUTBOX_QUEUE_URL=
+DEV_GOOGLE_CALENDAR_OUTBOX_QUEUE_URL=
+DEV_PROTOCOL_AI_OUTBOX_QUEUE_URL=
+DEV_ROOK_AUTH_OUTBOX_QUEUE_URL=
+DEV_ROOK_DATA_FETCH_OUTBOX_QUEUE_URL=
 AWS_REGION=
 ```
 
-Staging / production: `STG_` / `PRD_` prefix on the queue URL. Set `AWS_REGION` in secrets/env to the SQS region (same value you use for AWS; no hardcoded default in code).
+Staging / production: `STG_` / `PRD_` prefix. Set `AWS_REGION` to the SQS region.
+Prod inject: GHA `export_outbox_queue_env` (same as WA/GC). Leave empty locally; drain with `--limit`.
 
 ## Luma (protocol AI recommendations)
 
-`uv run manage.py process_protocol_ai_jobs` calls Luma's `POST /luma/v1/integrations/nexus/clients/{customer_profile_id}/protocol-recommendation` with `X-API-Key`. If `*_LUMA_BASE_URL` or `*_LUMA_NEXUS_API_KEY` is blank, the job fails with "Luma is not configured." `*_LUMA_NEXUS_API_KEY` must match Luma's own `LUMA_NEXUS_API_KEY`. Wake: optional SQS (`*_PROTOCOL_AI_WAKE_QUEUE_URL`). Unset URL = no-op (local: run the command).
+`uv run manage.py process_protocol_ai_jobs` → Luma `POST .../clients/{customer_profile_id}/protocol-recommendation`. Glue: `integrations.protocol_management`. Unset protocol AI queue URL = leave outbox `PENDING`; local `--limit` drain.
 
 ```env
+DEV_PROTOCOL_AI_OUTBOX_QUEUE_URL=
 DEV_LUMA_BASE_URL=http://127.0.0.1:8010
 DEV_LUMA_NEXUS_API_KEY=
 ```
 
-Staging / production: `STG_` / `PRD_` prefix.
-
 ## Scheduled jobs (production)
 
-Not in `deploy-aws.yml` (image/service only).
+| Trigger | Command | Purpose |
+| ------- | ------- | ------- |
+| SQS WhatsApp | `process_whatsapp_outbox --message-body …` | Send WA templates |
+| SQS Google Calendar | `process_google_calendar_outbox --message-body …` | Sync GC outbox |
+| SQS Protocol AI | `process_protocol_ai_jobs --message-body …` | Luma for outbox ids |
+| EventBridge cron `:00/:15/:30/:45` `Asia/Kolkata` | `run_maintenance_job` | WA + GC + protocol AI + versions + exception-scan drain |
 
-| Trigger                        | Command                                         | Purpose                                          |
-| ------------------------------ | ----------------------------------------------- | ------------------------------------------------ |
-| SQS wake (on outbox insert)    | `uv run manage.py process_communication_outbox` | First try WhatsApp send + Google Calendar sync   |
-| EventBridge `rate(15 minutes)` | `assets/scripts/sweep_jobs.sh`                  | Reminder enqueue + outbox drain + exception scans + Google watch renewal + protocol version sweep + one AI job |
-
-Cap concurrent ECS RunTasks at 1 for the wake consumer. Sweep script:
-
-```bash
-python manage.py enqueue_appointment_reminders
-python manage.py process_communication_outbox
-python manage.py process_appointment_exception_scans
-python manage.py process_google_calendar_channel_expiry_renewal
-python manage.py sweep_protocol_versions
-python manage.py process_protocol_ai_jobs --limit 5
-```
-
-Without the outbox worker/sweep, WhatsApp and Google Calendar rows stay `PENDING`. Without the exception-scan drain, care-team / roster / block writes enqueue scans that never run.
+After cutover delete old Chronos: `prd-whatsapp_reminders`, `prd-google_calendar`, `prd-protocol_ai`, `prd-protocol_versions`, `production-sweep-*`.
 
 ## Security Best Practices
 
@@ -564,3 +542,17 @@ For environment configuration issues:
 - Verify all required variables are set for your target environment
 - Ensure environment prefixes match your deployment configuration
 - Contact the development team for environment-specific questions
+
+
+## ROOK outbox (2026-11-16)
+
+Nightly discovery is hardcoded: mode `stale`, threshold 7 days, timezone Django `TIME_ZONE` (`Asia/Kolkata`). No `ROOK_NIGHTLY_*` environment variables. Existing DEV/STG/PRD credentials and `ROOK_PREEXISTING_ENABLED` stay as set per environment.
+
+Queue URLs (injected by GHA/`export_outbox_queue_env` from `infra/integrations.yaml` SQS names; empty locally → `--limit` drain):
+
+- `ROOK_AUTH_OUTBOX_QUEUE_URL` / `PRD_ROOK_AUTH_OUTBOX_QUEUE_URL`
+- `ROOK_DATA_FETCH_OUTBOX_QUEUE_URL` / `PRD_ROOK_DATA_FETCH_OUTBOX_QUEUE_URL`
+
+Operational toggles: `ROOK_PULLS_PAUSED`, `ROOK_SYNC_UNITS_PER_RUN`. No `BIOPEAK_SWEEP_LOCKED` (removed with the lease supervisor).
+
+Three entrypoints: `process_rook_auth_jobs`, `process_rook_data_fetch_jobs`, `process_pending_rook_sync_scan`. See [ROOK manager flows](ROOK_MANAGER_FLOWS.md).

@@ -17,6 +17,8 @@ from accounts.users.models import User
 from accounts.users.utils.constants import Gender
 from accounts.users.utils.helper import calculate_age
 from accounts.utils.constants import UserType
+from integrations.models import ProtocolAiOutbox
+from integrations.utils.constants import ProtocolAiOutboxStatus
 from supplementation.models import (
     AiRecommendation,
     Brand,
@@ -42,7 +44,10 @@ from supplementation.utils.protocol_ai import (
     process_pending_protocol_ai_jobs,
     process_protocol_ai_job,
 )
-from supplementation.utils.protocol_ai_wake import publish_protocol_ai_wake
+from integrations.protocol_management.outbox import (
+    process_protocol_ai_outbox_by_id,
+    publish_protocol_ai_wake,
+)
 from supplementation.views import (
     AiRecommendationDetailView,
     AiRecommendationDraftView,
@@ -278,6 +283,8 @@ class ProtocolAiRecommendationTests(TestCase):
         self.assertEqual(job.customer_profile_id, self.profile.pk)
         self.assertEqual(job.requested_by_id, self.admin.pk)
         self.assertEqual(job.supplement_ids, [self.vitamin.pk])
+        outbox = ProtocolAiOutbox.objects.get(job=job)
+        self.assertEqual(outbox.status, ProtocolAiOutboxStatus.PENDING)
         self.assertEqual(Protocol.objects.count(), 0)
         publish_wake.assert_called_once_with(job.pk)
 
@@ -504,21 +511,102 @@ class ProtocolAiRecommendationTests(TestCase):
         self.assertEqual(job.status, ProtocolAiJobStatus.PROCESSING)
         self.assertEqual(job.attempt_count, 1)
 
+    def test_outbox_soft_miss_refunds_attempt(self):
+        job = ProtocolAiJob.objects.create(
+            customer_profile=self.profile,
+            requested_by=self.admin,
+            name="Sleep & Recovery",
+            purpose="Faster sleep onset",
+            supplement_ids=[self.vitamin.pk],
+            status=ProtocolAiJobStatus.PROCESSING,
+            attempt_count=1,
+        )
+        ProtocolAiJob.objects.filter(pk=job.pk).update(
+            updated_at=timezone.localtime() - timedelta(minutes=1),
+        )
+        outbox = ProtocolAiOutbox.objects.create(
+            job=job,
+            status=ProtocolAiOutboxStatus.PENDING,
+            attempt_count=0,
+        )
+        process_protocol_ai_outbox_by_id(outbox.pk)
+        outbox.refresh_from_db()
+        self.assertEqual(outbox.status, ProtocolAiOutboxStatus.PENDING)
+        self.assertEqual(outbox.attempt_count, 0)
+
+    def test_outbox_one_claim_runs_job_try_and_retry(self):
+        job = ProtocolAiJob.objects.create(
+            customer_profile=self.profile,
+            requested_by=self.admin,
+            name="Sleep & Recovery",
+            purpose="Faster sleep onset",
+            supplement_ids=[self.vitamin.pk],
+        )
+        outbox = ProtocolAiOutbox.objects.create(
+            job=job,
+            status=ProtocolAiOutboxStatus.PENDING,
+        )
+        with patch(
+            "supplementation.utils.protocol_ai.request_protocol_recommendation",
+            side_effect=[
+                ProtocolRecommendationError("Luma is unavailable."),
+                self.saved_result([ai_dose(self.vitamin.pk)]),
+            ],
+        ) as request_recommendation:
+            process_protocol_ai_outbox_by_id(outbox.pk)
+            process_protocol_ai_outbox_by_id(outbox.pk)
+        outbox.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(request_recommendation.call_count, 2)
+        self.assertEqual(outbox.status, ProtocolAiOutboxStatus.ACCEPTED)
+        self.assertEqual(outbox.attempt_count, 1)
+        self.assertEqual(job.status, ProtocolAiJobStatus.COMPLETED)
+        self.assertEqual(job.attempt_count, 2)
+
+    def test_outbox_failed_job_does_not_reclaim_outbox(self):
+        job = ProtocolAiJob.objects.create(
+            customer_profile=self.profile,
+            requested_by=self.admin,
+            name="Sleep & Recovery",
+            purpose="Faster sleep onset",
+            supplement_ids=[self.vitamin.pk],
+        )
+        outbox = ProtocolAiOutbox.objects.create(
+            job=job,
+            status=ProtocolAiOutboxStatus.PENDING,
+        )
+        with patch(
+            "supplementation.utils.protocol_ai.request_protocol_recommendation",
+            side_effect=ProtocolRecommendationError("Luma is unavailable."),
+        ) as request_recommendation:
+            process_protocol_ai_outbox_by_id(outbox.pk)
+            process_protocol_ai_outbox_by_id(outbox.pk)
+        outbox.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(request_recommendation.call_count, 2)
+        self.assertEqual(outbox.status, ProtocolAiOutboxStatus.FAILED)
+        self.assertEqual(outbox.attempt_count, 1)
+        self.assertEqual(job.status, ProtocolAiJobStatus.FAILED)
+        self.assertEqual(job.attempt_count, 2)
+
     @override_settings(
-        PROTOCOL_AI_WAKE_QUEUE_URL="https://sqs.ap-south-1.amazonaws.com/1/protocol-ai.fifo",
+        PROTOCOL_AI_OUTBOX_QUEUE_URL=(
+            "https://sqs.ap-south-1.amazonaws.com/1/protocol-ai-outbox-jobs"
+        ),
         AWS_REGION="ap-south-1",
     )
-    @patch("supplementation.utils.protocol_ai_wake.boto3.client")
+    @patch("integrations.utils.sqs_dispatch.boto3.client")
     def test_wake_message_names_that_job(self, boto_client):
-        job_id = uuid.uuid4()
-        publish_protocol_ai_wake(job_id)
+        job = self.create_job()
+        outbox = ProtocolAiOutbox.objects.create(job=job)
+        publish_protocol_ai_wake(job.pk)
         message = boto_client.return_value.send_message.call_args.kwargs
         self.assertEqual(
-            message["MessageBody"],
-            f"process_protocol_ai_jobs --job-id {job_id}",
+            json.loads(message["MessageBody"]),
+            {"job_ids": [str(outbox.pk)]},
         )
-        self.assertEqual(message["MessageDeduplicationId"], str(job_id))
-        self.assertEqual(message["MessageGroupId"], "protocol-ai-jobs")
+        outbox.refresh_from_db()
+        self.assertEqual(outbox.status, ProtocolAiOutboxStatus.QUEUED)
 
     def create_job(self):
         return ProtocolAiJob.objects.create(

@@ -24,7 +24,6 @@ class RookDeploymentConfigurationTests(SimpleTestCase):
         self.assertFalse(validate_rook_callback("https://example.com/return?token=abc"))
 
     @override_settings(
-        WEARABLES_ENABLED=True,
         ROOK_PROVISIONED_SOURCES="Garmin",
         ROOK_BASE_URL="https://api.rook-connect.review",
         ROOK_CLIENT_UUID="",
@@ -41,7 +40,6 @@ class RookDeploymentConfigurationTests(SimpleTestCase):
         self.assertIn("ROOK_WEBHOOK_HASH_KEY", errors)
 
     @override_settings(
-        WEARABLES_ENABLED=True,
         ROOK_PROVISIONED_SOURCES="Garmin",
         ROOK_BASE_URL="https://api.rook-connect.review",
         ROOK_CLIENT_UUID="testing-uuid",
@@ -50,7 +48,30 @@ class RookDeploymentConfigurationTests(SimpleTestCase):
         ROOK_AUTHORIZATION_ALLOWED_HOSTS=["connect.garmin.com"],
         ROOK_CALLBACK_URL="https://bpk.example/r",
         ROOK_ALLOW_UNSIGNED_WEBHOOKS=False,
+        ROOK_API_REQUESTS_PER_MINUTE=60,
+        ROOK_API_REQUESTS_PER_DAY=1000,
     )
     def test_configured_api_provider_reports_no_local_errors(self):
         findings = rook_readiness_checks()
         self.assertFalse([f for f in findings if f[0] == "ERROR"])
+
+    @override_settings(ROOK_API_REQUESTS_PER_MINUTE=None,
+                       ROOK_API_REQUESTS_PER_DAY=None)
+    def test_missing_api_budgets_fail_readiness(self):
+        errors = {name for severity, name, _ in rook_readiness_checks() if severity == "ERROR"}
+        self.assertIn("ROOK_API_REQUESTS_PER_MINUTE", errors)
+        self.assertIn("ROOK_API_REQUESTS_PER_DAY", errors)
+
+    @override_settings(ROOK_API_REQUESTS_PER_MINUTE=0,
+                       ROOK_API_REQUESTS_PER_DAY="0")
+    def test_zero_api_budgets_fail_readiness(self):
+        errors = {name for severity, name, _ in rook_readiness_checks() if severity == "ERROR"}
+        self.assertIn("ROOK_API_REQUESTS_PER_MINUTE", errors)
+        self.assertIn("ROOK_API_REQUESTS_PER_DAY", errors)
+
+    @override_settings(ROOK_API_REQUESTS_PER_MINUTE=60,
+                       ROOK_API_REQUESTS_PER_DAY=1000)
+    def test_positive_api_budgets_pass_readiness(self):
+        errors = {name for severity, name, _ in rook_readiness_checks() if severity == "ERROR"}
+        self.assertNotIn("ROOK_API_REQUESTS_PER_MINUTE", errors)
+        self.assertNotIn("ROOK_API_REQUESTS_PER_DAY", errors)

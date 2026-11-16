@@ -3,7 +3,7 @@ from django.http import HttpResponse
 from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
 
-from integrations.communications.outbox import process_whatsapp_webhook_payload
+from integrations.communications.whatsapp.outbox import process_whatsapp_webhook_payload
 from integrations.communications.whatsapp.signature import (
     verify_whatsapp_webhook_signature,
 )

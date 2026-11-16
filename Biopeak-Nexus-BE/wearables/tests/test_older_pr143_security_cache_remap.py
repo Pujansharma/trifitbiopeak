@@ -88,7 +88,7 @@ class OlderPR143SecurityAndCacheTests(SimpleTestCase):
         self.assertEqual(payload["cards"], [{"domain": "heart"}])
         refresh.assert_called_once_with(profile)
 
-    @override_settings(WEARABLES_ENABLED=True, CACHES=TEST_CACHE_SETTINGS)
+    @override_settings(CACHES=TEST_CACHE_SETTINGS)
     def test_local_memory_throttling_is_reported_as_deployment_warning(self):
         findings = rook_readiness_checks()
         self.assertTrue(any(

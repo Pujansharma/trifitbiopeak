@@ -81,7 +81,7 @@ def build_attachment_from_report(
         return None
 
     file_name = (report.get("file_name") or "").strip() or f"report-{report_id}.pdf"
-    file_type = (report.get("file_type") or "").strip() or DEFAULT_FILE_TYPE_LABEL
+    file_type = DEFAULT_FILE_TYPE_LABEL
     attachment_id = f"diag-report-{order.pk}-{report_id}"
     metadata_id = f"diag-meta-{order.pk}-{report_id}"
     category_label = ModuleCategoryType.CLINICAL_LAB_DIAGNOSTICS.label

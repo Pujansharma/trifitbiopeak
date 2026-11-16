@@ -155,6 +155,14 @@ Values: `queued` | `completed` | `resolved` | `skipped`. FE can ignore or show �
   "exclusive_start": "ISO-8601",
   "exclusive_end": "ISO-8601",
   "cancel_reason": "",
+  "staff_notes": [
+    {
+      "id": "uuid",
+      "text": "…",
+      "created_by": { "id": "uuid", "email": "…", "full_name": "…" },
+      "created_at": "ISO-8601"
+    }
+  ],
   "exception_resolution_hint": null,
   "created_at": "ISO-8601",
   "updated_at": "ISO-8601"
@@ -162,6 +170,8 @@ Values: `queued` | `completed` | `resolved` | `skipped`. FE can ignore or show �
 ```
 
 `exception_resolution_hint`: string when `has_open_exception`; null otherwise.
+`staff_notes`: admin/associate responses only (omitted for customers). Append-only, oldest first. Empty array when none.
+Separate from booking `notes`. Add via `POST /appointments/{id}/staff-notes/` (admin/associate; center access via appointment’s center). Body `{ "text": "…" }` (max 1000). No edit/delete.
 
 ---
 
@@ -178,7 +188,7 @@ Base: `/centers/<center_id>/appointments/`
 | Staff (admin/associate) | **Required** — omit/empty → 400 |
 | Customer | **Forbidden** — key present → 400; server least-busy auto-assign |
 
-**Purpose:** One calendar day of bookable combos for a customer + service. Customer: past date → 400; starts before now omitted; with `program_service_id`, date must overlap `now+24h`…`now+7d` and each start is clipped. Staff: past dates allowed; elapsed starts returned. Staff + `program_service_id`: same date window as customer; starts are **not** clipped on the preferred engine.
+**Purpose:** One calendar day of slots for a customer + service. Customer: past date → 400; starts before now omitted; free-only; with `program_service_id`, date must overlap `now+24h`…`now+7d` and each start is clipped. Staff: past dates allowed; elapsed starts returned; schedule-base grid includes unavailable starts flagged `is_unavailable`. Staff + `program_service_id`: same date window as customer; starts are **not** clipped on the preferred engine.
 
 **Body (always required)**
 
@@ -231,7 +241,7 @@ Omit empty preferred keys (blank UUID → 400). Never send `care_team_id` with d
 
 Engine: `find_appointment_slots`. Preferred `specialty_id` stays a single UUID.
 
-Staff starts are every 15 minutes on the clock, from the overlap of center hours and the chosen doctor, specialty, care team, room, and equipment. A start is returned only when the service plus its buffers fits entirely in that free time. `17:30` and `17:45` are absent when free time ends at 18:00 and the service is 45 minutes (last start `17:15`). A 25-minute service ends at `17:30`. Each slot `end` is `start` plus 15 minutes. Book `end` is still `start` plus `duration_minutes`. Customer auto-assign stays on the service length.
+Staff starts are every 15 minutes on the clock, from the overlap of center hours and preferred resource **schedules** (associate roster ∩ center hours; room/equipment use center hours). A start is returned when the service plus its buffers fits that schedule base. Busy appointments, blocks, closures, maintenance, and customer conflicts do **not** omit the cell — they set `is_unavailable: true` (key omitted when bookable). `17:30` and `17:45` are absent when schedule ends at 18:00 and the service is 45 minutes (last start `17:15`). A 25-minute service ends at `17:30`. Each slot `end` is `start` plus 15 minutes. Book `end` is still `start` plus `duration_minutes`. Customer auto-assign stays free-only on the service length (no `is_unavailable`).
 
 #### Customer mode — no `preferred` (auto-assign)
 
@@ -280,6 +290,7 @@ Server picks least-busy free staff / room / equipment from service mappings (`fi
     {
       "start": "ISO-8601",
       "end": "ISO-8601",
+      "is_unavailable": true,
       "care_team": { "id": "uuid", "name": "…" },
       "doctor": { "id": "uuid", "name": "…" },
       "specialty": {
@@ -294,7 +305,7 @@ Server picks least-busy free staff / room / equipment from service mappings (`fi
 }
 ```
 
-Each slot = one combo. Nested keys only when present. Auto-assign: no `care_team`; `specialty` may be an array. FE book: extract `id`s into flattened body (`specialty_id` = UUID | UUID[] from auto-assign).
+Each slot = one combo. Nested keys only when present. Staff: `is_unavailable: true` only when the start cannot be booked (omit key when free). Cap 200 counts both. Auto-assign: no `care_team`; no `is_unavailable`; `specialty` may be an array. FE book: extract `id`s into flattened body (`specialty_id` = UUID | UUID[] from auto-assign); do not book `is_unavailable` slots.
 
 **Common 400:** preferred missing (staff) · preferred sent (customer) · profile not owned · invalid customer/service · modality · room/equipment rules · care_team XOR · no staff · auto-assign mapping failures · customer past date · customer outside slot/book datetime windows.
 
@@ -316,8 +327,8 @@ Each slot = one combo. Nested keys only when present. Auto-assign: no `care_team
 | `service_id` | yes | |
 | `program_service_id` | customer yes; staff optional | Therapy `ProgramService` line. Customer omit/null → 400. Staff omit/null → walk-in (`program_service` null). When set (customer or staff): ownership + service match + redeemable center + sessions left; one open apt per line; appointment local date must be on/before `program.expires_at` (null = open-ended). After expiry → 400 `"This package expires on <D Mon YYYY>. Please choose a date on or before it."` |
 | `modality` | yes | `virtual` \| `in_person` |
-| `start` | yes | ISO datetime. `end` = `start` + assignment duration. Customer / no account: past → 400 `"Date cannot be in the past."` Staff walk-in (omit `program_service_id`): past OK; confirm notify skipped. When `program_service_id` set: `start` in **`now+4h` … `now+7d`** else 400 `"Start must be between 4 hours and 7 days from now."` |
-| `end` | yes | |
+| `start` | yes | ISO datetime. Server sets `end` = `start` + assignment duration. Customer / no account: past → 400 `"Date cannot be in the past."` Staff walk-in (omit `program_service_id`): past OK; confirm notify skipped. When `program_service_id` set: `start` in **`now+4h` … `now+7d`** else 400 `"Start must be between 4 hours and 7 days from now."` |
+| `end` | no | Ignored if sent. Server always computes `start` + center-service duration. |
 | `room_id` | in_person | Forbidden for virtual |
 | `equipment_id` | if room has bookable equipment | null when room has none; forbidden for virtual |
 | `doctor_id` / `specialty_id` | XOR care_team | Doctor + specialty OK together. `specialty_id` = UUID \| UUID[] (one or many specialties). Each specialty stamps a distinct service-mapped non-doctor role. |
@@ -333,7 +344,6 @@ Each slot = one combo. Nested keys only when present. Auto-assign: no `care_team
   "program_service_id": "…",
   "modality": "in_person",
   "start": "2026-09-05T04:00:00Z",
-  "end": "2026-09-05T04:40:00Z",
   "specialty_id": "…",
   "room_id": "…",
   "equipment_id": "…"
@@ -352,7 +362,7 @@ Multi-specialty (from Slots V2 array):
 
 **Response:** 201 `data` = appointment detail. Idempotent replay: 200 same shape.
 
-**Common 400:** staff XOR · room/equipment rules · slot no longer available · invalid IDs for center · duration mismatch.
+**Common 400:** staff XOR · room/equipment rules · slot no longer available · invalid IDs for center · missing service duration.
 
 ---
 
@@ -415,7 +425,7 @@ Week/month and unscoped `search` (no `start`) hard-cap **500** via `LIMIT 501` (
 
 **Purpose:** Appointments for that profile (every center).
 
-**Query:** optional `therapy_service_program=0|1`
+**Query:** `page`, `limit` (default 10, max 50). Optional `therapy_service_program=0|1`
 | Value | Result |
 |---|---|
 | `1` | only rows with `program_service_id` set (therapy program) |
@@ -424,7 +434,7 @@ Week/month and unscoped `search` (no `start`) hard-cap **500** via `LIMIT 501` (
 
 **Sort:** `in_progress` → `confirmed` → `checked_in` → `completed` → `cancelled` → `no_show`, then `start_datetime` ascending.
 
-**Response `data`:** `{ "appointments": [...], "truncated": false, "total_count": N }` — same list item shape as staff calendar list.
+**Response:** paginated envelope — `count`, `next`, `previous`, `data` = appointment array (same list item shape as staff calendar list).
 
 Bruno: `bruno/appointments/calendar/GET Customer Appointments.bru`.
 

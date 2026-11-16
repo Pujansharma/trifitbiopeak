@@ -70,7 +70,7 @@ not organizers - see "Picking which calendar hosts the event" below).
    connected email" below. The frontend's only job at this point is to show
    a toast and re-fetch its status query.
 6. **When an appointment is created/rescheduled/cancelled**, after the DB
-   write commits we enqueue a Google Calendar row on `CommunicationOutbox`
+   write commits we enqueue a Google Calendar row on `GoogleCalendarOutbox`
    (same hook as WhatsApp). A wake worker / 15-minute sweep calls
    `insert_event()` / `patch_event()` / `delete_event()` and saves the
    Google event's ID + Meet link on `Appointment.google_event_id` /
@@ -237,11 +237,12 @@ just not through the shared flow's endpoint.
 | `google_access_token_expires_at` | Date + time (optional) | When `google_access_token` stops working                                                                      | Lets the code check "has this expired?" and refresh it first if so.                                                                                                                                     |
 | `last_synced_at`                 | Date + time (optional) | When `POST /google-calendar/sync/` last _completed successfully_ for this connection                          | Drives the "Last synced \_\_\_" label in Settings; null means never synced (or every attempt so far has failed). Personal-connect-only in practice - the shared organizer account never calls `/sync/`. |
 | `watch_channel_id`               | String (optional)      | Our own random id (`uuid.uuid4()`) for the active Google push-notification channel                            | Identifies which channel a `POST /google-calendar/webhook/` call is about; also what we hand back to Google's `channels.stop` on disconnect. Indexed - the webhook looks connections up by this.        |
+| `watch_channel_token`            | String (optional)      | Shared secret (`secrets.token_urlsafe(32)`) passed to Google `events.watch` as `token`                        | Webhook must present it as `X-Goog-Channel-Token`; compared with `secrets.compare_digest`. Missing/mismatched token → ignore.                                                                          |
 | `watch_resource_id`              | String (optional)      | Google's own id for the watched calendar resource, returned by `events.watch`                                 | Google requires both `id` (channel id) and `resourceId` together to identify/stop a channel - neither alone is enough.                                                                                  |
 | `watch_expires_at`               | Date + time (optional) | When the current channel stops sending notifications                                                          | Google calendar watch channels aren't renewable in place - a new one is created ahead of this and the old one stopped, see "Personal calendar webhook" below.                                           |
 
 All four token/email columns are optional (nullable); `last_synced_at` and
-the three `watch_*` columns are too, and none of them are what decides
+the `watch_*` columns are too, and none of them are what decides
 whether the connection itself is still live (that's `is_active` +
 `google_refresh_token`, as above).
 
@@ -315,8 +316,8 @@ _hosts_ the event is a separate question from who's invited, and isn't tied
 to the assigned associates at all - see "Picking which calendar hosts the
 event" below.
 
-**`watch_channel_id` / `watch_resource_id` / `watch_expires_at`** on
-`GoogleCalendarConnection` back the push-notification
+**`watch_channel_id` / `watch_channel_token` / `watch_resource_id` /
+`watch_expires_at`** on `GoogleCalendarConnection` back the push-notification
 webhook - see "Personal calendar webhook (push notifications)" below.
 **Still intentionally left out:** no `sync_token` column - the webhook only
 triggers a re-run of the existing full-window `sync_google_events_to_availability_blocks()`,
@@ -326,12 +327,12 @@ efficiency improvement, not required for correctness (see that section).
 ## Event sync (book/reschedule/cancel)
 
 Sync is best-effort and **asynchronous**. Book / cancel / reschedule enqueue
-WhatsApp + Google Calendar rows on `CommunicationOutbox` via
+WhatsApp + Google Calendar rows on `GoogleCalendarOutbox` via
 `schedule_queue_*` (`transaction.on_commit`). The request never calls Google.
 **A Google Calendar failure must never block, fail, or roll back an
 appointment operation in Biopeak Nexus.**
 
-Worker: `uv run manage.py process_communication_outbox` (wake on insert +
+Worker: `uv run manage.py process_google_calendar_outbox` (wake on insert +
 15-minute sweep). `process_google_outbox_message` calls
 `sync_appointment_with_google()` in `integrations/google_calendar/google_sync.py`.
 That function **desired-states** from the live appointment (not a replay of
@@ -382,9 +383,18 @@ invite / update / cancel emails (`sendUpdates=all` = all attendees) go to
 associates only.
 
 **On book** - worker `insert_event()` with deterministic id, `need_meet_link=True`
-only when `modality` is `virtual`. Title `"Appointment Confirmed"`.
+only when `modality` is `virtual`. Title
+`"Appointment Confirmed : <client> | <service> | <center> | <start>"`
+(`google_event_title()`), e.g. `"Appointment Confirmed : Ravi Kumar |
+Consultation | Indiranagar | 15 Sep 2026, 02:30 PM"`. `<start>` is
+`start_datetime` in the center's timezone (`format_center_datetime()` in
+`appointments/utils/calendar.py`).
+`<client>` is the profile's first and last name; an empty name part is left
+out, and the whole `<client>` part is left out when the profile has no name.
+Google uses the title as the invite email subject, after its own prefix
+("Invitation:", "Updated invitation:", "Canceled event:").
 
-**On reschedule** - title `"Appointment Rescheduled"`. Patch existing id;
+**On reschedule** - title `"Appointment Rescheduled : <client> | <service> | <center> | <start>"`. Patch existing id;
 404/410 → insert. `add_meet_link` only when virtual and no Meet link yet.
 `clear_meet_link` when leaving virtual.
 
@@ -421,7 +431,7 @@ Rows with no value (no room, no notes, ...) are left out. Google Calendar render
 
 `cancel` has no equivalent - cancel only calls `delete_event()`, which doesn't
 touch the title or `description`. Google's own "Canceled event" email therefore
-shows the **last** title/description (e.g. "Appointment Confirmed" / "A new
+shows the **last** title/description (e.g. "Appointment Confirmed : ..." / "A new
 appointment has been booked."); the "Canceled event" subject is what marks it
 as cancelled.
 
@@ -679,7 +689,7 @@ completes successfully - not on every click, and not on a failed one.
 
 Reverse of inbound sync: when staff create/update/soft-off an associate
 **block** (one-off or recurring) or **leave** in Biopeak, the API enqueues a
-`CommunicationOutbox` row (`channel=google_calendar`, event
+`GoogleCalendarOutbox` row (event
 `associate_block_sync` / `associate_leave_sync`) via
 `schedule_queue_associate_block_sync` /
 `schedule_queue_associate_leave_sync` (`transaction.on_commit`). The same
@@ -725,7 +735,7 @@ row in the series rebuilds from all still-active siblings.
 **Not connected.** Outbox still enqueued; worker marks `SKIPPED` with
 `"Personal Google Calendar not connected"` (no Google HTTP).
 
-**Schema.** `CommunicationOutbox.appointment` is nullable; exactly one of
+**Schema.** `GoogleCalendarOutbox.appointment` is nullable; exactly one of
 `appointment` / `associate_availability_block` / `associate_leave` /
 `availability_series_id` (DB check). Partial unique on open PENDING/FAILED
 google rows per series/block/leave target. User runs migrations for new columns
@@ -753,7 +763,7 @@ Calendar API (`calendar_api.watch_events()`) with a fresh random channel id
 (`uuid.uuid4()`), asking Google to POST to `https://api.biopeak.com/google-calendar/webhook/`
 whenever that calendar changes. Google's response (`resourceId`, and the
 `expiration` it actually granted - which can be shorter than the
-`WATCH_TTL` requested) is persisted onto the four `watch_*` columns (see
+`WATCH_TTL` requested) is persisted onto the `watch_*` columns (see
 "Database columns" above). **This is entirely best-effort** - a failure here
 is logged and swallowed (`GOOGLE_SYNC_ERRORS`), never surfaced as a
 connect/sync failure, since the connection is still fully usable through
@@ -766,23 +776,28 @@ availability sync`), so `personal_connections_needing_watch_renewal()`
 explicitly excludes whichever connection holds that email.
 
 **Renewal.** Google Calendar watch channels aren't renewable in place - a
-new channel has to be created and the old one stopped. `uv run manage.py
-process_google_calendar_channel_expiry_renewal` (same style as
-`process_communication_outbox`) should run on a daily schedule; it calls
-`ensure_watch_channel_active()` for every personal connection whose channel
-is missing (no channel or no expiry) or expires within a day. A renewal creates the new channel first and only then stops the old one, so a failed start keeps the old channel. Even without that command running, a
-channel gets renewed lazily the next time that user hits `POST /sync/` -
-the scheduled command just means it happens without anyone needing to.
+new channel has to be created and the old one stopped. EventBridge runs
+`uv run manage.py run_google_calendar_schedule` every 15 minutes
+(Asia/Kolkata); that entrypoint reclaims/dispatches `GoogleCalendarOutbox`
+and renews personal watches via
+`renew_expiring_google_calendar_watch_channels()` (same helpers as manual
+`process_google_calendar_channel_expiry_renewal`). It renews every personal
+connection whose channel is missing or expires within a day. A renewal
+creates the new channel first and only then stops the old one, so a failed
+start keeps the old channel. Even without the schedule, a channel gets
+renewed lazily the next time that user hits `POST /sync/`.
 
 **Receiving a notification.** `POST /google-calendar/webhook/`
 (`GoogleCalendarWebhookView`, public - Google is calling, not an
-authenticated frontend request) reads three headers Google sends, no body:
-`X-Goog-Channel-ID`, `X-Goog-Resource-ID`, `X-Goog-Resource-State`. It looks
-up an active `GoogleCalendarConnection` by channel id + resource id
-(`find_connection_for_watch_channel()`) - an unrecognized channel is logged
-and ignored, not rejected with an error status. `channel_id` is a random
-`uuid.uuid4()` we mint ourselves and never expose outside the
-Google<->server exchange, so this id+resource-id match is the verification.
+authenticated frontend request) reads four headers Google sends, no body:
+`X-Goog-Channel-ID`, `X-Goog-Channel-Token`, `X-Goog-Resource-ID`,
+`X-Goog-Resource-State`. It looks up an active `GoogleCalendarConnection` by
+channel id + resource id (`find_connection_for_watch_channel()`), then
+verifies `X-Goog-Channel-Token` against `watch_channel_token` with
+`secrets.compare_digest`. Unrecognized channel or token mismatch is logged
+and ignored, not rejected with an error status (always 200 so Google does not
+disable the channel). `channel_id` + `token` are minted locally and never
+exposed outside the Google↔server exchange.
 `X-Goog-Resource-State: sync` is
 Google's one-time handshake right when the channel is first created, not a
 real change - it's a no-op. Any other state (`exists`, the only other value
@@ -806,7 +821,7 @@ optimization, not a correctness requirement today.
 
 **Disconnecting stops the channel.** `DELETE /google-calendar/disconnect/`
 calls `stop_watch_channel()` before revoking the OAuth grant, which calls
-Google's `channels.stop` and clears all four `watch_*` columns. Same
+Google's `channels.stop` and clears all `watch_*` columns. Same
 best-effort philosophy as everywhere else here: if Google can't be reached,
 the columns are still cleared locally (so a stale channel id can never
 falsely match a future notification) and disconnect proceeds regardless -
@@ -816,7 +831,7 @@ an unstopped channel simply expires on Google's side on its own.
 
 | Endpoint                         | Auth          | What it does                                                                                                                                                                  |
 | -------------------------------- | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /google-calendar/webhook/` | None (public) | Google's push-notification callback. Verified via channel id + resource id match, not JWT. Always responds 200. See above for what it does with each `X-Goog-Resource-State`. |
+| `POST /google-calendar/webhook/` | None (public) | Google's push-notification callback. Verified via channel id + resource id + channel token match, not JWT. Always responds 200. See above for what it does with each `X-Goog-Resource-State`. |
 
 ## Required `.env` values
 

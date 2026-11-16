@@ -14,6 +14,7 @@ from appointments.utils.emails import (
 from core.utils.constants import AppointmentModes
 from integrations.google_calendar.google_sync import (
     google_calendar_event_id,
+    google_event_title,
     sync_appointment_with_google,
 )
 from integrations.tests.test_whatsapp_outbox import create_appointment
@@ -73,6 +74,27 @@ class GoogleEventIdTests(TestCase):
         self.assertEqual(google_calendar_event_id(appointment), appointment.pk.hex)
 
 
+class GoogleEventTitleTests(TestCase):
+    def test_missing_name_parts_are_left_out(self):
+        appointment = create_appointment()
+        profile = appointment.customer_profile
+        details = "Outbox Service QA | Outbox Center | 15 Sep 2026, 02:30 PM"
+        cases = [
+            ("Out", None, f"Appointment Confirmed : Out | {details}"),
+            (None, "Box", f"Appointment Confirmed : Box | {details}"),
+            (None, None, f"Appointment Confirmed : {details}"),
+            ("", "", f"Appointment Confirmed : {details}"),
+        ]
+        for first_name, last_name, expected in cases:
+            with self.subTest(first_name=first_name, last_name=last_name):
+                profile.first_name = first_name
+                profile.last_name = last_name
+                self.assertEqual(
+                    google_event_title(appointment, has_reschedule_history=False),
+                    expected,
+                )
+
+
 @override_settings(GOOGLE_CALENDAR_ID="care@biopeak.health")
 @patch("integrations.google_calendar.google_sync.get_valid_access_token")
 @patch("integrations.google_calendar.google_sync.get_fixed_calendar_organizer")
@@ -119,7 +141,11 @@ class GoogleDesiredStateTests(TestCase):
         kwargs = mock_insert.call_args.kwargs
         self.assertCountEqual(kwargs["participant_emails"], [DOCTOR_EMAIL, COACH_EMAIL])
         self.assertNotIn(CUSTOMER_EMAIL, kwargs["participant_emails"])
-        self.assertEqual(kwargs["title"], "Appointment Confirmed")
+        self.assertEqual(
+            kwargs["title"],
+            "Appointment Confirmed : Out Box | Outbox Service QA | Outbox Center | "
+            "15 Sep 2026, 02:30 PM",
+        )
         self.assertIn("A new appointment has been booked.", kwargs["notes"])
 
     @patch("integrations.google_calendar.google_sync.calendar_api.patch_event")
@@ -134,7 +160,11 @@ class GoogleDesiredStateTests(TestCase):
         sync_appointment_with_google(self.appointment.pk)
         kwargs = mock_patch.call_args.kwargs
         self.assertEqual(kwargs["participant_emails"], [DOCTOR_EMAIL])
-        self.assertEqual(kwargs["title"], "Appointment Rescheduled")
+        self.assertEqual(
+            kwargs["title"],
+            "Appointment Rescheduled : Out Box | Outbox Service QA | Outbox Center | "
+            "15 Sep 2026, 02:30 PM",
+        )
         self.assertIn("This appointment has been rescheduled.", kwargs["notes"])
 
     @patch("integrations.google_calendar.google_sync.calendar_api.delete_event")

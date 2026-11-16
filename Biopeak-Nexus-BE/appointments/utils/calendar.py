@@ -5,7 +5,7 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
-from accounts.centers.models import CenterClosure, CenterOperatingHour
+from accounts.centers.models import Center, CenterClosure, CenterOperatingHour
 from appointments.models import (
     AssociateAvailabilityBlock,
     AssociateLeave,
@@ -51,6 +51,17 @@ def center_local_date(center, when=None):
     if timezone.is_naive(moment):
         moment = timezone.make_aware(moment, timezone.get_current_timezone())
     return moment.astimezone(ZoneInfo(get_center_timezone_name(center))).date()
+
+
+def format_center_datetime(center: Center, moment: datetime) -> str:
+    """
+    Show a datetime as the center's local date and 12-hour time.
+
+    Input:  center (Asia/Kolkata), 2026-09-15 09:00 UTC
+    Output: "15 Sep 2026, 02:30 PM"
+    """
+    local = timezone.localtime(moment, ZoneInfo(get_center_timezone_name(center)))
+    return local.strftime("%d %b %Y, %I:%M %p")
 
 
 def recurring_block_in_query_range(query_start, query_end):

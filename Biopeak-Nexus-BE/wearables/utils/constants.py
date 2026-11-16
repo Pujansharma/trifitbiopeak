@@ -152,13 +152,9 @@ class DocumentStatus(models.TextChoices):
 
 
 class HealthJobType(models.TextChoices):
-    NORMALIZE_DOCUMENT = "normalize_document", "Normalize document"
-    REFRESH_ANALYTICS = "refresh_analytics", "Refresh analytics"
-    REFRESH_CONNECTION = "refresh_connection", "Refresh connection"
-    REVOKE_CONNECTION = "revoke_connection", "Revoke connection"
-    RECOVERY_PULL = "recovery_pull", "ROOK recovery pull"
-    FRESHNESS_CHECK = "freshness_check", "Freshness check"
-    REMAP_TIMEZONE = "remap_timezone", "Remap member local dates"
+    AUTHORISE_ROOK_CONNECTION = "authorise_rook_connection", "Authorise Rook connection"
+    REVOKE_ROOK_CONNECTION = "revoke_rook_connection", "Revoke Rook connection"
+    FETCH_ROOK_DATA = "fetch_rook_data", "Fetch Rook data"
 
 
 class HealthJobStatus(models.TextChoices):
@@ -178,8 +174,9 @@ class PreferredUnits(models.TextChoices):
     IMPERIAL = "imperial", "Imperial"
 
 
-# Shared limits for the job queue and the public health timeline.
-HEALTH_MAXIMUM_JOB_ATTEMPTS = 3
+# Outbox attempts: auth = try 1 / retry 0; data_fetch = try 1 / retry 1.
+MAX_ROOK_AUTH_OUTBOX_ATTEMPTS = 1
+MAX_ROOK_DATA_FETCH_OUTBOX_ATTEMPTS = 2
 HEALTH_TIMELINE_MAXIMUM_OFFSET = 1000
 HEALTH_TIMELINE_MAXIMUM_LIMIT = 200
 
@@ -234,4 +231,3 @@ LOWER_IS_BETTER_METRICS = {
     "average_heart_rate",
     "stress_level",
 }
-

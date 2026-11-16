@@ -1,0 +1,32 @@
+digraph ROOK {
+  graph [rankdir=TB, bgcolor="white", pad=0.35, nodesep=0.35, ranksep=0.5, fontname="Arial", dpi=145];
+  node [shape=box, style="rounded,filled", fillcolor="#F1F5F9", color="#CBD5E1", fontname="Arial", fontsize=13, margin="0.19,0.14"];
+  edge [color="#64748B", fontname="Arial", fontsize=10, arrowsize=0.75];
+  app [label="App requests\nConnect / Sync / Disconnect", fillcolor="#E0E7FF"];
+  nightly [label="Nightly discovery\nMissing pull coverage or at least 7 days old", fillcolor="#E0E7FF"];
+  webhook [label="ROOK data webhook\nVerify signature and save document", fillcolor="#E0E7FF"];
+  jobs [label="1. Save durable jobs in PostgreSQL\nHealthProcessingJob is the work queue", fillcolor="#1E3A5F", fontcolor="white", fontsize=15];
+  wake [label="2. Optional SQS wake hints\nTwo dedicated queues\nA lost wake does not lose the job", fillcolor="#FFF7ED", color="#FDBA74"];
+  health [label="Health worker\nVerify authorization / revoke access\nProcess webhook documents", fillcolor="#DBEAFE"];
+  recovery [label="Recovery workers\nUp to 5 global slots; one pull per connection\nInitial, manual and nightly pulls", fillcolor="#DBEAFE"];
+  provider [label="ROOK summary API\nFetch a bounded date/category slice\nOutside database write transactions", fillcolor="#F8FAFC"];
+  persist [label="3. Persist and process\nCheck consent, authorization and job ownership\nSave observations, summaries and checkpoints", fillcolor="#E0F2FE"];
+  analytics [label="Build affected analytics and snapshots\nRefresh available data progressively\nFinish pull coverage after all checks succeed", fillcolor="#E0F2FE"];
+  reads [label="4. App reads Biopeak APIs\nDevices: sync progress and separate timestamps\nDashboard / domains / timeline: saved health data", fillcolor="#DCFCE7", color="#86EFAC"];
+  app -> jobs;
+  nightly -> jobs;
+  webhook -> jobs [label="normalization job"];
+  jobs -> health [label="claim due work"];
+  jobs -> recovery [label="claim due pulls"];
+  jobs -> wake [style=dashed, label="after commit"];
+  wake -> health [style=dashed, label="wake only"];
+  wake -> recovery [style=dashed];
+  health -> persist [label="webhook data"];
+  recovery -> provider;
+  provider -> persist;
+  persist -> analytics;
+  analytics -> reads;
+  {rank=same; app; nightly; webhook;}
+  {rank=same; health; recovery;}
+  {rank=same; wake; provider;}
+}

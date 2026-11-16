@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand
 
-from appointments.utils.exceptions import process_pending_exception_scans
+from appointments.appointment_integrity.scans import process_pending_exception_scans
 
 
 class Command(BaseCommand):

@@ -111,12 +111,14 @@ docs {
   have an active room type, and room_type_ref in that set (OR).
 
   Response data: {date, timezone, duration_minutes, buffer_before_minutes, buffer_after_minutes, slots[], truncated}.
-  Staff slots: starts every 15 minutes. Returned only when service + buffers fit in
-  center hours ∩ chosen resources, minus bookings. Slot end = start + 15 minutes.
-  Book end = start + duration_minutes. Customer auto-assign stays on service length.
-  Each slot: {start, end} + nested care_team / doctor / specialty / room / equipment
-  ({id, name}; specialty also role {id, name}). Omit key if not in preferred.
-  No associates[]. No bare *_id. Book: slot.doctor.id → doctor_id, etc.
-  Cap 200/day. Customer busy is global across centers.
+  Staff slots: starts every 15 minutes on center hours ∩ preferred resource schedules
+  (roster for associates; center hours for room/equipment). Service + buffers must fit
+  that schedule base. Busy / blocks / closures / maint / customer conflict do NOT drop
+  the cell — they set is_unavailable: true (omit key when bookable). Slot end = start +
+  15 minutes. Book end = start + duration_minutes. Customer auto-assign stays free-only
+  (no is_unavailable). Each slot: {start, end} + nested care_team / doctor / specialty /
+  room / equipment ({id, name}; specialty also role {id, name}). Omit key if not in
+  preferred. No associates[]. No bare *_id. Book: slot.doctor.id → doctor_id, etc.
+  Cap 200/day counts available + unavailable. Customer busy is global across centers.
   care_team_id + doctor_id/specialty_id → 400.
 }

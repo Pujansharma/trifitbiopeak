@@ -165,3 +165,4 @@ class AiRecommendationListStatus:
     FAILED = "failed"
     PENDING = "pending"
     COMPLETED = "completed"
+

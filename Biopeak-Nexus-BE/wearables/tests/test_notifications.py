@@ -14,7 +14,7 @@ from wearables.utils.constants import (
 
 
 class NotificationNormalizationTests(TestCase):
-    def test_authorization_completed_event_starts_historical_import(self):
+    def test_authorization_completed_does_not_authorize_from_notification_text(self):
         connection = SimpleNamespace(
             status=ConnectionStatus.AUTHORIZING,
             authorization_status=AuthorizationStatus.PENDING,
@@ -25,10 +25,10 @@ class NotificationNormalizationTests(TestCase):
         text = notification_text({"event_type": "authorization_completed"})
         apply_notification_state(connection, text)
 
-        self.assertEqual(connection.status, ConnectionStatus.IMPORTING)
+        self.assertEqual(connection.status, ConnectionStatus.AUTHORIZING)
         self.assertEqual(
             connection.authorization_status,
-            AuthorizationStatus.AUTHORIZED,
+            AuthorizationStatus.PENDING,
         )
 
     def test_provider_name_is_canonicalized(self):
@@ -37,7 +37,7 @@ class NotificationNormalizationTests(TestCase):
             "Garmin",
         )
 
-    def test_rook_user_connected_action_starts_import_without_claiming_completion(self):
+    def test_rook_user_connected_does_not_authorize_or_start_import_from_text(self):
         connection = SimpleNamespace(
             status=ConnectionStatus.AUTHORIZING,
             authorization_status=AuthorizationStatus.PENDING,
@@ -46,5 +46,17 @@ class NotificationNormalizationTests(TestCase):
         )
         text = notification_text({"action": "user_connected", "message": "A user linked a wearable"})
         apply_notification_state(connection, text)
-        self.assertEqual(connection.status, ConnectionStatus.IMPORTING)
-        self.assertEqual(connection.import_status, HistoricalImportStatus.RUNNING)
+        self.assertEqual(connection.status, ConnectionStatus.AUTHORIZING)
+        self.assertEqual(connection.authorization_status, AuthorizationStatus.PENDING)
+        self.assertEqual(connection.import_status, HistoricalImportStatus.NOT_STARTED)
+
+    def test_already_authorized_connected_notification_is_idempotent(self):
+        connection = SimpleNamespace(
+            status=ConnectionStatus.ACTIVE,
+            authorization_status=AuthorizationStatus.AUTHORIZED,
+            import_status=HistoricalImportStatus.COMPLETED,
+            last_successful_sync=None,
+        )
+        apply_notification_state(connection, "user connected")
+        self.assertEqual(connection.status, ConnectionStatus.ACTIVE)
+        self.assertEqual(connection.authorization_status, AuthorizationStatus.AUTHORIZED)

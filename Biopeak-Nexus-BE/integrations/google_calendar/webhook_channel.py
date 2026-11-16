@@ -1,3 +1,4 @@
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -68,15 +69,16 @@ def stop_watch_channel(connection):
 
 def start_watch_channel(connection):
     channel_id = str(uuid.uuid4())
+    channel_token = secrets.token_urlsafe(32)
     access_token = get_valid_access_token(connection)
     watch = calendar_api.watch_events(
-        access_token, channel_id, webhook_address(), WATCH_TTL,
+        access_token, channel_id, webhook_address(), WATCH_TTL, channel_token,
     )
     expires_at = timezone.localtime(
         datetime.fromtimestamp(int(watch["expiration"]) / 1000, tz=UTC)
     )
     persist_google_calendar_watch_channel(
-        connection, channel_id, watch["resourceId"], expires_at,
+        connection, channel_id, watch["resourceId"], expires_at, channel_token,
     )
 
 
@@ -127,3 +129,23 @@ def ensure_watch_channel_active_or_log(connection):
             f"Google Calendar watch: failed to (re)register a notification "
             f"channel for user {connection.pk}: {error}"
         )
+
+
+def renew_expiring_google_calendar_watch_channels() -> tuple[int, int]:
+    """
+    Renew personal watch channels near expiry.
+    Returns (renewed_count, failed_count).
+    """
+    renewed = 0
+    failed = 0
+    for connection in personal_connections_needing_watch_renewal():
+        try:
+            ensure_watch_channel_active(connection)
+        except GOOGLE_SYNC_ERRORS as error:
+            failed += 1
+            logger.warning(
+                f"Failed to renew channel for user {connection.pk}: {error}"
+            )
+            continue
+        renewed += 1
+    return renewed, failed

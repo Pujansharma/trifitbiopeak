@@ -104,6 +104,7 @@ class BaseCustomerProfileSerializer(BaseModelSerializer):
         list_serializer_class = ConsentGivenListSerializer
         fields = [
             "id",
+            "unique_id",
             "contact_email",
             "phone",
             "first_name",
@@ -168,6 +169,7 @@ class CustomerProfileSerializer(BaseModelSerializer):
         list_serializer_class = ConsentGivenListSerializer
         fields = [
             "id",
+            "unique_id",
             "contact_email",
             "phone",
             "first_name",
@@ -381,6 +383,9 @@ class CenterCustomerProfileHomeCenterSerializer(BaseModelSerializer):
     """Serializer for center admins to list, create, and update customer profiles"""
 
     id = serializers.UUIDField(source="customer_profile.id", read_only=True)
+    unique_id = serializers.CharField(
+        source="customer_profile.unique_id", read_only=True
+    )
     contact_email = serializers.EmailField(
         source="customer_profile.customer.contact_email", required=False
     )
@@ -429,6 +434,7 @@ class CenterCustomerProfileHomeCenterSerializer(BaseModelSerializer):
         model = CustomerCenterAssignment
         fields = [
             "id",
+            "unique_id",
             "contact_email",
             "phone",
             "first_name",

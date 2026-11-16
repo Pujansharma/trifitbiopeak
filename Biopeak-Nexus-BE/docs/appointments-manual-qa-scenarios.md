@@ -520,13 +520,12 @@ Staff Find Slots: use `start` from the slot. Set book `end` to `start` plus `dur
 - **Expected status**: `201`
 - **Expected data**: Notes are `null`
 
-### BOOK-05: End does not match service duration
+### BOOK-05: Client `end` ignored — server uses duration
 
 - **Priority**: P0
-- **Request**: Change `end` by one minute
-- **Expected status**: `400`
-- **Expected detail**: `Appointment end time does not match configured duration.`
-- **Expected data**: No appointment created
+- **Request**: Send wrong or omit `end` (e.g. staff slot `start+15m`, or `start+duration+1m`)
+- **Expected status**: `201`
+- **Expected data**: Stored `end` = `start` + center-service duration; wrong client `end` ignored
 
 ### BOOK-06: Slot became unavailable
 

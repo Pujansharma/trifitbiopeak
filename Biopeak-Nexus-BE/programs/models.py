@@ -25,6 +25,7 @@ class Program(BaseUUIDModel):
     expires_at = models.DateField(null=True, blank=True)
     is_complimentary = models.BooleanField(default=True)
     is_credit = models.BooleanField(default=False)
+    is_part_of_package = models.BooleanField(default=False, editable=False)
     price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     credit_received = models.DecimalField(
         max_digits=10, decimal_places=2, null=True, blank=True,

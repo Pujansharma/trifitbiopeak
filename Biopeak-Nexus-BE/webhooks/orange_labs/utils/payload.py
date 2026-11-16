@@ -1,3 +1,7 @@
+from django.utils import timezone
+
+from integrations.orange_labs.utils.helper import apply_orange_report_filenames
+
 REPORT_EVENTS = (
     "test.completed_sent",
     "order.completed",
@@ -71,4 +75,7 @@ def merge_reports_by_id(existing_reports, incoming_reports):
             continue
         reports_by_id[slimmed_report["id"]] = slimmed_report
 
-    return list(reports_by_id.values())
+    return apply_orange_report_filenames(
+        list(reports_by_id.values()),
+        timezone.localtime().date(),
+    )

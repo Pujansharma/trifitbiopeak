@@ -13,7 +13,7 @@ from accounts.customers.models import Customer, CustomerProfile
 from accounts.models import UserAccount
 from accounts.users.models import User
 from accounts.utils.constants import UserType
-from wearables.models import WearableConnection, WearableConnectionEvent
+from wearables.models import RookOutbox, WearableConnection, WearableConnectionEvent
 from wearables.services.client import RookServiceError
 from wearables.services.connections import (
     connection_attempt_origin,
@@ -22,7 +22,9 @@ from wearables.services.connections import (
     start_connection,
 )
 from wearables.services.identity import get_or_create_rook_identity
-from wearables.utils.constants import AuthorizationStatus, ConnectionStatus
+from wearables.services.job_claims import claim_health_job
+from wearables.services.authorization_jobs import process_authorise_rook_connection
+from wearables.utils.constants import AuthorizationStatus, ConnectionStatus, HealthJobType
 
 
 @override_settings(
@@ -78,7 +80,7 @@ class ReconnectAuthorizationHostTests(TestCase):
         self.assertFalse(WearableConnectionEvent.objects.filter(connection=self.connection).exists())
         authorizer.assert_not_called()
 
-    @patch("wearables.services.connections.enqueue_or_reuse_recovery_job")
+    @patch("wearables.services.connections.enqueue_or_reuse_fetch_rook_data_job")
     @patch("wearables.services.connections.RookClient.get_authorized_sources", return_value={"Garmin"})
     @patch("wearables.services.client.RookClient.request_json")
     def test_rejected_host_stays_disconnected_then_valid_host_reimports(
@@ -105,6 +107,8 @@ class ReconnectAuthorizationHostTests(TestCase):
         self.assertEqual(self.connection.status, ConnectionStatus.AUTHORIZING)
         enqueue_job.return_value = (SimpleNamespace(pk="existing-recovery"), False)
         refresh_authorizing_connections(self.profile)
+        queued = RookOutbox.objects.get(customer_profile=self.profile, job_type=HealthJobType.AUTHORISE_ROOK_CONNECTION)
+        self.assertTrue(process_authorise_rook_connection(claim_health_job(queued.pk))["authorized"])
         self.connection.refresh_from_db()
         self.assertEqual(self.connection.status, ConnectionStatus.HISTORICAL_REIMPORT)
         self.assertEqual(self.connection.authorization_status, AuthorizationStatus.AUTHORIZED)

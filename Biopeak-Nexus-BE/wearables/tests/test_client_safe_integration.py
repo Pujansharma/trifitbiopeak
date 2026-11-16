@@ -14,8 +14,9 @@ from wearables.services.oauth import (
     OAuthStateError,
     _decode_state,
     callback_url_for_connection,
+    complete_oauth_callback,
 )
-from wearables.services.timeline import _page_gaps, timeline_payload
+from wearables.services.timeline import _timeline_gaps, timeline_payload
 from wearables.services.client import RookConfigurationError
 from wearables.utils.constants import HealthCardState
 
@@ -25,7 +26,7 @@ class CallbackStateContractTests(SimpleTestCase):
     @patch("wearables.services.oauth.WearableConnectionEvent.objects.create")
     def test_callback_state_opaque_and_separate_from_customer_identity(self, create):
         create.return_value = SimpleNamespace()
-        connection = SimpleNamespace(status="authorizing", data_source="Garmin")
+        connection = SimpleNamespace(status="authorizing", data_source="Garmin", authorization_generation="test-generation")
         result = callback_url_for_connection(connection, actor_user=object())
         url = urlsplit(result)
         token = url.path.rsplit("/", 1)[-1]
@@ -56,27 +57,26 @@ class CallbackStateContractTests(SimpleTestCase):
 
     @override_settings(ROOK_CLIENT_UUID="tenant-rook-client")
     def test_client_uuid_mismatch_rejected_before_db_query(self):
-        from wearables.services.oauth import complete_oauth_callback
         with self.assertRaises(OAuthStateError):
             complete_oauth_callback("aaaabbbbccccdddd", rook_client_uuid="other-client", rook_user_id="x")
 
 
 class CombinedTimelineContractTests(SimpleTestCase):
-    def test_gaps_ignore_clinical_entries(self):
-        entries = [
-            {"sourceType": "wearable", "domain": "sleep", "localDate": date(2026, 10, 1)},
-            {"sourceType": "wearable", "domain": "sleep", "localDate": date(2026, 10, 4)},
-            {"sourceType": "lab", "domain": None, "localDate": date(2026, 10, 2)},
-        ]
-        gaps = _page_gaps(entries)
+    @patch("wearables.services.timeline.HealthObservation.objects.filter")
+    def test_gaps_use_full_wearable_history_not_a_clinical_page(self, observations):
+        observations.return_value.order_by.return_value.values_list.return_value.distinct.return_value.iterator.return_value = iter([
+            ("sleep", date(2026, 10, 1)), ("sleep", date(2026, 10, 4)),
+        ])
+        gaps = _timeline_gaps(customer_profile=SimpleNamespace(), start_date=None, end_date=None, domain=None)
         self.assertEqual(len(gaps), 1)
         self.assertEqual(gaps[0]["missingDays"], 2)
         self.assertEqual(gaps[0]["state"], HealthCardState.HISTORICAL_GAP)
 
     @override_settings(TIMELINE_INCLUDE_LEGACY_RESULTS=True)
+    @patch("wearables.services.timeline._timeline_gaps", return_value=[])
     @patch("wearables.services.timeline._clinical_entries")
     @patch("wearables.services.timeline._wearable_entries")
-    def test_timeline_merges_sorted_profile_scoped_sources_and_paginates(self, wearable, clinical):
+    def test_timeline_merges_sorted_profile_scoped_sources_and_paginates(self, wearable, clinical, gaps):
         when = lambda n: datetime(2026, 10, n, tzinfo=timezone.utc)
         wearable.return_value = [
             {"id": "w", "timestamp": when(2), "sourceType": "wearable", "domain": "sleep", "localDate": date(2026, 10, 2)},
@@ -94,9 +94,10 @@ class CombinedTimelineContractTests(SimpleTestCase):
         clinical.assert_called_once()
 
     @override_settings(TIMELINE_INCLUDE_LEGACY_RESULTS=True)
+    @patch("wearables.services.timeline._timeline_gaps", return_value=[])
     @patch("wearables.services.timeline._clinical_entries")
     @patch("wearables.services.timeline._wearable_entries", return_value=[])
-    def test_domain_filtered_timeline_never_reads_clinical_data(self, wearable, clinical):
+    def test_domain_filtered_timeline_never_reads_clinical_data(self, wearable, clinical, gaps):
         timeline_payload(customer_profile=SimpleNamespace(), start_date=None,
                          end_date=None, domain="heart", offset=0, limit=10)
         clinical.assert_not_called()

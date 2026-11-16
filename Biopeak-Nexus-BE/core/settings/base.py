@@ -214,9 +214,8 @@ SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 
 # Health snapshots stay database-backed: the dedicated health cache is disabled.
-# DRF ScopedRateThrottle already uses the application's default Django cache.
-# LocMemCache provides per-process limits without Redis; for consistent limits
-# across workers, BioPeak must configure an approved shared default cache.
+# DRF ScopedRateThrottle uses LocMemCache (per-process). Outbound ROOK budgets
+# use Postgres RookRequestBudget, not this cache.
 CACHES = {
     "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"},
     "health": {"BACKEND": "django.core.cache.backends.dummy.DummyCache"},

@@ -29,6 +29,7 @@ from appointments.models import (
     Appointment,
     AppointmentAuditLog,
     AppointmentHistory,
+    AppointmentStaffNote,
     AssociateLeave,
     AssociateRosterEntry,
     CareTeamAvailabilityBlock,
@@ -42,6 +43,7 @@ from appointments.serializers.booking import (
     AppointmentMarkLateSerializer,
     AppointmentRescheduleSerializer,
     AppointmentSlotFindSerializer,
+    serialize_appointment_detail,
 )
 from appointments.serializers.care_teams import CenterCareTeamSerializer
 from appointments.tests.test_customer_appointment_auth import (
@@ -78,8 +80,10 @@ from appointments.utils.transitions import validate_transition
 from appointments.views.booking import (
     AppointmentAuditLogListView,
     AppointmentBookView,
+    AppointmentDetailView,
     AppointmentRescheduleView,
     AppointmentSlotFindView,
+    AppointmentStaffNoteCreateView,
 )
 from core.utils.constants import AppointmentModes
 from inventory.models import Equipment, EquipmentType, Room, RoomType
@@ -97,7 +101,7 @@ def serialized_audit_datetime(value):
 
 
 KOLKATA = ZoneInfo("Asia/Kolkata")
-SLOT_DATE = date(2026, 9, 21)
+SLOT_DATE = next_weekday_slot_date()
 WEEKDAYS = ("0", "1", "2", "3", "4", "5")
 ILLEGAL_LIFECYCLE = (
     (AppointmentStatus.CONFIRMED, "start"),
@@ -201,9 +205,12 @@ def create_customer_profile(center, email, first_name="Pat", last_name="Ient"):
 
 def first_slot(slots_payload):
     slots = slots_payload["slots"]
+    for slot in slots:
+        if not slot.get("is_unavailable"):
+            return slot
     if not slots:
         raise AssertionError("expected at least one slot")
-    return slots[0]
+    raise AssertionError("expected at least one available slot")
 
 
 def parse_slot_datetimes(slot):
@@ -228,10 +235,23 @@ def assert_slot_has_no_pin_keys(test_case, slot):
         test_case.assertNotIn(pin_key, slot)
 
 
-def find_slots(center, payload):
+def find_slots(center, payload, *, staff=True):
+    context = {"center": center}
+    if staff:
+        factory = APIRequestFactory()
+        request = factory.post("/slots/", payload, format="json")
+        admin_user = User.objects.create_user(
+            email=f"slots-staff-{uuid4().hex}@example.com"
+        )
+        UserAccount.objects.create(
+            user=admin_user, account_type=UserType.ADMIN
+        )
+        force_authenticate(request, user=admin_user)
+        request.user = admin_user
+        context["request"] = request
     serializer = AppointmentSlotFindSerializer(
         data=payload,
-        context={"center": center},
+        context=context,
     )
     serializer.is_valid(raise_exception=True)
     validated = serializer.validated_data
@@ -242,6 +262,7 @@ def find_slots(center, payload):
         modality=validated["modality"],
         slot_date=validated["date"],
         preferred=validated.get("preferred"),
+        include_past=validated.get("include_past", False),
     )
 
 
@@ -650,11 +671,28 @@ class BookingHappyPathTests(BookingWorldTests):
             datetime.fromisoformat(slot["start"]).astimezone(zone).time()
             for slot in slots
         ]
+        unavailable_starts = {
+            datetime.fromisoformat(slot["start"]).astimezone(zone).time()
+            for slot in slots
+            if slot.get("is_unavailable")
+        }
+        available_starts = {
+            datetime.fromisoformat(slot["start"]).astimezone(zone).time()
+            for slot in slots
+            if not slot.get("is_unavailable")
+        }
         self.assertIn(time(9, 0), start_times)
-        self.assertNotIn(time(9, 15), start_times)
-        self.assertNotIn(time(10, 30), start_times)
-        self.assertIn(time(12, 0), start_times)
+        self.assertIn(time(9, 15), unavailable_starts)
+        self.assertIn(time(10, 30), unavailable_starts)
+        self.assertNotIn(time(9, 15), available_starts)
+        self.assertNotIn(time(10, 30), available_starts)
+        self.assertIn(time(12, 0), available_starts)
         self.assertEqual(start_times[-1], time(16, 30))
+        for slot in slots:
+            if slot.get("is_unavailable"):
+                self.assertTrue(slot["is_unavailable"])
+            else:
+                self.assertNotIn("is_unavailable", slot)
 
 
 class BookingValidationTests(BookingWorldTests):
@@ -667,6 +705,7 @@ class BookingValidationTests(BookingWorldTests):
                     **self.virtual_slot_payload(),
                     "date": past_date.isoformat(),
                 },
+                staff=False,
             )
         self.assertIn("Date cannot be in the past.", drf_error_text(raised.exception))
 
@@ -1361,6 +1400,136 @@ class LifecycleTests(BookingWorldTests):
                 "end": serialized_audit_datetime(second_end),
             },
         )
+
+    def test_staff_note_create_authz_and_detail_visibility(self):
+        UserAccount.objects.create(
+            user=self.actor,
+            account_type=UserType.ASSOCIATE,
+        )
+        self.actor.first_name = "Life"
+        self.actor.last_name = "Doctor"
+        self.actor.save(update_fields=["first_name", "last_name"])
+        start = timezone.now()
+        end = start + timedelta(minutes=30)
+        appointment = Appointment.objects.create(
+            center=self.center,
+            code="BK-NOTE-1",
+            customer_profile=self.customer_profile,
+            service=self.service,
+            modality=AppointmentModes.VIRTUAL,
+            start_datetime=start,
+            end_datetime=end,
+            duration_minutes=30,
+            exclusive_start_datetime=start,
+            exclusive_end_datetime=end,
+            status=AppointmentStatus.CONFIRMED,
+        )
+        factory = APIRequestFactory()
+        create_request = factory.post(
+            f"/appointments/{appointment.pk}/staff-notes/",
+            {"text": "Patient prefers morning slots"},
+            format="json",
+        )
+        force_authenticate(create_request, user=self.actor)
+        create_response = AppointmentStaffNoteCreateView.as_view()(
+            create_request,
+            pk=appointment.pk,
+        )
+        self.assertEqual(create_response.status_code, 201)
+        self.assertEqual(create_response.data["detail"], "Staff note created.")
+        note_data = create_response.data["data"]
+        self.assertEqual(note_data["text"], "Patient prefers morning slots")
+        self.assertEqual(note_data["created_by"]["id"], str(self.actor.pk))
+        self.assertEqual(note_data["created_by"]["full_name"], "Life Doctor")
+        self.assertEqual(AppointmentStaffNote.objects.filter(appointment=appointment).count(), 1)
+
+        other_center = Center.objects.create(
+            name="Other Note Center",
+            code="BK-NOTE-O",
+            modes=AppointmentModes.BOTH,
+        )
+        other_start = start + timedelta(days=1)
+        other_end = other_start + timedelta(minutes=30)
+        other_appointment = Appointment.objects.create(
+            center=other_center,
+            code="BK-NOTE-2",
+            customer_profile=self.customer_profile,
+            service=self.service,
+            modality=AppointmentModes.VIRTUAL,
+            start_datetime=other_start,
+            end_datetime=other_end,
+            duration_minutes=30,
+            exclusive_start_datetime=other_start,
+            exclusive_end_datetime=other_end,
+            status=AppointmentStatus.CONFIRMED,
+        )
+        hidden = factory.post(
+            f"/appointments/{other_appointment.pk}/staff-notes/",
+            {"text": "Should not land"},
+            format="json",
+        )
+        force_authenticate(hidden, user=self.actor)
+        hidden_response = AppointmentStaffNoteCreateView.as_view()(
+            hidden,
+            pk=other_appointment.pk,
+        )
+        self.assertEqual(hidden_response.status_code, 404)
+        self.assertEqual(hidden_response.data["detail"], "Appointment not found.")
+
+        customer_user = self.customer_profile.customer.user
+        UserAccount.objects.create(
+            user=customer_user,
+            account_type=UserType.CUSTOMER,
+        )
+        customer_post = factory.post(
+            f"/appointments/{appointment.pk}/staff-notes/",
+            {"text": "Customer must not write"},
+            format="json",
+        )
+        force_authenticate(customer_post, user=customer_user)
+        customer_create = AppointmentStaffNoteCreateView.as_view()(
+            customer_post,
+            pk=appointment.pk,
+        )
+        self.assertEqual(customer_create.status_code, 403)
+
+        too_long = factory.post(
+            f"/appointments/{appointment.pk}/staff-notes/",
+            {"text": "x" * 1001},
+            format="json",
+        )
+        force_authenticate(too_long, user=self.actor)
+        too_long_response = AppointmentStaffNoteCreateView.as_view()(
+            too_long,
+            pk=appointment.pk,
+        )
+        self.assertEqual(too_long_response.status_code, 400)
+
+        staff_detail_request = factory.get(
+            f"/centers/{self.center.pk}/appointments/{appointment.pk}/",
+        )
+        force_authenticate(staff_detail_request, user=self.actor)
+        staff_detail = AppointmentDetailView.as_view()(
+            staff_detail_request,
+            center_id=self.center.pk,
+            pk=appointment.pk,
+        )
+        self.assertEqual(staff_detail.status_code, 200)
+        self.assertIn("staff_notes", staff_detail.data["data"])
+        self.assertEqual(len(staff_detail.data["data"]["staff_notes"]), 1)
+        self.assertEqual(
+            staff_detail.data["data"]["staff_notes"][0]["text"],
+            "Patient prefers morning slots",
+        )
+
+        customer_detail_request = factory.get("/detail/")
+        force_authenticate(customer_detail_request, user=customer_user)
+        customer_detail_request.user = customer_user
+        customer_payload = serialize_appointment_detail(
+            appointment,
+            customer_detail_request,
+        )
+        self.assertNotIn("staff_notes", customer_payload)
 
 
 class ExceptionRaisingTests(BookingWorldTests):

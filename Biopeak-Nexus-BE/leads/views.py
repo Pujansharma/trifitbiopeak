@@ -1,9 +1,11 @@
+from smtplib import SMTPException
+
 from django.db import transaction
 from django.db.models import F, Q, Value
 from django.db.models.functions import Concat
 
 from accounts.utils.permissions import IsAdminUser, IsAssociateUser
-from core.utils.exceptions import get_object_or_404
+from core.utils.exceptions import ServiceUnavailable, get_object_or_404
 from core.utils.views import (
     BaseCreateAPIView,
     BaseGenericAPIView,
@@ -11,13 +13,16 @@ from core.utils.views import (
     BaseRetrieveUpdateAPIView,
     BaseRetrieveUpdateDestroyAPIView,
 )
+from leads.metadata import LeadsMetadata
 from leads.models import Lead
 from leads.serializers import (
     LeadConvertClientSerializer,
     LeadDetailSerializer,
     LeadListCreateSerializer,
+    LeadOpsOnboardingEmailSerializer,
     LeadV2DetailSerializer,
     LeadV2ListCreateSerializer,
+    LeadV2ListSerializer,
 )
 from leads.utils.constants import (
     LEAD_V1_CREATE_DEPRECATED,
@@ -31,6 +36,7 @@ from leads.utils.db import (
     decrement_leads_inactive,
     decrement_leads_total,
 )
+from leads.utils.emails import send_ops_onboarding_email
 
 
 class LeadListViewMeta(BaseGenericAPIView):
@@ -76,8 +82,10 @@ class LeadListViewMeta(BaseGenericAPIView):
                 "home_center",
                 "created_by",
                 "updated_by",
+                "customer_profile__addresses",
             )
             .select_related(
+                "composite_program_template",
                 "customer_profile",
                 "customer_profile__customer",
                 "customer_profile__customer__user",
@@ -90,13 +98,14 @@ class LeadDetailViewMeta(BaseGenericAPIView):
     @classmethod
     def get_lead_detail_queryset(cls):
         return Lead.objects.select_related(
+            "composite_program_template",
             "home_center",
             "customer_profile",
             "customer_profile__customer",
             "customer_profile__customer__user",
             "created_by",
             "updated_by",
-        )
+        ).prefetch_related("customer_profile__addresses")
 
     def get_queryset(self) -> object:
         return self.get_lead_detail_queryset()
@@ -105,6 +114,7 @@ class LeadDetailViewMeta(BaseGenericAPIView):
 class LeadsView(LeadListViewMeta, BaseListCreateAPIView):
     permission_classes = [IsAdminUser | IsAssociateUser]
     serializer_class = LeadListCreateSerializer
+    metadata_class = LeadsMetadata
 
     def get(self, request, *args, **kwargs):
         self.raise_bad_request(LEAD_V1_LIST_DEPRECATED)
@@ -119,7 +129,7 @@ class LeadsV2View(LeadListViewMeta, BaseListCreateAPIView):
     def get_serializer_class(self) -> type:
         if self.request.method == "POST":
             return LeadV2ListCreateSerializer
-        return LeadListCreateSerializer
+        return LeadV2ListSerializer
 
     def perform_create(self, serializer: LeadV2ListCreateSerializer) -> None:
         serializer.save(created_by=self.request.user)
@@ -166,6 +176,7 @@ class LeadActionMixin(BaseGenericAPIView):
 
     def get_lead(self) -> Lead:
         queryset = Lead.objects.select_related(
+            "composite_program_template",
             "home_center",
             "customer_profile",
             "customer_profile__customer",
@@ -186,3 +197,24 @@ class LeadConvertClientView(LeadActionMixin, BaseCreateAPIView):
             lead=self.get_lead(),
             updated_by=self.request.user,
         )
+
+
+class LeadOpsOnboardingEmailView(LeadActionMixin, BaseGenericAPIView):
+    serializer_class = LeadOpsOnboardingEmailSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        if not request.user.email:
+            self.raise_bad_request(
+                "Authenticated user must have an email address to CC."
+            )
+        try:
+            send_ops_onboarding_email(
+                self.get_lead(),
+                request.user,
+                serializer.validated_data,
+            )
+        except (SMTPException, OSError) as error:
+            raise ServiceUnavailable("Could not send the onboarding email.") from error
+        return self.send_response("Onboarding email sent.")

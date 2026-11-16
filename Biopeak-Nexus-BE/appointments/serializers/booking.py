@@ -2,6 +2,7 @@ from datetime import timedelta
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
+from django.db.models import prefetch_related_objects
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -16,6 +17,7 @@ from appointments.models import (
     AppointmentAuditLog,
     AppointmentHistory,
     AppointmentIdempotencyKey,
+    AppointmentStaffNote,
 )
 from appointments.utils.codes import generate_appointment_code
 from appointments.utils.calendar import center_local_date
@@ -53,7 +55,7 @@ from appointments.utils.transitions import (
     validate_transition,
 )
 from core.utils.constants import AppointmentModes
-from core.utils.serializers import BaseSerializer
+from core.utils.serializers import BaseModelSerializer, BaseSerializer
 from integrations.communications import (
     schedule_queue_appointment_cancelled,
     schedule_queue_appointment_confirmed,
@@ -266,6 +268,14 @@ def resolve_center_service(center, service_id):
     return service
 
 
+def appointment_end_from_assignment(start, assignment):
+    if not assignment.duration:
+        raise serializers.ValidationError(
+            "Service duration is not configured for this center."
+        )
+    return start + timedelta(minutes=assignment.duration)
+
+
 def create_audit_log(appointment, actor, action, note=""):
     AppointmentAuditLog.objects.create(
         appointment=appointment,
@@ -406,6 +416,18 @@ class AppointmentAuditLogSerializer(BaseSerializer):
         if details is None:
             return None
         return serializer_class(details).data
+
+
+class AppointmentStaffNoteSerializer(BaseModelSerializer):
+    created_by = AppointmentAuditActorSerializer(read_only=True, allow_null=True)
+
+    class Meta:
+        model = AppointmentStaffNote
+        fields = ["id", "text", "created_by", "created_at"]
+
+    def create(self, validated_data):
+        with transaction.atomic():
+            return AppointmentStaffNote.objects.create(**validated_data)
 
 
 def create_appointment_associates(
@@ -624,7 +646,6 @@ class AppointmentBookSerializer(BaseSerializer):
     program_service_id = serializers.UUIDField(required=False, allow_null=True)
     modality = serializers.ChoiceField(choices=AppointmentModes.choices)
     start = serializers.DateTimeField()
-    end = serializers.DateTimeField()
     doctor_id = serializers.UUIDField(required=False, allow_null=True)
     specialty_id = SpecialtyIdField(required=False, allow_null=True)
     care_team_id = serializers.UUIDField(required=False, allow_null=True)
@@ -699,6 +720,7 @@ class AppointmentBookSerializer(BaseSerializer):
                 "Service is not available at this center."
             )
         attrs["assignment"] = assignment
+        attrs["end"] = appointment_end_from_assignment(attrs["start"], assignment)
         if not request_account_is_staff(request):
             ensure_start_not_in_past(attrs["start"])
         if attrs.get("program_service") is not None:
@@ -845,6 +867,7 @@ class AppointmentDetailSerializer(AppointmentListSerializer):
     exclusive_start = serializers.DateTimeField(source="exclusive_start_datetime")
     exclusive_end = serializers.DateTimeField(source="exclusive_end_datetime")
     cancel_reason = serializers.CharField()
+    staff_notes = AppointmentStaffNoteSerializer(many=True, read_only=True)
     exception_resolution_hint = serializers.SerializerMethodField(
         help_text=(
             "Open-exception resolve guidance. Cancel and reschedule remain "
@@ -867,6 +890,24 @@ class AppointmentDetailSerializer(AppointmentListSerializer):
             "Resolve open exceptions by cancelling, rescheduling, "
             "or acknowledging."
         )
+
+
+def serialize_appointment_detail(appointment, request=None):
+    """Staff responses include staff_notes; customers never see the key."""
+    include_staff_notes = (
+        request is not None
+        and get_user_account_type(request.user)
+        in (UserType.ADMIN, UserType.ASSOCIATE)
+    )
+    if include_staff_notes:
+        cache = getattr(appointment, "_prefetched_objects_cache", None)
+        if cache is None or "staff_notes" not in cache:
+            prefetch_related_objects([appointment], "staff_notes__created_by")
+    omit_fields = [] if include_staff_notes else ["staff_notes"]
+    return AppointmentDetailSerializer(
+        appointment,
+        context={"omit_fields": omit_fields},
+    ).data
 
 
 class AppointmentCancelSerializer(BaseSerializer):

@@ -4,7 +4,10 @@ from django.core.files.base import ContentFile
 from django.utils import timezone
 
 from core.utils.log import logger
-from integrations.orange_labs.utils.helper import get_orange_result_dates
+from integrations.orange_labs.utils.helper import (
+    get_orange_report_filename,
+    get_orange_result_dates,
+)
 from programs.composites.utils.db import (
     update_composite_program_document_counts,
     update_composite_program_results_count,
@@ -74,18 +77,29 @@ def save_orange_result_data(
         f"result_request_id={result_request.pk}"
     )
 
+    result_dates = get_orange_result_dates(metadata["orders"])
+    report_date = (
+        result_dates["report_generation_date"] or timezone.localtime().date()
+    )
     service_result = save_result_request_result(
         result_request,
         ServiceDocumentType.BLOOD,
         defaults={
             "data": metadata,
-            **get_orange_result_dates(metadata["orders"]),
+            **result_dates,
         },
     )
 
     documents = []
-    for order, pdf_report in zip(metadata["orders"], result_files, strict=True):
-        file_name = order["report_file_name"]
+    for report_number, (order, pdf_report) in enumerate(
+        zip(metadata["orders"], result_files, strict=True),
+        start=1,
+    ):
+        file_name = get_orange_report_filename(
+            report_date,
+            report_number,
+            order.get("report_file_name") or "",
+        )
         with pdf_report:
             file_content = pdf_report.getvalue()
         file = ContentFile(content=file_content, name=file_name)

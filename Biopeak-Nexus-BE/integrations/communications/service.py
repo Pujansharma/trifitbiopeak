@@ -14,16 +14,10 @@ from integrations.communications.outbox import (
     enqueue_associate_leave_sync,
     enqueue_whatsapp_only_message,
 )
-from integrations.communications.wake import publish_outbox_wake
-from integrations.models import CommunicationOutbox
-from integrations.utils.constants import (
-    CommunicationChannel,
-    CommunicationEventType,
-    CommunicationOutboxStatus,
-)
+from integrations.models import WhatsAppOutbox
+from integrations.utils.constants import CommunicationEventType
 
 REMINDER_LEAD = timedelta(hours=1)
-# Match process_communication_outbox default --limit so one sweep drains what it enqueues.
 REMINDER_ENQUEUE_LIMIT = 50
 
 
@@ -169,9 +163,8 @@ def due_reminder_appointments(*, now=None, limit: int = REMINDER_ENQUEUE_LIMIT):
     if now is None:
         now = timezone.now()
     window_end = now + REMINDER_LEAD
-    existing_reminder = CommunicationOutbox.objects.filter(
+    existing_reminder = WhatsAppOutbox.objects.filter(
         appointment_id=OuterRef("pk"),
-        channel=CommunicationChannel.WHATSAPP,
         event_type=CommunicationEventType.APPOINTMENT_REMINDER,
     )
     return (
@@ -192,8 +185,8 @@ def due_reminder_appointments(*, now=None, limit: int = REMINDER_ENQUEUE_LIMIT):
 
 def enqueue_due_appointment_reminders(*, limit: int = REMINDER_ENQUEUE_LIMIT) -> list:
     """
-    Create WhatsApp reminder outbox rows for due appointments.
-    No SQS wake — sweep drains outbox in the same job.
+    Create WhatsApp reminder rows for due appointments.
+    wake=False — caller (run_whatsapp_reminder_schedule) dispatches batches.
     """
     return [
         enqueue_whatsapp_only_message(
@@ -205,17 +198,6 @@ def enqueue_due_appointment_reminders(*, limit: int = REMINDER_ENQUEUE_LIMIT) ->
     ]
 
 
-def _wake_if_pending(message):
-    if message is None:
-        return message
-    if message.status in {
-        CommunicationOutboxStatus.PENDING,
-        CommunicationOutboxStatus.FAILED,
-    }:
-        publish_outbox_wake()
-    return message
-
-
 def queue_associate_block_sync(*, block_id=None, series_id=None):
     if series_id is not None:
         block = (
@@ -225,23 +207,21 @@ def queue_associate_block_sync(*, block_id=None, series_id=None):
         )
         if block is None or block.origin != AvailabilityOrigin.MANUAL:
             return None
-        return _wake_if_pending(enqueue_associate_block_sync(series_id=series_id))
+        return enqueue_associate_block_sync(series_id=series_id)
 
     block = AssociateAvailabilityBlock.objects.filter(pk=block_id).first()
     if block is None or block.origin != AvailabilityOrigin.MANUAL:
         return None
     if block.series_id is not None:
-        return _wake_if_pending(
-            enqueue_associate_block_sync(series_id=block.series_id)
-        )
-    return _wake_if_pending(enqueue_associate_block_sync(block=block))
+        return enqueue_associate_block_sync(series_id=block.series_id)
+    return enqueue_associate_block_sync(block=block)
 
 
 def queue_associate_leave_sync(leave_id):
     leave = AssociateLeave.objects.filter(pk=leave_id).first()
     if leave is None or leave.origin != AvailabilityOrigin.MANUAL:
         return None
-    return _wake_if_pending(enqueue_associate_leave_sync(leave))
+    return enqueue_associate_leave_sync(leave)
 
 
 def schedule_queue_associate_block_sync(*, block=None, series_id=None):

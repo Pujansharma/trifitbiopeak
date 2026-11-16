@@ -1,5 +1,7 @@
 # Phase 1 Wearables — Twelve PR Review Fixes (2026-10-19)
 
+> **SUPERSEDED (2026-11-16) for worker/scheduler claims.** Row 1 / lease / sweep guidance below is historical. Current path: `docs/ROOK_MANAGER_FLOWS.md` (`process_rook_auth_jobs` / `process_rook_data_fetch_jobs` / midnight scan). Credential and ORM hardening notes may still be useful.
+
 Baseline: user-supplied production archive `Biopeak-Nexus-BE(10).zip`. This patch is **only** the reviewer-requested wearables hardening and scheduler integration; do not overwrite live `.env`, `.git`, or Python virtual environments.
 
 ## Reviewer fixes (P0 = deploy blocker, P1 = high, P2 = coding/reliability)

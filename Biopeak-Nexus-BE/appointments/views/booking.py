@@ -31,6 +31,8 @@ from appointments.serializers.booking import (
     AppointmentMarkLateSerializer,
     AppointmentRescheduleSerializer,
     AppointmentSlotFindSerializer,
+    AppointmentStaffNoteSerializer,
+    serialize_appointment_detail,
 )
 from appointments.utils.calendar import get_center_timezone_name, parse_calendar_query_params
 from appointments.utils.constants import (
@@ -54,6 +56,7 @@ from appointments.utils.scheduling import (
 )
 from core.utils.db.functions import ExtractPartText
 from core.utils.exceptions import get_object_or_404
+from core.utils.pagination import BasePageNumberPagination
 from core.utils.views.main import BaseGenericAPIView, BaseListAPIView, BaseRetrieveAPIView
 
 LIST_CAP = 500
@@ -74,6 +77,7 @@ INVALID_APPOINTMENT_STATUS = (
     "Invalid status. Use confirmed, checked_in, in_progress, "
     "completed, cancelled, or no_show."
 )
+IDEMPOTENCY_HASH_IGNORED_KEYS = frozenset({"end"})
 
 
 def parse_optional_uuid_query(query_params, param_name):
@@ -182,6 +186,12 @@ class AppointmentBookingMixin(CenterAppointmentsMixin):
 
 
 def canonical_payload_hash(payload):
+    if isinstance(payload, dict):
+        payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in IDEMPOTENCY_HASH_IGNORED_KEYS
+        }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
 
@@ -239,7 +249,7 @@ def assert_customer_may_replay_idempotent_appointment(request, appointment):
 def idempotent_appointment_retrieved_response(view, request, existing_key):
     appointment = existing_key.appointment
     assert_customer_may_replay_idempotent_appointment(request, appointment)
-    detail = AppointmentDetailSerializer(appointment).data
+    detail = serialize_appointment_detail(appointment, request)
     return view.send_response(
         "Appointment retrieved.",
         detail,
@@ -395,7 +405,7 @@ class AppointmentBookView(AppointmentBookingMixin, BaseGenericAPIView):
             appointment_id=appointment.pk,
             duration_ms=duration_ms,
         )
-        detail = AppointmentDetailSerializer(appointment).data
+        detail = serialize_appointment_detail(appointment, request)
         return self.send_response("Appointment booked.", detail, status=201)
 
 
@@ -482,7 +492,8 @@ class AppointmentCustomerAppointmentsListView(BaseListAPIView):
 
     permission_classes = [IsCustomerUser]
     serializer_class = AppointmentListSerializer
-    pagination_class = None
+    pagination_class = BasePageNumberPagination
+    list_success_message = "Appointments retrieved."
 
     def get_customer_profile(self):
         return get_object_or_404(
@@ -526,16 +537,7 @@ class AppointmentCustomerAppointmentsListView(BaseListAPIView):
 
     def get(self, request, *args, **kwargs):
         started = time.monotonic()
-        queryset = self.get_queryset()
-        page = list(queryset[: LIST_CAP + 1])
-        truncated = len(page) > LIST_CAP
-        page = page[:LIST_CAP]
-        serializer = self.get_serializer(page, many=True)
-        data = {
-            "appointments": serializer.data,
-            "truncated": truncated,
-            "total_count": len(page),
-        }
+        response = super().get(request, *args, **kwargs)
         duration_ms = int((time.monotonic() - started) * 1000)
         log_appointment_event(
             "info",
@@ -544,22 +546,28 @@ class AppointmentCustomerAppointmentsListView(BaseListAPIView):
             action="customer_list",
             duration_ms=duration_ms,
         )
-        return self.send_response("Appointments retrieved.", data)
+        return response
 
 
 class AppointmentDetailView(AppointmentBookingMixin, BaseRetrieveAPIView):
     serializer_class = AppointmentDetailSerializer
 
     def get_object(self):
+        queryset = self.get_appointment_queryset()
+        if get_user_account_type(self.request.user) in (
+            UserType.ADMIN,
+            UserType.ASSOCIATE,
+        ):
+            queryset = queryset.prefetch_related("staff_notes__created_by")
         return get_object_or_404(
-            self.get_appointment_queryset(),
+            queryset,
             "Appointment not found.",
             pk=self.kwargs["pk"],
         )
 
     def get(self, request, *args, **kwargs):
         appointment = self.get_object()
-        data = AppointmentDetailSerializer(appointment).data
+        data = serialize_appointment_detail(appointment, request)
         return self.send_response("Appointment retrieved.", data)
 
 
@@ -596,6 +604,28 @@ class AppointmentAuditLogListView(BaseGenericAPIView):
             ).data,
         }
         return self.send_response("Appointment audit logs retrieved.", data)
+
+
+class AppointmentStaffNoteCreateView(BaseGenericAPIView):
+    permission_classes = [IsAdminUser | IsAssociateUser]
+    serializer_class = AppointmentStaffNoteSerializer
+
+    def post(self, request, *args, **kwargs):
+        appointment = get_object_or_404(
+            Appointment.objects.all(),
+            "Appointment not found.",
+            pk=self.kwargs["pk"],
+        )
+        if not appointment_center_allowed(request, appointment.center_id):
+            raise NotFound("Appointment not found.")
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(appointment=appointment, created_by=request.user)
+        return self.send_response(
+            "Staff note created.",
+            serializer.data,
+            status=201,
+        )
 
 
 class AppointmentLifecycleActionView(AppointmentBookingMixin, BaseGenericAPIView):
@@ -637,7 +667,7 @@ class AppointmentLifecycleActionView(AppointmentBookingMixin, BaseGenericAPIView
             appointment_id=appointment.pk,
             duration_ms=duration_ms,
         )
-        data = AppointmentDetailSerializer(appointment).data
+        data = serialize_appointment_detail(appointment, request)
         return self.send_response(self.success_message, data)
 
 
@@ -688,7 +718,7 @@ class AppointmentMarkLateView(AppointmentBookingMixin, BaseGenericAPIView):
             appointment_id=appointment.pk,
             duration_ms=duration_ms,
         )
-        data = AppointmentDetailSerializer(appointment).data
+        data = serialize_appointment_detail(appointment, request)
         return self.send_response("Appointment marked as late.", data)
 
 
@@ -722,7 +752,7 @@ class AppointmentCancelView(AppointmentBookingMixin, BaseGenericAPIView):
             appointment_id=appointment.pk,
             duration_ms=duration_ms,
         )
-        data = AppointmentDetailSerializer(appointment).data
+        data = serialize_appointment_detail(appointment, request)
         return self.send_response("Appointment cancelled.", data)
 
 
@@ -787,5 +817,5 @@ class AppointmentRescheduleView(AppointmentBookingMixin, BaseGenericAPIView):
             appointment_id=appointment.pk,
             duration_ms=duration_ms,
         )
-        data = AppointmentDetailSerializer(appointment).data
+        data = serialize_appointment_detail(appointment, request)
         return self.send_response("Appointment rescheduled.", data)

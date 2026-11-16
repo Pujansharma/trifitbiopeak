@@ -10,7 +10,7 @@ from wearables.services.identity import get_or_create_rook_identity
 from wearables.services.connections import get_or_create_connection
 from wearables.models import WearableConsent
 from wearables.utils.constants import ConsentStatus, ConnectionStatus, AuthorizationStatus, PermissionStatus
-from wearables.services.ingestion import ingest_rook_document, normalize_health_document
+from wearables.services.ingestion import ingest_rook_document
 
 
 class RookIngestionTests(TestCase):
@@ -63,16 +63,13 @@ class RookIngestionTests(TestCase):
                 signature_valid=True,
             )
 
-        self.assertTrue(first["queued"])
+        self.assertTrue(first["processed"])
+        self.assertFalse(first["queued"])
         self.assertTrue(replay["duplicate"])
         self.assertEqual(same_version_conflict["reason"], "same_version_conflict")
         self.assertEqual(correction["version"], 2)
         document = RookHealthDocument.objects.get()
         self.assertEqual(document.document_version, 2)
-        self.assertEqual(document.payload["accumulated_steps_int"], 7000)
-
-        with self.captureOnCommitCallbacks(execute=True):
-            normalize_health_document(document.pk)
+        self.assertEqual(document.payload, {})
         summary = HealthDailySummary.objects.get(metric="steps")
         self.assertEqual(summary.maximum, 7000.0)
-

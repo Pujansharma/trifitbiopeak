@@ -7,4 +7,8 @@ urlpatterns = [
         "<uuid:pk>/audit-logs/",
         booking.AppointmentAuditLogListView.as_view(),
     ),
+    path(
+        "<uuid:pk>/staff-notes/",
+        booking.AppointmentStaffNoteCreateView.as_view(),
+    ),
 ]

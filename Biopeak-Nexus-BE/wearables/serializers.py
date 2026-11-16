@@ -133,8 +133,8 @@ class NativeDeviceStatusSerializer(BaseSerializer):
 
 
 class DomainQuerySerializer(BaseSerializer):
-    # `days` remains backward compatible. `window=lifetime` permits the
-    # complete retained timeline without an arbitrary 365-day restriction.
+    # `days` remains backward compatible. `window=lifetime` uses the
+    # bounded maximum set by the analytics service, not unbounded history.
     days = serializers.IntegerField(min_value=1, max_value=365, default=90)
     window = serializers.ChoiceField(
         choices=("7d", "14d", "30d", "90d", "lifetime"), required=False,

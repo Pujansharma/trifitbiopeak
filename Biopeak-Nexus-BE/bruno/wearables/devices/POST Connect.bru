@@ -29,5 +29,5 @@ settings {
 }
 
 docs {
-  Requires consent; choose a provisioned source. Connect response provides authorizationUrl and ROOK identity; historical_days is capped by source/policy. Optional redirect_url is restricted by server policy.
+  Starts interactive provider authorization. The returned URL is still opened by the member. Backend verification is queued; successful verification queues the initial seven-day API history window. Do not treat a callback redirect as proof of authorization. Native sources still require the mobile SDK.
 }

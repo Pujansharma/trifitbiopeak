@@ -6,7 +6,8 @@ These tests deliberately mock external ROOK connectivity, not the Django ORM.
 import os
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
+from urllib.parse import urlsplit
 
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
@@ -16,15 +17,19 @@ from accounts.models import UserAccount
 from accounts.users.models import User
 from accounts.utils.constants import UserType
 from wearables.models import (
-    HealthProcessingJob, RookHealthDocument, WearableConsent,
+    HealthDomainSnapshot, RookOutbox, RookHealthDocument,
+    WearableConsent, WearableConnectionEvent,
 )
 from wearables.services.config import provisioned_sources
 from wearables.services.connections import (
     connection_experience_state, get_or_create_connection,
 )
 from wearables.services.identity import get_or_create_rook_identity
-from wearables.services.ingestion import ingest_rook_document, normalize_health_document
-from wearables.services.job_processor import enqueue_orphaned_normalization_jobs
+from wearables.services.ingestion import ingest_rook_document
+from wearables.services.job_claims import claim_health_job
+from wearables.services.job_selection import enqueue_orphaned_normalization_jobs
+from wearables.services.authorization_jobs import process_authorise_rook_connection
+from wearables.services.oauth import callback_url_for_connection, complete_oauth_callback
 from wearables.services.notifications import apply_notification_state, process_rook_notification
 from wearables.utils.constants import (
     AuthorizationStatus, ConnectionStatus, ConsentStatus, DocumentStatus,
@@ -92,11 +97,14 @@ class ReleaseNotificationStateTests(SimpleTestCase):
         self.assertEqual(connection_experience_state(device), ConnectionStatus.IDLE)
 
     @override_settings(ROOK_PROVISIONED_SOURCES=None, SETTINGS_MODULE="core.settings.development")
-    @patch("wearables.services.config.config", return_value="Garmin,Oura")
+    @patch("wearables.services.config.config", side_effect=[None, "Garmin,Oura"])
     @patch("wearables.services.config.os.environ.get", return_value=None)
     def test_dev_env_file_source_allowlist_is_read(self, environment_get, config):
         self.assertEqual(provisioned_sources(), {"Garmin", "Oura"})
-        config.assert_called_once_with("DEV_ROOK_PROVISIONED_SOURCES", default=None)
+        self.assertEqual(config.call_args_list, [
+            call("ROOK_PROVISIONED_SOURCES", default=None),
+            call("DEV_ROOK_PROVISIONED_SOURCES", default=None),
+        ])
 
 
 class ReleaseDurabilityTests(TestCase):
@@ -133,27 +141,31 @@ class ReleaseDurabilityTests(TestCase):
             "accumulated_steps_int": 8000,
         }
 
-    def test_accepted_webhook_and_normalization_job_are_one_transaction(self):
+    def test_accepted_webhook_normalizes_inline_without_normalize_job(self):
         result = ingest_rook_document(self.payload(), signature_valid=True)
-        self.assertTrue(result["queued"])
-        self.assertTrue(HealthProcessingJob.objects.filter(
+        self.assertTrue(result["processed"])
+        self.assertFalse(result["queued"])
+        self.assertFalse(RookOutbox.objects.filter(
             document_id=result["documentId"],
-            job_type=HealthJobType.NORMALIZE_DOCUMENT,
+            job_type="normalize_document",
         ).exists())
-        self.assertEqual(RookHealthDocument.objects.get(pk=result["documentId"]).status,
-                         DocumentStatus.QUEUED)
+        document = RookHealthDocument.objects.get(pk=result["documentId"])
+        self.assertEqual(document.status, DocumentStatus.PROCESSED)
+        self.assertEqual(document.payload, {})
 
-    def test_normalized_document_has_durable_analytics_refresh(self):
+    def test_normalized_document_refreshes_analytics_inline(self):
         result = ingest_rook_document(self.payload(), signature_valid=True)
-        with self.captureOnCommitCallbacks(execute=True):
-            normalized = normalize_health_document(result["documentId"])
-        self.assertIn("activity", normalized["domains"])
-        self.assertTrue(HealthProcessingJob.objects.filter(
+        self.assertIn("activity", result["normalize"]["domains"])
+        self.assertFalse(RookOutbox.objects.filter(
             document_id=result["documentId"],
-            job_type=HealthJobType.REFRESH_ANALYTICS,
+            job_type="refresh_analytics",
+        ).exists())
+        self.assertTrue(HealthDomainSnapshot.objects.filter(
+            customer_profile=self.profile,
+            domain="activity",
         ).exists())
 
-    def test_missing_normalization_job_is_recovered_once(self):
+    def test_missing_normalization_is_recovered_inline_once(self):
         result = ingest_rook_document(self.payload(), signature_valid=True,
                                       enqueue_normalization=False)
         document = RookHealthDocument.objects.get(pk=result["documentId"])
@@ -162,9 +174,12 @@ class ReleaseDurabilityTests(TestCase):
         recovery = enqueue_orphaned_normalization_jobs(grace_minutes=10)
         self.assertEqual(recovery["queued"], 1)
         self.assertEqual(enqueue_orphaned_normalization_jobs(grace_minutes=10)["queued"], 0)
-        self.assertEqual(HealthProcessingJob.objects.filter(
-            document=document, job_type=HealthJobType.NORMALIZE_DOCUMENT,
-        ).count(), 1)
+        document.refresh_from_db()
+        self.assertEqual(document.status, DocumentStatus.PROCESSED)
+        self.assertEqual(document.payload, {})
+        self.assertEqual(RookOutbox.objects.filter(
+            document=document, job_type="normalize_document",
+        ).count(), 0)
 
     def test_out_of_order_old_revoke_cannot_close_fresh_authorization(self):
         self.connection.status = ConnectionStatus.ACTIVE
@@ -184,11 +199,8 @@ class ReleaseDurabilityTests(TestCase):
         self.assertEqual(self.connection.authorization_status, AuthorizationStatus.AUTHORIZED)
 
     @override_settings(ROOK_CLIENT_UUID="test-client-uuid", ROOK_CALLBACK_URL="https://r.test/r")
-    @patch("wearables.services.oauth.RookClient")
+    @patch("wearables.services.authorization_jobs.RookClient")
     def test_callback_commits_state_and_local_authorization_atomically(self, client_class):
-        from urllib.parse import urlsplit
-        from wearables.models import WearableConnectionEvent
-        from wearables.services.oauth import callback_url_for_connection, complete_oauth_callback
 
         self.connection.status = ConnectionStatus.AUTHORIZING
         self.connection.authorization_status = AuthorizationStatus.PENDING
@@ -204,25 +216,24 @@ class ReleaseDurabilityTests(TestCase):
             state_token, rook_client_uuid="test-client-uuid",
             rook_user_id=self.identity.rook_user_id,
         )
-        self.assertEqual(outcome, "authorized")
+        self.assertEqual(outcome, "pending")
+        client_class.return_value.get_authorized_sources.assert_not_called()
+        queued = RookOutbox.objects.get(connection=self.connection, job_type=HealthJobType.AUTHORISE_ROOK_CONNECTION)
+        self.assertTrue(process_authorise_rook_connection(claim_health_job(queued.pk))["authorized"])
         self.connection.refresh_from_db()
         self.assertEqual(self.connection.status, ConnectionStatus.IMPORTING)
         self.assertEqual(self.connection.authorization_status, AuthorizationStatus.AUTHORIZED)
         self.assertTrue(WearableConnectionEvent.objects.filter(
             connection=self.connection, event_type="oauth_state_verified",
         ).exists())
-        self.assertTrue(HealthProcessingJob.objects.filter(
-            connection=self.connection, job_type=HealthJobType.RECOVERY_PULL,
+        self.assertTrue(RookOutbox.objects.filter(
+            connection=self.connection, job_type=HealthJobType.FETCH_ROOK_DATA,
         ).exists())
         client_class.return_value.get_authorized_sources.assert_called_once()
 
     @override_settings(ROOK_CLIENT_UUID="test-client-uuid", ROOK_CALLBACK_URL="https://r.test/r")
-    @patch("wearables.services.oauth.RookClient")
-    @patch("wearables.services.connections.authorization_confirmed", side_effect=RuntimeError("transient database error"))
-    def test_failed_callback_does_not_consume_one_time_token(self, confirm, client_class):
-        from urllib.parse import urlsplit
-        from wearables.models import WearableConnectionEvent
-        from wearables.services.oauth import callback_url_for_connection, complete_oauth_callback
+    @patch("wearables.services.oauth.enqueue_authorise_rook_connection", side_effect=RuntimeError("transient database error"))
+    def test_failed_callback_does_not_consume_one_time_token(self, enqueue):
 
         self.connection.status = ConnectionStatus.AUTHORIZING
         self.connection.authorization_status = AuthorizationStatus.PENDING
@@ -231,7 +242,6 @@ class ReleaseDurabilityTests(TestCase):
             self.connection, actor_user=self.user,
             previous_status=ConnectionStatus.NEVER_CONNECTED,
         )
-        client_class.return_value.get_authorized_sources.return_value = {"Garmin"}
         state_token = urlsplit(callback).path.rsplit("/", 1)[-1]
         with self.assertRaises(RuntimeError):
             complete_oauth_callback(
@@ -256,7 +266,48 @@ class ReleaseDurabilityTests(TestCase):
         self.connection.refresh_from_db()
         self.assertEqual(response["status"], ConnectionStatus.IMPORTING)
         self.assertEqual(self.connection.import_status, HistoricalImportStatus.RUNNING)
-        self.assertTrue(HealthProcessingJob.objects.filter(
+        self.assertTrue(RookOutbox.objects.filter(
             connection=self.connection,
-            job_type=HealthJobType.RECOVERY_PULL,
+            job_type=HealthJobType.FETCH_ROOK_DATA,
         ).exists())
+
+    def test_positive_notification_on_provider_error_queues_verification_not_authorize(self):
+        self.connection.status = ConnectionStatus.PROVIDER_ERROR
+        self.connection.authorization_status = AuthorizationStatus.ERROR
+        self.connection.import_status = HistoricalImportStatus.NOT_STARTED
+        self.connection.import_started_at = None
+        self.connection.save()
+        response = process_rook_notification({
+            "user_id": self.identity.rook_user_id,
+            "data_source": "Garmin",
+            "action": "user_connected",
+            "action_datetime": timezone.now().isoformat(),
+        }, signature_valid=True)
+        self.connection.refresh_from_db()
+        self.assertTrue(response.get("authorizationQueued"))
+        self.assertEqual(self.connection.status, ConnectionStatus.AUTHORIZING)
+        self.assertEqual(self.connection.authorization_status, AuthorizationStatus.PENDING)
+        self.assertTrue(RookOutbox.objects.filter(
+            connection=self.connection,
+            job_type=HealthJobType.AUTHORISE_ROOK_CONNECTION,
+        ).exists())
+        self.assertFalse(RookOutbox.objects.filter(
+            connection=self.connection,
+            job_type=HealthJobType.FETCH_ROOK_DATA,
+        ).exists())
+
+    def test_positive_notification_on_never_connected_queues_verification(self):
+        self.connection.status = ConnectionStatus.NEVER_CONNECTED
+        self.connection.authorization_status = AuthorizationStatus.NOT_STARTED
+        self.connection.import_status = HistoricalImportStatus.NOT_STARTED
+        self.connection.save()
+        response = process_rook_notification({
+            "user_id": self.identity.rook_user_id,
+            "data_source": "Garmin",
+            "action": "authorization_completed",
+            "action_datetime": timezone.now().isoformat(),
+        }, signature_valid=True)
+        self.connection.refresh_from_db()
+        self.assertTrue(response.get("authorizationQueued"))
+        self.assertEqual(self.connection.status, ConnectionStatus.AUTHORIZING)
+        self.assertEqual(self.connection.authorization_status, AuthorizationStatus.PENDING)

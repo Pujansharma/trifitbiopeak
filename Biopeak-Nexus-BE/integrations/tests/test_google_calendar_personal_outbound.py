@@ -22,11 +22,10 @@ from integrations.google_calendar.personal_outbound import (
     personal_google_event_id,
     sync_associate_blocks_to_personal_google,
 )
-from integrations.models import CommunicationOutbox, GoogleCalendarConnection
+from integrations.models import GoogleCalendarOutbox, GoogleCalendarConnection
 from integrations.utils.constants import (
-    CommunicationChannel,
     CommunicationEventType,
-    CommunicationOutboxStatus,
+    GoogleCalendarOutboxStatus,
 )
 
 
@@ -77,7 +76,6 @@ class AssociateBlockOutboundTests(TestCase):
             origin=AvailabilityOrigin.MANUAL,
         )
         message = enqueue_associate_block_sync(block=block)
-        self.assertEqual(message.channel, CommunicationChannel.GOOGLE_CALENDAR)
         self.assertEqual(
             message.event_type, CommunicationEventType.ASSOCIATE_BLOCK_SYNC
         )
@@ -98,7 +96,7 @@ class AssociateBlockOutboundTests(TestCase):
         second = enqueue_associate_block_sync(block=block)
         self.assertEqual(first.pk, second.pk)
         self.assertEqual(
-            CommunicationOutbox.objects.filter(
+            GoogleCalendarOutbox.objects.filter(
                 associate_availability_block=block
             ).count(),
             1,
@@ -232,11 +230,11 @@ class AssociateLeaveOutboundTests(TestCase):
             origin=AvailabilityOrigin.MANUAL,
         )
         message = enqueue_associate_leave_sync(leave)
-        message.status = CommunicationOutboxStatus.SENDING
+        message.status = GoogleCalendarOutboxStatus.SENDING
         message.attempt_count = 1
         message.save(update_fields=["status", "attempt_count", "updated_at"])
         result = process_google_outbox_message(message)
-        self.assertEqual(result.status, CommunicationOutboxStatus.ACCEPTED)
+        self.assertEqual(result.status, GoogleCalendarOutboxStatus.ACCEPTED)
         leave.refresh_from_db()
         self.assertEqual(leave.google_event_id, "leave-event")
 
@@ -250,11 +248,11 @@ class AssociateLeaveOutboundTests(TestCase):
             origin=AvailabilityOrigin.MANUAL,
         )
         message = enqueue_associate_leave_sync(leave)
-        message.status = CommunicationOutboxStatus.SENDING
+        message.status = GoogleCalendarOutboxStatus.SENDING
         message.attempt_count = 1
         message.save(update_fields=["status", "attempt_count", "updated_at"])
         result = process_google_outbox_message(message)
-        self.assertEqual(result.status, CommunicationOutboxStatus.SKIPPED)
+        self.assertEqual(result.status, GoogleCalendarOutboxStatus.SKIPPED)
         self.assertEqual(
             result.skip_reason, "Personal Google Calendar not connected"
         )

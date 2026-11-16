@@ -13,7 +13,7 @@ from accounts.customers.models import Customer, CustomerProfile
 from accounts.models import UserAccount
 from accounts.users.models import User
 from accounts.utils.constants import UserType
-from wearables.models import WearableConnection, WearableConnectionEvent
+from wearables.models import RookOutbox, WearableConnection, WearableConnectionEvent
 from wearables.services.client import RookServiceError
 from wearables.services.connections import (
     get_or_create_connection,
@@ -21,7 +21,9 @@ from wearables.services.connections import (
     refresh_authorizing_connections,
 )
 from wearables.services.identity import get_or_create_rook_identity
-from wearables.utils.constants import AuthorizationStatus, ConnectionStatus
+from wearables.services.job_claims import claim_health_job
+from wearables.services.authorization_jobs import process_authorise_rook_connection
+from wearables.utils.constants import AuthorizationStatus, ConnectionStatus, HealthJobType
 
 
 @override_settings(
@@ -98,7 +100,7 @@ class RepeatedDeviceConnectTests(TestCase):
             connection=connection, event_type="oauth_state_authorizer_failed",
         ).count(), 1)
 
-    @patch("wearables.services.connections.enqueue_or_reuse_recovery_job")
+    @patch("wearables.services.connections.enqueue_or_reuse_fetch_rook_data_job")
     @patch("wearables.services.connections.RookClient.get_authorized_sources", return_value={"Garmin"})
     @patch("wearables.services.connections.RookClient.get_authorizer")
     def test_repeated_reconnect_preserves_reimport_origin(self, authorizer, sources, enqueue):
@@ -118,6 +120,8 @@ class RepeatedDeviceConnectTests(TestCase):
         self.start()
         enqueue.return_value = (SimpleNamespace(pk="existing-recovery"), False)
         refresh_authorizing_connections(self.profile)
+        queued = RookOutbox.objects.get(customer_profile=self.profile, job_type=HealthJobType.AUTHORISE_ROOK_CONNECTION)
+        self.assertTrue(process_authorise_rook_connection(claim_health_job(queued.pk))["authorized"])
         connection.refresh_from_db()
         self.assertEqual(connection.status, ConnectionStatus.HISTORICAL_REIMPORT)
         self.assertEqual(connection.authorization_status, AuthorizationStatus.AUTHORIZED)

@@ -8,8 +8,6 @@ from accounts.customers.utils.db import get_customer_profile_for_user
 from core.utils.helper import get_request_ip_address, get_request_user_agent
 from wearables.models import RookMemberIdentity, WearableConsent
 from wearables.services.analytics import invalidate_health_dashboard
-from wearables.services.job_queue import enqueue_health_job
-from wearables.utils.constants import HealthJobType
 from wearables.utils.constants import ConsentStatus, PreferredUnits
 
 
@@ -53,15 +51,8 @@ def get_or_create_rook_identity(
         update_fields.append("updated_at")
         identity.save(update_fields=update_fields)
         invalidate_health_dashboard(customer_profile)
-        if "timezone_name" in update_fields:
-            # Persist a durable remap job in the same transaction as the
-            # member-timezone change. Never rely on an on_commit callback that
-            # could fail after the new timezone has already been committed.
-            enqueue_health_job(
-                job_type=HealthJobType.REMAP_TIMEZONE,
-                idempotency_key=f"timezone:{customer_profile.pk}:{identity.timezone_name}:{identity.updated_at.isoformat()}",
-                customer_profile=customer_profile,
-            )
+        # New observations apply the updated timezone at write time inside
+        # fetch_rook_data / webhook normalize. No separate remap job.
     return identity
 
 
@@ -71,7 +62,7 @@ def record_wearable_consent(
     customer_profile: CustomerProfile,
     consent_version: str,
 ) -> WearableConsent:
-    now = timezone.now()
+    now = timezone.localtime()
     active_consent = (
         WearableConsent.objects.filter(
             customer_profile=customer_profile,

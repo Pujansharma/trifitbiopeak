@@ -1,3 +1,4 @@
+import secrets
 from datetime import timedelta
 from urllib.parse import urlencode
 
@@ -443,11 +444,22 @@ class GoogleCalendarWebhookView(BaseGenericAPIView):
         channel_id = request.headers.get("X-Goog-Channel-ID")
         resource_id = request.headers.get("X-Goog-Resource-ID")
         resource_state = request.headers.get("X-Goog-Resource-State")
+        channel_token = request.headers.get("X-Goog-Channel-Token") or ""
 
         connection = find_connection_for_watch_channel(channel_id, resource_id)
         if connection is None:
             logger.warning(
                 f"Google Calendar webhook: unrecognized channel {channel_id!r}."
+            )
+            return self.send_response("Ignored.")
+
+        expected_token = connection.watch_channel_token or ""
+        if not expected_token or not secrets.compare_digest(
+            expected_token, channel_token
+        ):
+            logger.warning(
+                f"Google Calendar webhook: token mismatch for channel "
+                f"{channel_id!r}."
             )
             return self.send_response("Ignored.")
 

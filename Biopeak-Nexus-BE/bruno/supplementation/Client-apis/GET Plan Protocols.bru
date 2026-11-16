@@ -10,18 +10,14 @@ get {
   auth: inherit
 }
 
-headers {
-  X-Customer-Profile-ID: {{customer_profile_id}}
-}
-
 settings {
   encodeUrl: true
 }
 
 docs {
-  Customer JWT only. No X-Center-ID.
-  Header X-Customer-Profile-ID must belong to that user.
-  Missing, blank, junk, unknown, another customer's, or inactive profile → 404 Customer profile not found.
+  Customer JWT only. No X-Center-ID. No X-Customer-Profile-ID.
+  Profile is that user's active main profile.
+  No active main profile → 404 Customer profile not found.
   data.summary counts one stored status per protocol from current_version:
   active, scheduled, draft, cancelled, expired.
   Null current_version plus a draft version counts as draft.
@@ -31,5 +27,5 @@ docs {
   Each list row includes supplements for that version.
   supplement is id, product_name, brand_name, form.
   Dose fields include duration. Ordered by product name, then item id.
-  Auth: customer access_token. Env: customer_profile_id.
+  Auth: customer access_token.
 }

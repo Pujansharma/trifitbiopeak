@@ -1,0 +1,139 @@
+version: 1
+
+defaults:
+  queue:
+    type: standard
+    visibility_timeout_seconds: 600
+    message_retention_days: 1
+
+  dlq:
+    enabled: true
+    max_receive_count: 5
+    retention_days: 1
+
+  worker:
+    launch_type: FARGATE
+    cpu: 256
+    memory: 1024
+
+  launcher:
+    type: lambda
+    memory_mb: 256
+    timeout_seconds: 60
+    reserved_concurrency: 20
+
+  retry:
+    max_attempts: 2
+    strategy: sqs_redelivery
+    terminal_status: FAILED
+
+integrations:
+  whatsapp:
+    enabled: true
+    handler: integrations.communications.whatsapp.outbox.process_whatsapp_job_ids
+    command: process_whatsapp_outbox
+    batch_size: 10
+    queue_url_ssm_suffix: WHATSAPP_OUTBOX_QUEUE_URL
+
+    queue:
+      name: whatsapp-outbox-jobs
+      visibility_timeout_seconds: 600
+      message_retention_days: 1
+
+    dlq:
+      retention_days: 1
+
+    retry:
+      max_attempts: 2
+      terminal_status: FAILED
+
+  google_calendar:
+    enabled: true
+    handler: integrations.google_calendar.outbox.process_google_calendar_job_ids
+    command: process_google_calendar_outbox
+    batch_size: 10
+    queue_url_ssm_suffix: GOOGLE_CALENDAR_OUTBOX_QUEUE_URL
+
+    queue:
+      name: google-calendar-outbox-jobs
+      visibility_timeout_seconds: 600
+      message_retention_days: 1
+
+    dlq:
+      retention_days: 1
+
+    retry:
+      max_attempts: 2
+      terminal_status: FAILED
+
+  protocol_ai:
+    enabled: true
+    handler: integrations.protocol_management.outbox.process_protocol_ai_job_ids
+    command: process_protocol_ai_jobs
+    batch_size: 10
+    queue_url_ssm_suffix: PROTOCOL_AI_OUTBOX_QUEUE_URL
+
+    queue:
+      name: protocol-ai-outbox-jobs
+      visibility_timeout_seconds: 600
+      message_retention_days: 1
+
+    dlq:
+      retention_days: 1
+
+    retry:
+      max_attempts: 2
+      terminal_status: FAILED
+
+  rook_auth:
+    enabled: true
+    handler: wearables.services.job_processor.process_rook_job_ids
+    command: process_rook_auth_jobs
+    batch_size: 10
+    queue_url_ssm_suffix: ROOK_AUTH_OUTBOX_QUEUE_URL
+
+    queue:
+      name: rook-auth-outbox-jobs
+      visibility_timeout_seconds: 600
+      message_retention_days: 1
+
+    dlq:
+      retention_days: 1
+
+    retry:
+      max_attempts: 1
+      terminal_status: FAILED
+
+  rook_data_fetch:
+    enabled: true
+    handler: wearables.services.job_processor.process_rook_job_ids
+    command: process_rook_data_fetch_jobs
+    batch_size: 10
+    queue_url_ssm_suffix: ROOK_DATA_FETCH_OUTBOX_QUEUE_URL
+
+    queue:
+      name: rook-data-fetch-outbox-jobs
+      visibility_timeout_seconds: 900
+      message_retention_days: 1
+
+    dlq:
+      retention_days: 1
+
+    retry:
+      max_attempts: 2
+      terminal_status: FAILED
+
+scheduled_jobs:
+  maintenance_job:
+    enabled: true
+    schedule: "cron(0/15 * * * ? *)"
+    timezone: Asia/Kolkata
+    handler: integrations.management.commands.run_maintenance_job
+    command: run_maintenance_job
+
+  rook_sync_scan:
+    enabled: true
+    schedule: "cron(0 0 * * ? *)"
+    timezone: Asia/Kolkata
+    handler: wearables.management.commands.process_pending_rook_sync_scan
+    command: process_pending_rook_sync_scan

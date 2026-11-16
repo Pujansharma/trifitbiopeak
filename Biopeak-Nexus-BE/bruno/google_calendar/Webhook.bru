@@ -12,6 +12,7 @@ post {
 
 headers {
   X-Goog-Channel-ID: {{gcal_webhook_channel_id}}
+  X-Goog-Channel-Token: {{gcal_webhook_channel_token}}
   X-Goog-Resource-ID: {{gcal_webhook_resource_id}}
   X-Goog-Resource-State: exists
 }
@@ -23,14 +24,15 @@ docs {
   caller ever hits directly; this request exists to manually replay a
   notification while testing.
 
-  X-Goog-Channel-ID / X-Goog-Resource-ID must match a GoogleCalendarConnection
-  row's watch_channel_id/watch_resource_id (set automatically after a
-  successful personal connect, or self-healed on the next POST /sync/) -
-  these are generated fresh per connection, so pull the current values from
-  the DB (or from server logs) before running this manually. A
-  mismatched/unknown channel is logged and ignored, not rejected - Google
-  retries with backoff and can eventually disable a channel that keeps
-  getting non-2xx, so this endpoint always answers 200.
+  X-Goog-Channel-ID / X-Goog-Resource-ID / X-Goog-Channel-Token must match a
+  GoogleCalendarConnection row's watch_channel_id / watch_resource_id /
+  watch_channel_token (set automatically after a successful personal connect,
+  or self-healed on the next POST /sync/) - these are generated fresh per
+  connection, so pull the current values from the DB (or from server logs)
+  before running this manually. A mismatched/unknown channel or token is
+  logged and ignored, not rejected - Google retries with backoff and can
+  eventually disable a channel that keeps getting non-2xx, so this endpoint
+  always answers 200.
 
   X-Goog-Resource-State: "sync" is Google's one-time handshake right after
   the channel is created (no-op, nothing to fetch yet); any other value
@@ -41,7 +43,7 @@ docs {
   Method: POST
   Path: /google-calendar/webhook/
   Source: integrations.google_calendar.views.GoogleCalendarWebhookView
-  Auth: None (Google calling, not an authenticated frontend request) - verified via channel id/resource id match instead.
+  Auth: None (Google calling, not an authenticated frontend request) - verified via channel id/resource id/token match instead.
 
   Response (always 200, regardless of outcome): {"detail": "Google Calendar webhook processed.", "data": null}
 }

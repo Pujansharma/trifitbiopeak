@@ -52,6 +52,8 @@
 | `height` | float \| null (cm from main `CustomerProfile.height_cm`) |
 | `weight` | float \| null (kg from main `CustomerProfile.weight_kg`) |
 | `status` | `In Progress` \| `Completed` |
+| `started_on` | datetime (session `created_at` — when pre-consultation started) |
+| `completed_on` | datetime \| null (session `completed_at` — null while in progress) |
 
 ---
 

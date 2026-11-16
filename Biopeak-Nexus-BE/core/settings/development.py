@@ -55,8 +55,9 @@ MAILERS = {
         "BACKEND": "django.core.mail.backends.smtp.EmailBackend",
         "OPTIONS": {
             "host": config("DEV_EMAIL_HOST", ""),
-            "use_tls": False,
-            "port": config("DEV_EMAIL_PORT", ""),
+            "use_tls": True,
+            "port": config("DEV_EMAIL_PORT", default=587, cast=int),
+            "timeout": 10,
             "username": config("DEV_EMAIL_HOST_USER", ""),
             "password": config("DEV_EMAIL_HOST_PASSWORD", ""),
         },
@@ -94,11 +95,14 @@ GOOGLE_REDIRECT_URI = config("DEV_GOOGLE_REDIRECT_URI", None)
 GOOGLE_CALENDAR_TOKEN_ENCRYPTION_KEY = config("DEV_GOOGLE_CALENDAR_TOKEN_ENCRYPTION_KEY", None)
 GOOGLE_CALENDAR_ID = config("DEV_GOOGLE_CALENDAR_ID", None)
 ADMIN_FRONTEND_URL = config("DEV_ADMIN_FRONTEND_URL", None)
-COMMUNICATION_OUTBOX_WAKE_QUEUE_URL = config(
-    "DEV_COMMUNICATION_OUTBOX_WAKE_QUEUE_URL", default=""
+WHATSAPP_OUTBOX_QUEUE_URL = config(
+    "DEV_WHATSAPP_OUTBOX_QUEUE_URL", default=""
 )
-PROTOCOL_AI_WAKE_QUEUE_URL = config(
-    "DEV_PROTOCOL_AI_WAKE_QUEUE_URL", default=""
+GOOGLE_CALENDAR_OUTBOX_QUEUE_URL = config(
+    "DEV_GOOGLE_CALENDAR_OUTBOX_QUEUE_URL", default=""
+)
+PROTOCOL_AI_OUTBOX_QUEUE_URL = config(
+    "DEV_PROTOCOL_AI_OUTBOX_QUEUE_URL", default=""
 )
 LUMA_BASE_URL = config("DEV_LUMA_BASE_URL", default="")
 LUMA_NEXUS_API_KEY = config("DEV_LUMA_NEXUS_API_KEY", default="")
@@ -113,10 +117,8 @@ WHATSAPP_WABA_ID = config("DEV_WHATSAPP_WABA_ID", None)
 WHATSAPP_APP_ID = config("DEV_WHATSAPP_APP_ID", None)
 WHATSAPP_TEMPLATE_LANGUAGE = config("DEV_WHATSAPP_TEMPLATE_LANGUAGE", "en")
 
-# ROOK / Wearables Phase 1 — additive. All keys remain external to source control.
-# The mobile app may use PostHog to hide the feature UI. Retain this
-# independent backend kill switch for API/webhook/job safety.
-WEARABLES_ENABLED = config("DEV_WEARABLES_ENABLED", default=True, cast=bool)
+# ROOK / Wearables Phase 1 — credentials stay in env; quotas hardcoded here.
+# Mobile UI flag is separate (PostHog). Profile gate: WEARABLES_REQUIRE_PROFILE_FEATURE.
 WEARABLES_REQUIRE_PROFILE_FEATURE = config(
     "DEV_WEARABLES_REQUIRE_PROFILE_FEATURE", default=False, cast=bool
 )
@@ -138,6 +140,14 @@ ROOK_PREEXISTING_ENABLED = True  # Requires ROOK historical-import entitlement.
 # Review the hardcoded allowlist for this deployment before enabling it.
 ROOK_PROVISIONED_SOURCES = ROOK_PROVISIONED_SOURCE_NAMES
 ROOK_SYNC_DELAY_HOURS = config("DEV_ROOK_SYNC_DELAY_HOURS", default=48, cast=int)
+# Outbound ROOK HTTP budget (Postgres RookRequestBudget). Not DRF inbound throttle.
+ROOK_API_REQUESTS_PER_MINUTE = 60
+ROOK_API_REQUESTS_PER_DAY = 1000
+# Same WA/GC pattern: empty locally (drain --limit); deploy injects DEV_/STG_/PRD_.
+ROOK_AUTH_OUTBOX_QUEUE_URL = config("DEV_ROOK_AUTH_OUTBOX_QUEUE_URL", default="")
+ROOK_DATA_FETCH_OUTBOX_QUEUE_URL = config(
+    "DEV_ROOK_DATA_FETCH_OUTBOX_QUEUE_URL", default=""
+)
 ROOK_CONNECT_TIMEOUT_SECONDS = config("DEV_ROOK_CONNECT_TIMEOUT_SECONDS", default=5, cast=int)
 ROOK_READ_TIMEOUT_SECONDS = config("DEV_ROOK_READ_TIMEOUT_SECONDS", default=12, cast=int)
 ROOK_ALLOW_UNSIGNED_WEBHOOKS = config("DEV_ROOK_ALLOW_UNSIGNED_WEBHOOKS", default=False, cast=bool)

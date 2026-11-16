@@ -11,17 +11,22 @@ from accounts.users.models import User
 from appointments.models import Appointment
 from appointments.utils.constants import AppointmentStatus
 from core.utils.constants import AppointmentModes
-from integrations.communications.outbox import (
-    MAX_OUTBOX_ATTEMPTS,
-    STALE_SENDING_MINUTES,
+from integrations.communications.outbox import enqueue_appointment_message
+from integrations.google_calendar.outbox import (
+    MAX_GOOGLE_CALENDAR_OUTBOX_ATTEMPTS,
+    STALE_GOOGLE_CALENDAR_SENDING_MINUTES,
+    process_google_calendar_message_by_id,
+    reclaim_stale_google_calendar_messages,
+)
+from integrations.communications.whatsapp.outbox import (
+    STALE_WHATSAPP_SENDING_MINUTES,
     apply_whatsapp_status_update,
     enqueue_appointment_care_message,
-    enqueue_appointment_message,
     enqueue_whatsapp_only_message,
-    mark_outbox_accepted,
-    pending_outbox_queryset,
-    process_outbox_message,
-    reclaim_stale_sending_messages,
+    mark_whatsapp_accepted,
+    pending_whatsapp_queryset,
+    process_whatsapp_message_by_id,
+    reclaim_stale_whatsapp_sending_messages,
 )
 from integrations.communications.service import (
     enqueue_due_appointment_reminders,
@@ -35,12 +40,16 @@ from integrations.communications.whatsapp.templates import (
     build_template_parameters,
     template_name_for_event,
 )
-from integrations.models import CommunicationOutbox, CommunicationWebhookEvent
+from integrations.models import (
+    GoogleCalendarOutbox,
+    CommunicationWebhookEvent,
+    WhatsAppOutbox,
+)
 from integrations.utils.constants import (
-    CommunicationChannel,
     CommunicationEventType,
-    CommunicationOutboxStatus,
+    GoogleCalendarOutboxStatus,
     WHATSAPP_TEMPLATE_BY_EVENT,
+    WhatsAppOutboxStatus,
 )
 from programs.services.models import Service, ServiceCareTemplate
 from programs.services.utils.constants import ServiceCategory
@@ -87,56 +96,52 @@ class WhatsAppOutboxReclaimTests(TestCase):
     def setUp(self):
         self.appointment = create_appointment()
 
-    @patch("integrations.communications.outbox.publish_outbox_wake")
-    def test_stale_sending_reclaimed_as_skipped_not_failed(self, mock_wake):
-        stale_at = timezone.now() - timedelta(minutes=STALE_SENDING_MINUTES + 1)
-        message = CommunicationOutbox.objects.create(
+    def test_stale_sending_reclaimed_as_skipped_not_failed(self):
+        stale_at = timezone.now() - timedelta(
+            minutes=STALE_WHATSAPP_SENDING_MINUTES + 1
+        )
+        message = WhatsAppOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.WHATSAPP,
             event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
             to_phone="919876543210",
             template_name="appointment_confirmed_template",
             template_language="en",
-            status=CommunicationOutboxStatus.SENDING,
+            status=WhatsAppOutboxStatus.SENDING,
             attempt_count=1,
         )
-        CommunicationOutbox.objects.filter(pk=message.pk).update(updated_at=stale_at)
-        updated = reclaim_stale_sending_messages()
+        WhatsAppOutbox.objects.filter(pk=message.pk).update(updated_at=stale_at)
+        updated = reclaim_stale_whatsapp_sending_messages()
         self.assertEqual(updated, 1)
         message.refresh_from_db()
-        self.assertEqual(message.status, CommunicationOutboxStatus.SKIPPED)
-        self.assertEqual(message.error_code, "stale_sending")
-        self.assertIn("not retried", message.skip_reason)
-        mock_wake.assert_called_once()
+        self.assertEqual(message.status, WhatsAppOutboxStatus.SKIPPED)
+        self.assertEqual(message.skip_reason, "stale_sending")
 
     def test_fresh_sending_not_reclaimed(self):
-        message = CommunicationOutbox.objects.create(
+        message = WhatsAppOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.WHATSAPP,
             event_type=CommunicationEventType.APPOINTMENT_CANCELLED,
             to_phone="919876543210",
             template_name="appointment_cancelled_template",
             template_language="en",
-            status=CommunicationOutboxStatus.SENDING,
+            status=WhatsAppOutboxStatus.SENDING,
             attempt_count=1,
         )
-        updated = reclaim_stale_sending_messages()
+        updated = reclaim_stale_whatsapp_sending_messages()
         self.assertEqual(updated, 0)
         message.refresh_from_db()
-        self.assertEqual(message.status, CommunicationOutboxStatus.SENDING)
+        self.assertEqual(message.status, WhatsAppOutboxStatus.SENDING)
 
 
 class WhatsAppWebhookIdempotencyTests(TestCase):
     def setUp(self):
         self.appointment = create_appointment()
-        self.message = CommunicationOutbox.objects.create(
+        self.message = WhatsAppOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.WHATSAPP,
             event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
             to_phone="919876543210",
             template_name="appointment_confirmed_template",
             template_language="en",
-            status=CommunicationOutboxStatus.ACCEPTED,
+            status=WhatsAppOutboxStatus.ACCEPTED,
             wamid="wamid.test.1",
         )
 
@@ -157,10 +162,10 @@ class WhatsAppWebhookIdempotencyTests(TestCase):
             1,
         )
         self.message.refresh_from_db()
-        self.assertEqual(self.message.status, CommunicationOutboxStatus.DELIVERED)
+        self.assertEqual(self.message.status, WhatsAppOutboxStatus.DELIVERED)
 
 
-class CommunicationOutboxEnqueueTests(TestCase):
+class GoogleCalendarOutboxEnqueueTests(TestCase):
     def setUp(self):
         self.appointment = create_appointment()
 
@@ -168,34 +173,36 @@ class CommunicationOutboxEnqueueTests(TestCase):
         WHATSAPP_ACCESS_TOKEN="token",
         WHATSAPP_PHONE_NUMBER_ID="123",
         GOOGLE_CALENDAR_ID="care@biopeak.health",
-        COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
+        GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
     )
-    @patch("integrations.communications.outbox.publish_outbox_wake")
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
     def test_enqueue_creates_whatsapp_and_google_pending_rows(self, mock_wake):
         whatsapp_message, google_message = enqueue_appointment_message(
             self.appointment,
             CommunicationEventType.APPOINTMENT_CONFIRMED,
         )
-        self.assertEqual(whatsapp_message.channel, CommunicationChannel.WHATSAPP)
-        self.assertEqual(whatsapp_message.status, CommunicationOutboxStatus.PENDING)
-        self.assertEqual(
-            google_message.channel, CommunicationChannel.GOOGLE_CALENDAR
-        )
-        self.assertEqual(google_message.status, CommunicationOutboxStatus.PENDING)
+        self.assertIsInstance(whatsapp_message, WhatsAppOutbox)
+        self.assertEqual(whatsapp_message.status, WhatsAppOutboxStatus.PENDING)
+        self.assertIsInstance(google_message, GoogleCalendarOutbox)
+        self.assertEqual(google_message.status, GoogleCalendarOutboxStatus.PENDING)
         self.assertLessEqual(google_message.created_at, whatsapp_message.created_at)
         mock_wake.assert_called_once()
         self.assertEqual(
-            CommunicationOutbox.objects.filter(appointment=self.appointment).count(),
-            2,
+            WhatsAppOutbox.objects.filter(appointment=self.appointment).count(),
+            1,
+        )
+        self.assertEqual(
+            GoogleCalendarOutbox.objects.filter(appointment=self.appointment).count(),
+            1,
         )
 
     @override_settings(
         WHATSAPP_ACCESS_TOKEN="token",
         WHATSAPP_PHONE_NUMBER_ID="123",
         GOOGLE_CALENDAR_ID="care@biopeak.health",
-        COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
+        GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
     )
-    @patch("integrations.communications.outbox.publish_outbox_wake")
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
     def test_google_coalesces_open_row_for_same_appointment(self, mock_wake):
         first_whatsapp, first_google = enqueue_appointment_message(
             self.appointment,
@@ -208,9 +215,8 @@ class CommunicationOutboxEnqueueTests(TestCase):
         self.assertEqual(first_google.pk, second_google.pk)
         self.assertNotEqual(first_whatsapp.pk, second_whatsapp.pk)
         self.assertEqual(
-            CommunicationOutbox.objects.filter(
+            GoogleCalendarOutbox.objects.filter(
                 appointment=self.appointment,
-                channel=CommunicationChannel.GOOGLE_CALENDAR,
             ).count(),
             1,
         )
@@ -337,38 +343,40 @@ class WhatsAppReminderNoShowEnqueueTests(TestCase):
     @override_settings(
         WHATSAPP_ACCESS_TOKEN="token",
         WHATSAPP_PHONE_NUMBER_ID="123",
-        COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
+        GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
     )
-    @patch("integrations.communications.outbox.publish_outbox_wake")
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
     def test_reminder_enqueue_skips_wake_and_google(self, mock_wake):
         message = enqueue_whatsapp_only_message(
             self.appointment,
             CommunicationEventType.APPOINTMENT_REMINDER,
             wake=False,
         )
-        self.assertEqual(message.channel, CommunicationChannel.WHATSAPP)
         self.assertEqual(message.event_type, CommunicationEventType.APPOINTMENT_REMINDER)
         self.assertEqual(message.template_name, "therapy_session_reminder")
-        self.assertEqual(message.status, CommunicationOutboxStatus.PENDING)
+        self.assertEqual(message.status, WhatsAppOutboxStatus.PENDING)
         mock_wake.assert_not_called()
         self.assertEqual(
-            CommunicationOutbox.objects.filter(appointment=self.appointment).count(),
+            WhatsAppOutbox.objects.filter(appointment=self.appointment).count(),
             1,
         )
         self.assertFalse(
-            CommunicationOutbox.objects.filter(
+            GoogleCalendarOutbox.objects.filter(
                 appointment=self.appointment,
-                channel=CommunicationChannel.GOOGLE_CALENDAR,
             ).exists()
         )
 
     @override_settings(
         WHATSAPP_ACCESS_TOKEN="token",
         WHATSAPP_PHONE_NUMBER_ID="123",
-        COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
+        GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
+        WHATSAPP_OUTBOX_QUEUE_URL="https://sqs.example/whatsapp-outbox",
     )
-    @patch("integrations.communications.outbox.publish_outbox_wake")
-    def test_no_show_enqueue_wakes_whatsapp_only(self, mock_wake):
+    @patch(
+        "integrations.communications.whatsapp.outbox.publish_whatsapp_job_batches"
+    )
+    def test_no_show_enqueue_wakes_whatsapp_only(self, mock_batches):
+        mock_batches.side_effect = lambda job_ids: list(job_ids)
         message = enqueue_whatsapp_only_message(
             self.appointment,
             CommunicationEventType.APPOINTMENT_NO_SHOW,
@@ -376,20 +384,39 @@ class WhatsAppReminderNoShowEnqueueTests(TestCase):
         )
         self.assertEqual(message.event_type, CommunicationEventType.APPOINTMENT_NO_SHOW)
         self.assertEqual(message.template_name, "therapy_session_no_show")
-        mock_wake.assert_called_once()
+        mock_batches.assert_called_once()
+        message.refresh_from_db()
+        self.assertEqual(message.status, WhatsAppOutboxStatus.QUEUED)
         self.assertFalse(
-            CommunicationOutbox.objects.filter(
+            GoogleCalendarOutbox.objects.filter(
                 appointment=self.appointment,
-                channel=CommunicationChannel.GOOGLE_CALENDAR,
             ).exists()
         )
 
     @override_settings(
         WHATSAPP_ACCESS_TOKEN="token",
         WHATSAPP_PHONE_NUMBER_ID="123",
-        COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
+        WHATSAPP_OUTBOX_QUEUE_URL="",
     )
-    @patch("integrations.communications.outbox.publish_outbox_wake")
+    @patch(
+        "integrations.communications.whatsapp.outbox.publish_whatsapp_job_batches"
+    )
+    def test_wake_without_queue_url_leaves_pending(self, mock_batches):
+        message = enqueue_whatsapp_only_message(
+            self.appointment,
+            CommunicationEventType.APPOINTMENT_NO_SHOW,
+            wake=True,
+        )
+        mock_batches.assert_not_called()
+        message.refresh_from_db()
+        self.assertEqual(message.status, WhatsAppOutboxStatus.PENDING)
+
+    @override_settings(
+        WHATSAPP_ACCESS_TOKEN="token",
+        WHATSAPP_PHONE_NUMBER_ID="123",
+        GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
+    )
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
     def test_due_reminders_enqueue_once(self, mock_wake):
         now = timezone.now()
         self.appointment.start_datetime = now + timedelta(minutes=45)
@@ -412,7 +439,7 @@ class WhatsAppReminderNoShowEnqueueTests(TestCase):
         self.assertEqual(len(first), 1)
         self.assertEqual(second, [])
         self.assertEqual(
-            CommunicationOutbox.objects.filter(
+            WhatsAppOutbox.objects.filter(
                 appointment=self.appointment,
                 event_type=CommunicationEventType.APPOINTMENT_REMINDER,
             ).count(),
@@ -423,9 +450,9 @@ class WhatsAppReminderNoShowEnqueueTests(TestCase):
     @override_settings(
         WHATSAPP_ACCESS_TOKEN="token",
         WHATSAPP_PHONE_NUMBER_ID="123",
-        COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
+        GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
     )
-    @patch("integrations.communications.outbox.publish_outbox_wake")
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
     def test_failed_reminder_blocks_sweep_reenqueue(self, mock_wake):
         now = timezone.now()
         self.appointment.start_datetime = now + timedelta(minutes=45)
@@ -448,14 +475,14 @@ class WhatsAppReminderNoShowEnqueueTests(TestCase):
             CommunicationEventType.APPOINTMENT_REMINDER,
             wake=False,
         )
-        CommunicationOutbox.objects.filter(pk=first.pk).update(
-            status=CommunicationOutboxStatus.FAILED,
+        WhatsAppOutbox.objects.filter(pk=first.pk).update(
+            status=WhatsAppOutboxStatus.FAILED,
             attempt_count=1,
         )
         second_batch = enqueue_due_appointment_reminders()
         self.assertEqual(second_batch, [])
         self.assertEqual(
-            CommunicationOutbox.objects.filter(
+            WhatsAppOutbox.objects.filter(
                 appointment=self.appointment,
                 event_type=CommunicationEventType.APPOINTMENT_REMINDER,
             ).count(),
@@ -466,9 +493,9 @@ class WhatsAppReminderNoShowEnqueueTests(TestCase):
     @override_settings(
         WHATSAPP_ACCESS_TOKEN="token",
         WHATSAPP_PHONE_NUMBER_ID="123",
-        COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
+        GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
     )
-    @patch("integrations.communications.outbox.publish_outbox_wake")
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
     def test_skipped_reminder_blocks_sweep_reenqueue(self, mock_wake):
         now = timezone.now()
         self.appointment.start_datetime = now + timedelta(minutes=45)
@@ -491,15 +518,15 @@ class WhatsAppReminderNoShowEnqueueTests(TestCase):
             CommunicationEventType.APPOINTMENT_REMINDER,
             wake=False,
         )
-        CommunicationOutbox.objects.filter(pk=first.pk).update(
-            status=CommunicationOutboxStatus.SKIPPED,
+        WhatsAppOutbox.objects.filter(pk=first.pk).update(
+            status=WhatsAppOutboxStatus.SKIPPED,
             skip_reason="Exceeded max send attempts (2)",
             attempt_count=2,
         )
         second_batch = enqueue_due_appointment_reminders()
         self.assertEqual(second_batch, [])
         self.assertEqual(
-            CommunicationOutbox.objects.filter(
+            WhatsAppOutbox.objects.filter(
                 appointment=self.appointment,
                 event_type=CommunicationEventType.APPOINTMENT_REMINDER,
             ).count(),
@@ -513,108 +540,103 @@ class GoogleOutboxReclaimTests(TestCase):
         self.appointment = create_appointment()
 
     def test_stale_google_sending_reclaimed_as_failed(self):
-        stale_at = timezone.now() - timedelta(minutes=STALE_SENDING_MINUTES + 1)
-        message = CommunicationOutbox.objects.create(
+        stale_at = timezone.now() - timedelta(minutes=STALE_GOOGLE_CALENDAR_SENDING_MINUTES + 1)
+        message = GoogleCalendarOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.GOOGLE_CALENDAR,
             event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
-            status=CommunicationOutboxStatus.SENDING,
+            status=GoogleCalendarOutboxStatus.SENDING,
             attempt_count=1,
         )
-        CommunicationOutbox.objects.filter(pk=message.pk).update(updated_at=stale_at)
-        updated = reclaim_stale_sending_messages()
+        GoogleCalendarOutbox.objects.filter(pk=message.pk).update(updated_at=stale_at)
+        updated = reclaim_stale_google_calendar_messages()
         self.assertEqual(updated, 1)
         message.refresh_from_db()
-        self.assertEqual(message.status, CommunicationOutboxStatus.FAILED)
+        self.assertEqual(message.status, GoogleCalendarOutboxStatus.FAILED)
         self.assertEqual(message.error_code, "stale_sending")
         self.assertIn("retrying", message.error_detail)
 
     def test_exhausted_stale_google_sending_skipped(self):
-        stale_at = timezone.now() - timedelta(minutes=STALE_SENDING_MINUTES + 1)
-        message = CommunicationOutbox.objects.create(
+        stale_at = timezone.now() - timedelta(minutes=STALE_GOOGLE_CALENDAR_SENDING_MINUTES + 1)
+        message = GoogleCalendarOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.GOOGLE_CALENDAR,
             event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
-            status=CommunicationOutboxStatus.SENDING,
-            attempt_count=MAX_OUTBOX_ATTEMPTS,
+            status=GoogleCalendarOutboxStatus.SENDING,
+            attempt_count=MAX_GOOGLE_CALENDAR_OUTBOX_ATTEMPTS,
         )
-        CommunicationOutbox.objects.filter(pk=message.pk).update(updated_at=stale_at)
-        reclaim_stale_sending_messages()
+        GoogleCalendarOutbox.objects.filter(pk=message.pk).update(updated_at=stale_at)
+        reclaim_stale_google_calendar_messages()
         message.refresh_from_db()
-        self.assertEqual(message.status, CommunicationOutboxStatus.SKIPPED)
+        self.assertEqual(message.status, GoogleCalendarOutboxStatus.SKIPPED)
 
 
 class GoogleOutboxProcessTests(TestCase):
     def setUp(self):
         self.appointment = create_appointment()
-        self.message = CommunicationOutbox.objects.create(
+        self.message = GoogleCalendarOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.GOOGLE_CALENDAR,
             event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
-            status=CommunicationOutboxStatus.PENDING,
+            status=GoogleCalendarOutboxStatus.PENDING,
         )
 
     @override_settings(GOOGLE_CALENDAR_ID="care@biopeak.health")
     @patch(
-        "integrations.communications.outbox.sync_appointment_with_google",
+        "integrations.google_calendar.outbox.sync_appointment_with_google",
         return_value=None,
     )
     def test_google_process_marks_accepted(self, mock_sync):
-        processed = process_outbox_message(self.message.pk)
-        self.assertEqual(processed.status, CommunicationOutboxStatus.ACCEPTED)
+        processed = process_google_calendar_message_by_id(self.message.pk)
+        self.assertEqual(processed.status, GoogleCalendarOutboxStatus.ACCEPTED)
         mock_sync.assert_called_once_with(self.appointment.pk)
 
     @override_settings(GOOGLE_CALENDAR_ID="care@biopeak.health")
     @patch(
-        "integrations.communications.outbox.sync_appointment_with_google",
+        "integrations.google_calendar.outbox.sync_appointment_with_google",
         return_value="Google Calendar organizer is disconnected",
     )
     def test_google_disconnected_is_retryable_failed(self, mock_sync):
-        processed = process_outbox_message(self.message.pk)
-        self.assertEqual(processed.status, CommunicationOutboxStatus.FAILED)
+        processed = process_google_calendar_message_by_id(self.message.pk)
+        self.assertEqual(processed.status, GoogleCalendarOutboxStatus.FAILED)
         self.assertEqual(processed.error_code, "organizer_disconnected")
         self.assertEqual(processed.attempt_count, 1)
         mock_sync.assert_called_once()
 
     @override_settings(GOOGLE_CALENDAR_ID="care@biopeak.health")
     @patch(
-        "integrations.communications.outbox.sync_appointment_with_google",
+        "integrations.google_calendar.outbox.sync_appointment_with_google",
         side_effect=ValueError("Failed to persist google_event_id"),
     )
     def test_google_persist_failure_is_retryable_failed(self, mock_sync):
-        processed = process_outbox_message(self.message.pk)
-        self.assertEqual(processed.status, CommunicationOutboxStatus.FAILED)
+        processed = process_google_calendar_message_by_id(self.message.pk)
+        self.assertEqual(processed.status, GoogleCalendarOutboxStatus.FAILED)
         self.assertEqual(processed.attempt_count, 1)
         mock_sync.assert_called_once()
 
     def test_google_waits_when_another_row_is_sending(self):
-        CommunicationOutbox.objects.create(
+        GoogleCalendarOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.GOOGLE_CALENDAR,
             event_type=CommunicationEventType.APPOINTMENT_CANCELLED,
-            status=CommunicationOutboxStatus.SENDING,
+            status=GoogleCalendarOutboxStatus.SENDING,
             attempt_count=1,
         )
-        processed = process_outbox_message(self.message.pk)
-        self.assertEqual(processed.status, CommunicationOutboxStatus.PENDING)
+        processed = process_google_calendar_message_by_id(self.message.pk)
+        self.assertEqual(processed.status, GoogleCalendarOutboxStatus.PENDING)
         self.assertEqual(processed.attempt_count, 0)
 
     @override_settings(GOOGLE_CALENDAR_ID="care@biopeak.health")
-    @patch("integrations.communications.outbox.publish_outbox_wake")
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
     @patch(
-        "integrations.communications.outbox.sync_appointment_with_google",
+        "integrations.google_calendar.outbox.sync_appointment_with_google",
         return_value=None,
     )
     def test_google_wakes_remaining_row_for_same_appointment(
         self, mock_sync, mock_wake
     ):
-        CommunicationOutbox.objects.create(
+        GoogleCalendarOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.GOOGLE_CALENDAR,
             event_type=CommunicationEventType.APPOINTMENT_CANCELLED,
-            status=CommunicationOutboxStatus.PENDING,
+            status=GoogleCalendarOutboxStatus.PENDING,
         )
-        process_outbox_message(self.message.pk)
+        process_google_calendar_message_by_id(self.message.pk)
         mock_sync.assert_called_once()
         mock_wake.assert_called_once()
 
@@ -623,39 +645,44 @@ class WhatsAppDeferForGoogleMeetTests(TestCase):
     def setUp(self):
         self.appointment = create_appointment()
 
-    def test_virtual_whatsapp_defers_while_google_pending(self):
-        CommunicationOutbox.objects.create(
+    def test_virtual_whatsapp_sends_while_google_pending(self):
+        GoogleCalendarOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.GOOGLE_CALENDAR,
             event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
-            status=CommunicationOutboxStatus.PENDING,
+            status=GoogleCalendarOutboxStatus.PENDING,
         )
-        whatsapp = CommunicationOutbox.objects.create(
+        whatsapp = WhatsAppOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.WHATSAPP,
             event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
             to_phone="919876543210",
             template_name="appointment_confirmed_template",
             template_language="en",
             template_parameters=[],
-            status=CommunicationOutboxStatus.PENDING,
+            status=WhatsAppOutboxStatus.PENDING,
         )
-        processed = process_outbox_message(whatsapp.pk)
-        self.assertEqual(processed.status, CommunicationOutboxStatus.PENDING)
-        self.assertEqual(processed.attempt_count, 0)
+        with (
+            override_settings(
+                WHATSAPP_ACCESS_TOKEN="token",
+                WHATSAPP_PHONE_NUMBER_ID="123",
+            ),
+            patch(
+                "integrations.communications.whatsapp.outbox.send_template",
+                return_value=(200, {"messages": [{"id": "wamid.pending"}]}),
+            ),
+        ):
+            processed = process_whatsapp_message_by_id(whatsapp.pk)
+        self.assertEqual(processed.status, WhatsAppOutboxStatus.ACCEPTED)
 
     def test_virtual_with_meet_does_not_defer_for_google(self):
         self.appointment.google_meet_link = "https://meet.google.com/abc-defg-hij"
         self.appointment.save(update_fields=["google_meet_link", "updated_at"])
-        CommunicationOutbox.objects.create(
+        GoogleCalendarOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.GOOGLE_CALENDAR,
             event_type=CommunicationEventType.APPOINTMENT_RESCHEDULED,
-            status=CommunicationOutboxStatus.PENDING,
+            status=GoogleCalendarOutboxStatus.PENDING,
         )
-        whatsapp = CommunicationOutbox.objects.create(
+        whatsapp = WhatsAppOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.WHATSAPP,
             event_type=CommunicationEventType.APPOINTMENT_RESCHEDULED,
             to_phone="919876543210",
             template_name="appointment_rescheduled_template",
@@ -666,7 +693,7 @@ class WhatsAppDeferForGoogleMeetTests(TestCase):
                     "text": VIRTUAL_MEET_LINK_FALLBACK,
                 },
             ],
-            status=CommunicationOutboxStatus.PENDING,
+            status=WhatsAppOutboxStatus.PENDING,
         )
         with (
             override_settings(
@@ -674,12 +701,12 @@ class WhatsAppDeferForGoogleMeetTests(TestCase):
                 WHATSAPP_PHONE_NUMBER_ID="123",
             ),
             patch(
-                "integrations.communications.outbox.send_template",
+                "integrations.communications.whatsapp.outbox.send_template",
                 return_value=(200, {"messages": [{"id": "wamid.reschedule"}]}),
             ) as mock_send,
         ):
-            processed = process_outbox_message(whatsapp.pk)
-        self.assertEqual(processed.status, CommunicationOutboxStatus.ACCEPTED)
+            processed = process_whatsapp_message_by_id(whatsapp.pk)
+        self.assertEqual(processed.status, WhatsAppOutboxStatus.ACCEPTED)
         clinic_address = next(
             item["text"]
             for item in mock_send.call_args.kwargs["body_parameters"]
@@ -688,21 +715,19 @@ class WhatsAppDeferForGoogleMeetTests(TestCase):
         self.assertEqual(clinic_address, "https://meet.google.com/abc-defg-hij")
 
     def test_cancel_whatsapp_does_not_defer_for_google(self):
-        CommunicationOutbox.objects.create(
+        GoogleCalendarOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.GOOGLE_CALENDAR,
             event_type=CommunicationEventType.APPOINTMENT_CANCELLED,
-            status=CommunicationOutboxStatus.PENDING,
+            status=GoogleCalendarOutboxStatus.PENDING,
         )
-        whatsapp = CommunicationOutbox.objects.create(
+        whatsapp = WhatsAppOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.WHATSAPP,
             event_type=CommunicationEventType.APPOINTMENT_CANCELLED,
             to_phone="919876543210",
             template_name="appointment_cancelled_template",
             template_language="en",
             template_parameters=[],
-            status=CommunicationOutboxStatus.PENDING,
+            status=WhatsAppOutboxStatus.PENDING,
         )
         with (
             override_settings(
@@ -710,26 +735,24 @@ class WhatsAppDeferForGoogleMeetTests(TestCase):
                 WHATSAPP_PHONE_NUMBER_ID="123",
             ),
             patch(
-                "integrations.communications.outbox.send_template",
+                "integrations.communications.whatsapp.outbox.send_template",
                 return_value=(200, {"messages": [{"id": "wamid.cancel"}]}),
             ) as mock_send,
         ):
-            processed = process_outbox_message(whatsapp.pk)
-        self.assertEqual(processed.status, CommunicationOutboxStatus.ACCEPTED)
+            processed = process_whatsapp_message_by_id(whatsapp.pk)
+        self.assertEqual(processed.status, WhatsAppOutboxStatus.ACCEPTED)
         mock_send.assert_called_once()
 
     def test_in_person_whatsapp_does_not_defer_for_google(self):
         self.appointment.modality = AppointmentModes.IN_PERSON
         self.appointment.save(update_fields=["modality", "updated_at"])
-        CommunicationOutbox.objects.create(
+        GoogleCalendarOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.GOOGLE_CALENDAR,
             event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
-            status=CommunicationOutboxStatus.PENDING,
+            status=GoogleCalendarOutboxStatus.PENDING,
         )
-        whatsapp = CommunicationOutbox.objects.create(
+        whatsapp = WhatsAppOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.WHATSAPP,
             event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
             to_phone="919876543210",
             template_name="appointment_confirmed_template",
@@ -737,7 +760,7 @@ class WhatsAppDeferForGoogleMeetTests(TestCase):
             template_parameters=[
                 {"parameter_name": "clinic_address", "text": "stale"},
             ],
-            status=CommunicationOutboxStatus.PENDING,
+            status=WhatsAppOutboxStatus.PENDING,
         )
         with (
             override_settings(
@@ -745,27 +768,27 @@ class WhatsAppDeferForGoogleMeetTests(TestCase):
                 WHATSAPP_PHONE_NUMBER_ID="123",
             ),
             patch(
-                "integrations.communications.outbox.send_template",
+                "integrations.communications.whatsapp.outbox.send_template",
                 return_value=(200, {"messages": [{"id": "wamid.inperson"}]}),
             ) as mock_send,
         ):
-            processed = process_outbox_message(whatsapp.pk)
-        self.assertEqual(processed.status, CommunicationOutboxStatus.ACCEPTED)
+            processed = process_whatsapp_message_by_id(whatsapp.pk)
+        self.assertEqual(processed.status, WhatsAppOutboxStatus.ACCEPTED)
         mock_send.assert_called_once()
 
     @override_settings(
         WHATSAPP_ACCESS_TOKEN="token",
         WHATSAPP_PHONE_NUMBER_ID="123",
         GOOGLE_CALENDAR_ID="care@biopeak.health",
-        COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
+        GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
     )
-    @patch("integrations.communications.outbox.publish_outbox_wake")
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
     @patch(
-        "integrations.communications.outbox.sync_appointment_with_google",
+        "integrations.google_calendar.outbox.sync_appointment_with_google",
         return_value=None,
     )
     @patch(
-        "integrations.communications.outbox.send_template",
+        "integrations.communications.whatsapp.outbox.send_template",
         return_value=(200, {"messages": [{"id": "wamid.meet"}]}),
     )
     def test_virtual_whatsapp_rebuilds_meet_after_google(
@@ -778,15 +801,13 @@ class WhatsAppDeferForGoogleMeetTests(TestCase):
             return None
 
         mock_sync.side_effect = sync_and_set_meet
-        google = CommunicationOutbox.objects.create(
+        google = GoogleCalendarOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.GOOGLE_CALENDAR,
             event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
-            status=CommunicationOutboxStatus.PENDING,
+            status=GoogleCalendarOutboxStatus.PENDING,
         )
-        whatsapp = CommunicationOutbox.objects.create(
+        whatsapp = WhatsAppOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.WHATSAPP,
             event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
             to_phone="919876543210",
             template_name="appointment_confirmed_template",
@@ -797,11 +818,11 @@ class WhatsAppDeferForGoogleMeetTests(TestCase):
                     "text": VIRTUAL_MEET_LINK_FALLBACK,
                 },
             ],
-            status=CommunicationOutboxStatus.PENDING,
+            status=WhatsAppOutboxStatus.PENDING,
         )
-        process_outbox_message(google.pk)
-        processed = process_outbox_message(whatsapp.pk)
-        self.assertEqual(processed.status, CommunicationOutboxStatus.ACCEPTED)
+        process_google_calendar_message_by_id(google.pk)
+        processed = process_whatsapp_message_by_id(whatsapp.pk)
+        self.assertEqual(processed.status, WhatsAppOutboxStatus.ACCEPTED)
         sent_parameters = mock_send.call_args.kwargs["body_parameters"]
         clinic_address = next(
             item["text"]
@@ -816,37 +837,6 @@ class WhatsAppDeferForGoogleMeetTests(TestCase):
             if item["parameter_name"] == "clinic_address"
         )
         self.assertEqual(stored, "https://meet.google.com/abc-defg-hij")
-        mock_wake.assert_called()
-
-    @override_settings(
-        WHATSAPP_ACCESS_TOKEN="token",
-        WHATSAPP_PHONE_NUMBER_ID="123",
-        GOOGLE_CALENDAR_ID="care@biopeak.health",
-        COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
-    )
-    @patch("integrations.communications.outbox.publish_outbox_wake")
-    @patch(
-        "integrations.communications.outbox.sync_appointment_with_google",
-        return_value=None,
-    )
-    def test_google_accept_wakes_pending_whatsapp(self, mock_sync, mock_wake):
-        CommunicationOutbox.objects.create(
-            appointment=self.appointment,
-            channel=CommunicationChannel.WHATSAPP,
-            event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
-            to_phone="919876543210",
-            template_name="appointment_confirmed_template",
-            template_language="en",
-            status=CommunicationOutboxStatus.PENDING,
-        )
-        google = CommunicationOutbox.objects.create(
-            appointment=self.appointment,
-            channel=CommunicationChannel.GOOGLE_CALENDAR,
-            event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
-            status=CommunicationOutboxStatus.PENDING,
-        )
-        process_outbox_message(google.pk)
-        mock_wake.assert_called_once()
 
 
 class WhatsAppCareMessageTests(TestCase):
@@ -874,9 +864,9 @@ class WhatsAppCareMessageTests(TestCase):
         with self.settings(
             WHATSAPP_ACCESS_TOKEN="token",
             WHATSAPP_PHONE_NUMBER_ID="123",
-            COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
+            GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
         ):
-            with patch("integrations.communications.outbox.publish_outbox_wake"):
+            with patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids"):
                 pre = enqueue_appointment_care_message(
                     self.appointment,
                     CommunicationEventType.APPOINTMENT_PRE_CARE,
@@ -903,53 +893,78 @@ class WhatsAppCareMessageTests(TestCase):
     @override_settings(
         WHATSAPP_ACCESS_TOKEN="token",
         WHATSAPP_PHONE_NUMBER_ID="123",
-        COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
+        GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
     )
-    @patch("integrations.communications.outbox.publish_outbox_wake")
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
     def test_pre_care_defers_until_confirmed_accepted(self, mock_wake):
-        confirmed = CommunicationOutbox.objects.create(
+        confirmed = WhatsAppOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.WHATSAPP,
             event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
             to_phone="919876543210",
             template_name="appointment_confirmed_template",
             template_language="en",
-            status=CommunicationOutboxStatus.PENDING,
+            status=WhatsAppOutboxStatus.PENDING,
         )
         pre = enqueue_appointment_care_message(
             self.appointment,
             CommunicationEventType.APPOINTMENT_PRE_CARE,
             wake=False,
         )
-        process_outbox_message(pre.pk)
+        process_whatsapp_message_by_id(pre.pk)
         pre.refresh_from_db()
-        self.assertEqual(pre.status, CommunicationOutboxStatus.PENDING)
+        self.assertEqual(pre.status, WhatsAppOutboxStatus.PENDING)
 
-        confirmed.status = CommunicationOutboxStatus.ACCEPTED
+        confirmed.status = WhatsAppOutboxStatus.ACCEPTED
         confirmed.save(update_fields=["status", "updated_at"])
         with patch(
-            "integrations.communications.outbox.send_template",
+            "integrations.communications.whatsapp.outbox.send_template",
             return_value=(200, {"messages": [{"id": "wamid.care"}]}),
         ):
-            process_outbox_message(pre.pk)
+            process_whatsapp_message_by_id(pre.pk)
         pre.refresh_from_db()
-        self.assertEqual(pre.status, CommunicationOutboxStatus.ACCEPTED)
+        self.assertEqual(pre.status, WhatsAppOutboxStatus.ACCEPTED)
 
     @override_settings(
         WHATSAPP_ACCESS_TOKEN="token",
         WHATSAPP_PHONE_NUMBER_ID="123",
-        COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
+        GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
     )
-    @patch("integrations.communications.outbox.publish_outbox_wake")
-    def test_pre_care_skips_when_confirmed_skipped(self, mock_wake):
-        CommunicationOutbox.objects.create(
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
+    def test_pre_care_defer_reverts_queued_to_pending(self, mock_wake):
+        WhatsAppOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.WHATSAPP,
             event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
             to_phone="919876543210",
             template_name="appointment_confirmed_template",
             template_language="en",
-            status=CommunicationOutboxStatus.SKIPPED,
+            status=WhatsAppOutboxStatus.PENDING,
+        )
+        pre = enqueue_appointment_care_message(
+            self.appointment,
+            CommunicationEventType.APPOINTMENT_PRE_CARE,
+            wake=False,
+        )
+        WhatsAppOutbox.objects.filter(pk=pre.pk).update(
+            status=WhatsAppOutboxStatus.QUEUED
+        )
+        process_whatsapp_message_by_id(pre.pk)
+        pre.refresh_from_db()
+        self.assertEqual(pre.status, WhatsAppOutboxStatus.PENDING)
+
+    @override_settings(
+        WHATSAPP_ACCESS_TOKEN="token",
+        WHATSAPP_PHONE_NUMBER_ID="123",
+        GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
+    )
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
+    def test_pre_care_skips_when_confirmed_skipped(self, mock_wake):
+        WhatsAppOutbox.objects.create(
+            appointment=self.appointment,
+            event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
+            to_phone="919876543210",
+            template_name="appointment_confirmed_template",
+            template_language="en",
+            status=WhatsAppOutboxStatus.SKIPPED,
             skip_reason="WhatsApp is not configured",
         )
         pre = enqueue_appointment_care_message(
@@ -957,26 +972,25 @@ class WhatsAppCareMessageTests(TestCase):
             CommunicationEventType.APPOINTMENT_PRE_CARE,
             wake=False,
         )
-        process_outbox_message(pre.pk)
+        process_whatsapp_message_by_id(pre.pk)
         pre.refresh_from_db()
-        self.assertEqual(pre.status, CommunicationOutboxStatus.SKIPPED)
+        self.assertEqual(pre.status, WhatsAppOutboxStatus.SKIPPED)
         self.assertIn("skipped", pre.skip_reason.lower())
 
     @override_settings(
         WHATSAPP_ACCESS_TOKEN="token",
         WHATSAPP_PHONE_NUMBER_ID="123",
-        COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
+        GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
     )
-    @patch("integrations.communications.outbox.publish_outbox_wake")
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
     def test_pre_care_skips_when_appointment_cancelled(self, mock_wake):
-        CommunicationOutbox.objects.create(
+        WhatsAppOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.WHATSAPP,
             event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
             to_phone="919876543210",
             template_name="appointment_confirmed_template",
             template_language="en",
-            status=CommunicationOutboxStatus.ACCEPTED,
+            status=WhatsAppOutboxStatus.ACCEPTED,
         )
         self.appointment.status = AppointmentStatus.CANCELLED
         self.appointment.save(update_fields=["status", "updated_at"])
@@ -985,27 +999,27 @@ class WhatsAppCareMessageTests(TestCase):
             CommunicationEventType.APPOINTMENT_PRE_CARE,
             wake=False,
         )
-        process_outbox_message(pre.pk)
+        process_whatsapp_message_by_id(pre.pk)
         pre.refresh_from_db()
-        self.assertEqual(pre.status, CommunicationOutboxStatus.SKIPPED)
+        self.assertEqual(pre.status, WhatsAppOutboxStatus.SKIPPED)
         self.assertIn("cancelled", pre.skip_reason)
 
     @override_settings(
         WHATSAPP_ACCESS_TOKEN="token",
         WHATSAPP_PHONE_NUMBER_ID="123",
-        COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
+        GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
         GOOGLE_CALENDAR_ID="",
     )
-    @patch("integrations.communications.outbox.publish_outbox_wake")
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
     @patch(
-        "integrations.communications.outbox.sync_appointment_with_google",
+        "integrations.google_calendar.outbox.sync_appointment_with_google",
         return_value=None,
     )
     def test_confirmed_queue_does_not_enqueue_pre_care_yet(
         self, mock_sync, mock_wake
     ):
         queue_confirmed_by_appointment_id(self.appointment.pk)
-        pre = CommunicationOutbox.objects.filter(
+        pre = WhatsAppOutbox.objects.filter(
             appointment=self.appointment,
             event_type=CommunicationEventType.APPOINTMENT_PRE_CARE,
         ).first()
@@ -1014,62 +1028,60 @@ class WhatsAppCareMessageTests(TestCase):
     @override_settings(
         WHATSAPP_ACCESS_TOKEN="token",
         WHATSAPP_PHONE_NUMBER_ID="123",
-        COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
+        GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
     )
-    @patch("integrations.communications.outbox.publish_outbox_wake")
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
     def test_confirmed_accepted_enqueues_pre_care(self, mock_wake):
-        confirmed = CommunicationOutbox.objects.create(
+        confirmed = WhatsAppOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.WHATSAPP,
             event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
             to_phone="919876543210",
             template_name="appointment_confirmed_template",
             template_language="en",
-            status=CommunicationOutboxStatus.SENDING,
+            status=WhatsAppOutboxStatus.SENDING,
             attempt_count=1,
         )
-        mark_outbox_accepted(confirmed, wamid="wamid.confirmed")
-        pre = CommunicationOutbox.objects.filter(
+        mark_whatsapp_accepted(confirmed, wamid="wamid.confirmed")
+        pre = WhatsAppOutbox.objects.filter(
             appointment=self.appointment,
             event_type=CommunicationEventType.APPOINTMENT_PRE_CARE,
         ).first()
         self.assertIsNotNone(pre)
         self.assertEqual(pre.template_name, "service_pre_care")
-        self.assertEqual(pre.status, CommunicationOutboxStatus.PENDING)
+        # No queue URL → leave PENDING (local drain); QUEUED only after SQS mark.
+        self.assertEqual(pre.status, WhatsAppOutboxStatus.PENDING)
 
     def test_pending_drain_excludes_pre_care_while_confirmed_open(self):
-        CommunicationOutbox.objects.create(
+        WhatsAppOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.WHATSAPP,
             event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
             to_phone="919876543210",
             template_name="appointment_confirmed_template",
             template_language="en",
-            status=CommunicationOutboxStatus.PENDING,
+            status=WhatsAppOutboxStatus.PENDING,
         )
         pre = enqueue_appointment_care_message(
             self.appointment,
             CommunicationEventType.APPOINTMENT_PRE_CARE,
             wake=False,
         )
-        pending_ids = set(pending_outbox_queryset().values_list("pk", flat=True))
+        pending_ids = set(pending_whatsapp_queryset().values_list("pk", flat=True))
         self.assertNotIn(pre.pk, pending_ids)
 
     @override_settings(
         WHATSAPP_ACCESS_TOKEN="token",
         WHATSAPP_PHONE_NUMBER_ID="123",
-        COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
+        GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
     )
-    @patch("integrations.communications.outbox.publish_outbox_wake")
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
     def test_pre_care_skips_when_appointment_completed(self, mock_wake):
-        CommunicationOutbox.objects.create(
+        WhatsAppOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.WHATSAPP,
             event_type=CommunicationEventType.APPOINTMENT_CONFIRMED,
             to_phone="919876543210",
             template_name="appointment_confirmed_template",
             template_language="en",
-            status=CommunicationOutboxStatus.ACCEPTED,
+            status=WhatsAppOutboxStatus.ACCEPTED,
         )
         self.appointment.status = AppointmentStatus.COMPLETED
         self.appointment.save(update_fields=["status", "updated_at"])
@@ -1078,9 +1090,9 @@ class WhatsAppCareMessageTests(TestCase):
             CommunicationEventType.APPOINTMENT_PRE_CARE,
             wake=False,
         )
-        process_outbox_message(pre.pk)
+        process_whatsapp_message_by_id(pre.pk)
         pre.refresh_from_db()
-        self.assertEqual(pre.status, CommunicationOutboxStatus.SKIPPED)
+        self.assertEqual(pre.status, WhatsAppOutboxStatus.SKIPPED)
         self.assertIn("completed", pre.skip_reason)
 
     def test_care_event_requires_explicit_template_name(self):
@@ -1091,51 +1103,53 @@ class WhatsAppCareMessageTests(TestCase):
     @override_settings(
         WHATSAPP_ACCESS_TOKEN="token",
         WHATSAPP_PHONE_NUMBER_ID="123",
-        COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
+        GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
     )
-    @patch("integrations.communications.outbox.publish_outbox_wake")
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
     def test_schedule_post_care_enqueues_outbox_row(self, mock_wake):
         with self.captureOnCommitCallbacks(execute=True):
             schedule_queue_appointment_post_care(self.appointment)
-        post = CommunicationOutbox.objects.filter(
+        post = WhatsAppOutbox.objects.filter(
             appointment=self.appointment,
             event_type=CommunicationEventType.APPOINTMENT_POST_CARE,
         ).first()
         self.assertIsNotNone(post)
         self.assertEqual(post.template_name, "service_post_care")
-        self.assertEqual(post.status, CommunicationOutboxStatus.PENDING)
+        # No queue URL → leave PENDING (local drain); QUEUED only after SQS mark.
+        self.assertEqual(post.status, WhatsAppOutboxStatus.PENDING)
 
     @override_settings(
         WHATSAPP_ACCESS_TOKEN="token",
         WHATSAPP_PHONE_NUMBER_ID="123",
-        COMMUNICATION_OUTBOX_WAKE_QUEUE_URL="",
+        GOOGLE_CALENDAR_OUTBOX_QUEUE_URL="",
     )
-    @patch("integrations.communications.outbox.publish_outbox_wake")
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
     def test_schedule_post_care_skips_when_blank_template(self, mock_wake):
         ServiceCareTemplate.objects.filter(
             service=self.appointment.service
         ).update(post_template_name="")
         with self.captureOnCommitCallbacks(execute=True):
             schedule_queue_appointment_post_care(self.appointment)
-        post = CommunicationOutbox.objects.filter(
+        post = WhatsAppOutbox.objects.filter(
             appointment=self.appointment,
             event_type=CommunicationEventType.APPOINTMENT_POST_CARE,
         ).first()
         self.assertIsNone(post)
 
-    @patch("integrations.communications.outbox.publish_outbox_wake")
+    @patch("integrations.google_calendar.outbox.dispatch_google_calendar_job_ids")
     def test_stale_non_confirmed_reclaim_does_not_wake(self, mock_wake):
-        stale_at = timezone.now() - timedelta(minutes=STALE_SENDING_MINUTES + 1)
-        message = CommunicationOutbox.objects.create(
+        stale_at = timezone.now() - timedelta(
+            minutes=STALE_WHATSAPP_SENDING_MINUTES + 1
+        )
+        message = WhatsAppOutbox.objects.create(
             appointment=self.appointment,
-            channel=CommunicationChannel.WHATSAPP,
             event_type=CommunicationEventType.APPOINTMENT_REMINDER,
             to_phone="919876543210",
             template_name="therapy_session_reminder",
             template_language="en",
-            status=CommunicationOutboxStatus.SENDING,
+            status=WhatsAppOutboxStatus.SENDING,
             attempt_count=1,
         )
-        CommunicationOutbox.objects.filter(pk=message.pk).update(updated_at=stale_at)
-        reclaim_stale_sending_messages()
+        WhatsAppOutbox.objects.filter(pk=message.pk).update(updated_at=stale_at)
+        reclaim_stale_whatsapp_sending_messages()
         mock_wake.assert_not_called()

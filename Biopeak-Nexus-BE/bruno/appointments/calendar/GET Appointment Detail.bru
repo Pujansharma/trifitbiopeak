@@ -18,6 +18,9 @@ settings {
 docs {
   Full appointment detail including exclusive bounds and buffers.
   notes: free-text notes set at booking/reschedule time, or null.
+  staff_notes: admin/associate only (omitted for customers). Append-only,
+  oldest first. Each row: { id, text, created_by { id, email, full_name }|null,
+  created_at }. Empty array when none. Add via POST /appointments/{id}/staff-notes/.
   google_meet_link: the mirrored Google Calendar event's Meet link, or null/blank if
   the appointment isn't synced (no connected associate, or not virtual modality).
 }

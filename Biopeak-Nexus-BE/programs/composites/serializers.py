@@ -46,7 +46,10 @@ from programs.utils.db import (
     update_program_redeemable_centers_count,
     update_program_services_count,
 )
-from programs.utils.helper import generate_program_unique_id
+from programs.utils.helper import (
+    generate_program_unique_id,
+    has_program_classification_flags,
+)
 
 
 class CompositeTemplateServiceReferenceSerializer(BaseSerializer):
@@ -149,6 +152,13 @@ class CompositeProgramCenterSerializer(BaseSerializer):
 
 
 class BaseCompositeTemplateSerializer(BaseModelSerializer):
+    class Meta:
+        model = CompositeTemplate
+        fields = ["id", "code", "name", "is_active"]
+        read_only_fields = fields
+
+
+class MinimumCompositeProgramTemplateSerializer(BaseModelSerializer):
     class Meta:
         model = CompositeTemplate
         fields = ["id", "code", "name", "is_active"]
@@ -699,6 +709,11 @@ class CompositeProgramServiceSerializer(BaseModelSerializer):
 
 class CompositeProgramValidationMixin:
     def _validate_composite_program_metadata(self, program_data: dict):
+        """Apply package defaults before validating explicit financial classifications."""
+        is_part_of_package = not has_program_classification_flags(self.initial_data)
+        program_data["is_part_of_package"] = is_part_of_package
+        if is_part_of_package:
+            program_data["is_complimentary"] = False
         is_complimentary = program_data.get("is_complimentary", True)
         is_credit = program_data.get("is_credit", False)
         if is_complimentary and is_credit:
@@ -709,7 +724,11 @@ class CompositeProgramValidationMixin:
             raise serializers.ValidationError(
                 {"credit_received": "Credit amount is required when program is credit."}
             )
-        if not is_complimentary and program_data.get("price") is None:
+        if (
+            not is_part_of_package
+            and not is_complimentary
+            and program_data.get("price") is None
+        ):
             raise serializers.ValidationError(
                 {"price": "Price is required when program is not complimentary."}
             )
@@ -790,6 +809,9 @@ class CompositeProgramValidationMixin:
 
 
 class CompositeProgramSerializer(CompositeProgramValidationMixin, BaseModelSerializer):
+    is_part_of_package = serializers.BooleanField(
+        source="program.is_part_of_package", read_only=True,
+    )
     therapy_redemption_is_global = serializers.BooleanField(required=False)
     therapy_services = CompositeTherapyServiceSelectionSerializer(
         many=True, required=False, write_only=True,
@@ -918,6 +940,7 @@ class CompositeProgramSerializer(CompositeProgramValidationMixin, BaseModelSeria
             "expires_at",
             "is_complimentary",
             "is_credit",
+            "is_part_of_package",
             "credit_received",
             "price",
             "redeemable_centers",
@@ -1191,6 +1214,7 @@ class CompositeProgramDetailSerializer(CompositeProgramSerializer):
             "expires_at",
             "is_complimentary",
             "is_credit",
+            "is_part_of_package",
             "credit_received",
             "price",
             "redeemable_centers",
@@ -1276,7 +1300,11 @@ class CompositeProgramDetailSerializer(CompositeProgramSerializer):
                 {"is_credit": "A program cannot be both complimentary and credit."}
             )
         price = program_data.get("price", instance.program.price)
-        if not is_complimentary and price is None:
+        is_part_of_package = (
+            instance.program.is_part_of_package
+            and not has_program_classification_flags(program_data)
+        )
+        if not is_part_of_package and not is_complimentary and price is None:
             raise serializers.ValidationError(
                 {"price": "Price is required when program is not complimentary."}
             )
@@ -1287,6 +1315,9 @@ class CompositeProgramDetailSerializer(CompositeProgramSerializer):
                     value, created_by,
                 )
                 setattr(instance.program, field, value)
+            if has_program_classification_flags(program_data):
+                instance.program.is_part_of_package = False
+                program_data["is_part_of_package"] = False
             # Write the parent before reading centers, matching therapy's addition flow.
             instance.program.save(update_fields=[*program_data.keys(), "updated_at"])
             existing_center_identifiers = set(
@@ -1406,6 +1437,9 @@ class CompositeProgramCancelSerializer(BaseModelSerializer):
 
 
 class CompositeAddOnSerializer(BaseModelSerializer):
+    is_part_of_package = serializers.BooleanField(
+        source="program.is_part_of_package", read_only=True,
+    )
     id = serializers.UUIDField(source="pk", read_only=True)
     uid = serializers.CharField(source="program.uid", read_only=True)
     name = serializers.CharField(read_only=True)
@@ -1529,6 +1563,7 @@ class CompositeAddOnSerializer(BaseModelSerializer):
             "expires_at",
             "is_complimentary",
             "price",
+            "is_part_of_package",
             "redeemable_centers",
             "redeemable_centers_count",
             "services",

@@ -39,7 +39,7 @@ urlpatterns = [
     path("centers/", include("accounts.centers.urls")),
     # Customer appointments (not center-scoped)
     path("appointments/", include("appointments.customer_urls")),
-    # Appointment audit logs (admin or associate, not center-scoped)
+    # Appointment audit logs + staff notes (admin or associate, not center-scoped)
     path("appointments/", include("appointments.audit_urls")),
     # Associates
     path("associates/", include("accounts.associates.urls")),

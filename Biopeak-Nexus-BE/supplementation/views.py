@@ -15,6 +15,7 @@ from django.db.models.functions import Coalesce, Concat, Greatest
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.exceptions import NotFound
+from rest_framework.request import Request
 
 from accounts.associates.models import AssociateCenterAssignment
 from accounts.associates.utils.roles import active_role_links_prefetch
@@ -739,18 +740,15 @@ class ProtocolItemReplaceView(BaseGenericAPIView):
         )
 
 
-def customer_plan_profile(request):
-    profile_id = request.headers.get("X-Customer-Profile-ID", "").strip()
-    if CENTER_QUERY_PATTERN.fullmatch(profile_id) is None:
+def customer_plan_profile(request: Request) -> CustomerProfile:
+    profile = CustomerProfile.objects.filter(
+        customer__user=request.user,
+        is_active=True,
+        is_main=True,
+    ).first()
+    if profile is None:
         raise NotFound("Customer profile not found.")
-    return get_object_or_404(
-        CustomerProfile.objects.filter(
-            customer__user=request.user,
-            is_active=True,
-        ),
-        "Customer profile not found.",
-        pk=profile_id,
-    )
+    return profile
 
 
 class PlanSummaryView(PlanReadViewMeta):

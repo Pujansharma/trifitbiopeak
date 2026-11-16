@@ -1,0 +1,14 @@
+ROOK implementation update ready for staging review:
+
+- Preserved the manager's authorization, initial history, manual sync, nightly reconciliation and revocation flows.
+- Added dedicated PostgreSQL-backed ROOK consumers with SQS wake-ups and DB fallback; up to five global recovery slots and one running recovery per connection.
+- Added a six-hour cooldown from the last accepted manual request per connection. Initial imports, webhooks and automatic retries are exempt.
+- Added shared configured ROOK API budgets, Retry-After handling, saved recovery slices, partial analytics updates and follow-up handling for newer accepted sync targets.
+- Existing non-ROOK business modules and shared sweep are unchanged. API paths/body formats are preserved; manual-sync cooldown behavior and additive fields are documented in Bruno.
+
+Validation: 69 offline policy/deployment tests and 9 isolated supervisor-helper tests passed. These are NOT full Django/PostgreSQL, live ROOK or AWS validation.
+
+Before production: owner-generated/reviewed migrations, real ROOK quota configuration, full PostgreSQL and mobile/provider tests, dedicated AWS deployment, old-schedule cutover and staged load testing are mandatory. Worker services/schedules are disabled by default. See docs/ROOK_PRODUCTION_HANDOVER.md and docs/ROOK_PRODUCTION_VALIDATION.md.
+
+Suggested commit:
+feat(rook): add durable wake-ups, bounded recovery pool and manual sync cooldown

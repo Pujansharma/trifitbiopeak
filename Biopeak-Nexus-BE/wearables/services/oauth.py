@@ -18,7 +18,7 @@ from django.utils import timezone
 from wearables.models import WearableConnectionEvent
 from wearables.models import WearableConnection
 from wearables.services import connections as connection_service
-from wearables.services.client import RookClient, RookConfigurationError, RookServiceError
+from wearables.services.client import RookConfigurationError
 from wearables.utils.constants import AuthorizationStatus, ConnectionStatus
 
 
@@ -69,7 +69,8 @@ def callback_url_for_connection(
         actor_user=actor_user,
         correlation_id=correlation_id[:128],
         detail="One-time ROOK OAuth callback state registered.",
-        payload={"nonceDigest": digest, "source": connection.data_source},
+        payload={"nonceDigest": digest, "source": connection.data_source,
+                 "generation": str(connection.authorization_generation)},
     )
     return redirect_url
 
@@ -84,7 +85,7 @@ def retire_oauth_callback_state(connection, callback_url: str | None, *, event_t
         connection=connection,
         event_type="oauth_state_pending",
         payload__nonceDigest=digest,
-    ).update(event_type=event_type, updated_at=timezone.now())
+    ).update(event_type=event_type, updated_at=timezone.localtime())
 
 
 def _decode_state(state: str) -> str:
@@ -128,7 +129,7 @@ def _cancel_pending_connection(connection, *, reason: str, prior_status: str = "
 def claim_oauth_state(event: WearableConnectionEvent, new_type: str) -> None:
     updated = WearableConnectionEvent.objects.filter(
         pk=event.pk, event_type="oauth_state_pending",
-    ).update(event_type=new_type, updated_at=timezone.now())
+    ).update(event_type=new_type, updated_at=timezone.localtime())
     if not updated:
         raise OAuthStateError("Authorization state was already used by another request.")
     event.event_type = new_type
@@ -136,13 +137,7 @@ def claim_oauth_state(event: WearableConnectionEvent, new_type: str) -> None:
 def complete_oauth_callback(
     state_token: str, *, rook_client_uuid: str, rook_user_id: str, cancelled: bool = False
 ) -> str:
-    """Verify the ROOK grant without holding a database transaction open.
-
-    The state is read twice: first to validate identities before the upstream
-    request, then again inside a short atomic block to detect expired, used,
-    cancelled or superseded callbacks. Only the local claim and connection
-    transition occur inside that transaction.
-    """
+    """Consume the one-use callback and verify ROOK immediately, without an auth job."""
     digest = _decode_state(state_token)
     configured_client_uuid = str(getattr(settings, "ROOK_CLIENT_UUID", ""))
     if not configured_client_uuid or not hmac.compare_digest(configured_client_uuid, str(rook_client_uuid)):
@@ -158,22 +153,12 @@ def complete_oauth_callback(
         raise OAuthStateError("ROOK member identity does not match.")
 
     max_age = timedelta(minutes=max(1, getattr(settings, "ROOK_OAUTH_TIMEOUT_MINUTES", 15)))
-    should_verify_upstream = not cancelled and (timezone.now() - event.created_at <= max_age)
-    authorized_sources = set()
-    if should_verify_upstream:
-        # Network I/O must be outside transaction.atomic(): ROOK can reach the
-        # read timeout and must never keep a database transaction open.
-        authorized_sources = RookClient().get_authorized_sources(
-            rook_user_id=event.connection.identity.rook_user_id,
-        )
-
     with transaction.atomic():
-        # Refresh all mutable callback/connection state after the network call.
         event = pending_events.filter(
             event_type="oauth_state_pending", payload__nonceDigest=digest,
         ).first()
         if event is None:
-            raise OAuthStateError("Authorization state is unknown or already used.")
+            raise OAuthStateError("Authorization state was already used by another request.")
         connection = event.connection
         if not hmac.compare_digest(connection.identity.rook_user_id, str(rook_user_id)):
             raise OAuthStateError("ROOK member identity does not match.")
@@ -189,31 +174,28 @@ def complete_oauth_callback(
                 connection, reason="Member cancelled authorization.", prior_status=event.previous_status,
             )
             return "cancelled"
-        if connection.data_source not in authorized_sources:
-            # ROOK may be eventually consistent: status-polling remains available.
-            return "pending"
-
-        # One-time state consumption and the connection transition commit (or
-        # roll back) together; a concurrent callback cannot claim the same row.
-        claim_oauth_state(event, "oauth_state_verified")
-        connection = WearableConnection.objects.filter(pk=connection.pk).first()
-        if connection is None:
-            raise OAuthStateError("Wearable connection no longer exists.")
-        if connection.status in {ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING}:
-            was_reconnect = event.previous_status in {
-                ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED,
-            }
-            connection_service.authorization_confirmed(
-                connection, was_reconnect=was_reconnect,
-                actor_user=event.actor_user, correlation_id=event.correlation_id,
-            )
-        elif connection.authorization_status != AuthorizationStatus.AUTHORIZED:
-            # Late callbacks may not reauthorize an explicitly disconnected
-            # provider or override a newer connection transition.
-            event.event_type = "oauth_state_superseded"
-            event.save(update_fields=["event_type", "updated_at"])
+        if event.payload.get("generation") not in (None, str(connection.authorization_generation)):
+            claim_oauth_state(event, "oauth_state_superseded")
             return "cancelled"
-        return "authorized"
+        if connection.status not in {ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING}:
+            claim_oauth_state(event, "oauth_state_superseded")
+            return "authorized" if connection.authorization_status == AuthorizationStatus.AUTHORIZED else "cancelled"
+
+        was_reconnect = event.previous_status in {
+            ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED,
+        }
+        claim_oauth_state(event, "oauth_state_verification_pending")
+        connection_id = connection.pk
+        correlation_id = event.correlation_id
+
+    # Network I/O intentionally occurs outside the transaction. A positive callback
+    # is only a trigger; get_authorized_sources is the actual proof of authorization.
+    from wearables.services.authorization_jobs import verify_rook_connection_now
+    connection = WearableConnection.objects.select_related("identity", "customer_profile").get(pk=connection_id)
+    result = verify_rook_connection_now(
+        connection, was_reconnect=was_reconnect, correlation_id=correlation_id,
+    )
+    return "authorized" if result.get("authorized") else "pending"
 
 
 def expire_oauth_attempts(customer_profile) -> int:
@@ -222,15 +204,15 @@ def expire_oauth_attempts(customer_profile) -> int:
     pending = list(
         WearableConnectionEvent.objects.select_related("connection").filter(
             connection__customer_profile=customer_profile,
-            event_type="oauth_state_pending",
+            event_type__in=("oauth_state_pending", "oauth_state_verification_pending"),
             created_at__lt=cutoff,
         )
     )
     for event in pending:
         with transaction.atomic():
             changed = WearableConnectionEvent.objects.filter(
-                pk=event.pk, event_type="oauth_state_pending"
-            ).update(event_type="oauth_state_expired", updated_at=timezone.now())
+                pk=event.pk, event_type__in=("oauth_state_pending", "oauth_state_verification_pending")
+            ).update(event_type="oauth_state_expired", updated_at=timezone.localtime())
             if changed:
                 _cancel_pending_connection(event.connection, reason="ROOK authorization timed out.", prior_status=event.previous_status)
     return len(pending)

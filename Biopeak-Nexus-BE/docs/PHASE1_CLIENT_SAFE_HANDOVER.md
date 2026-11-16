@@ -1,5 +1,7 @@
 # Biopeak Nexus — Client-Safe Phase 1 Handover and Release Gate
 
+> **SUPERSEDED (2026-11-16).** Historical ZIP handover. Current ROOK execution is outbox + `infra/integrations.yaml` — see `docs/ROOK_MANAGER_FLOWS.md`. Paths like `process_health_jobs` below are not current.
+
 **Date:** 15 October 2026. **Base:** original `Biopeak-Nexus-BE(5).zip`. **Reference:** `Biopeak-Nexus-BE-Phase1-PRD-Updated(2).zip`. **Scope:** original Biopeak PRD Phase 1/ROOK. **Verdict: NOT READY TO MERGE into production.**
 
 This is a source-level integration/review candidate, **not a working or production-certified release**. The client-original backend contains six inherited Python syntax errors. Per the explicit protection rule they are unchanged in this ZIP. Live Django imports, database migrations, APIs and provider workflows have NOT been tested.
@@ -140,7 +142,7 @@ The client-original lab timeline view intentionally exposes only a **milestone/a
 - Added `wearables/migrations/0001_initial.py` — new wearables-related tables/constraints only, dependency on existing customer migration. Dependencies statically resolve; actual `makemigrations --check`, `migrate --plan` and temporary PostgreSQL migration are **NOT TESTED**.
 - Use Python **3.14+** and existing `uv.lock` per original project. The working environment has Python **3.13.5** and lacks Django/test PostgreSQL; dependency install not available offline.
 - Provide `ROOK_CLIENT_UUID`, `ROOK_SECRET_KEY`, `ROOK_WEBHOOK_HASH_KEY` and optional SDK and short callback settings in the secret manager with `DEV_`, `STG_`, `PRD_` prefix as appropriate. See `PHASE1_ROOK_CONFIG.example`. NEVER publish secrets.
-- Register ROOK data and notification webhook URLs, ROOK device/source app approvals, worker schedule `process_health_jobs` and freshness status command. Set `WEARABLES_ENABLED=False` during deployment and enable only after verified acceptance.
+- Register ROOK data and notification webhook URLs, ROOK device/source app approvals, worker schedule and freshness status command. Confirm credentials and queues before go-live.
 - The health cache is `LocMemCache` (per process). It does **not** provide cross-worker invalidation. Use an approved shared cache or turn off/cache very short until multiworker concurrency is validated; no new Redis dependency has been added to avoid lockfile divergence.
 
 ## Testing: executed vs NOT TESTED

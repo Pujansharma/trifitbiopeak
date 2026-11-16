@@ -5,6 +5,8 @@ uv run python manage.py test wearables.tests.test_pr_review_12_fixes
 """
 import ast
 from datetime import date, datetime, timedelta, timezone as utc_timezone
+from types import SimpleNamespace
+from uuid import uuid4
 from unittest.mock import patch
 
 from django.conf import settings
@@ -18,7 +20,7 @@ from accounts.models import UserAccount
 from accounts.users.models import User
 from accounts.utils.constants import UserType
 from wearables.models import (
-    HealthDailySummary, HealthObservation, HealthProcessingJob, RookHealthDocument,
+    HealthDailySummary, HealthObservation, RookOutbox, RookHealthDocument,
     WearableConsent, WearableConnection,
 )
 from wearables.services.connections import get_or_create_connection, save_connection_transition
@@ -26,10 +28,14 @@ from wearables.services.identity import get_or_create_rook_identity
 from wearables.services.ingestion import (
     ingest_rook_document, rebuild_daily_summaries, remap_member_local_days,
 )
-from wearables.services.job_processor import (
-    complete_health_job, heartbeat_health_job, recovery_lease_minutes,
-    reset_stale_health_jobs, save_recovery_outcome,
+from wearables.services.job_claims import (
+    STALE_JOB_MINUTES,
+    LostHealthJobLease,
+    complete_health_job,
+    heartbeat_health_job,
+    reset_stale_health_jobs,
 )
+from wearables.services.recovery import save_recovery_outcome
 from wearables.services.client import RookServiceError
 from wearables.management.commands.check_rook_configuration import rook_readiness_checks
 from wearables.utils.constants import (
@@ -39,10 +45,18 @@ from wearables.utils.constants import (
 
 
 class ReviewStaticContractsTests(SimpleTestCase):
-    def test_sweep_schedules_both_health_commands(self):
-        script = (settings.BASE_DIR / "assets/scripts/sweep_jobs.sh").read_text()
-        self.assertIn("enqueue_health_freshness_checks", script)
-        self.assertIn("process_health_jobs --limit", script)
+    def test_rook_workers_use_outbox_commands_not_lease_supervisor(self):
+        yaml_text = (settings.BASE_DIR / "infra/integrations.yaml").read_text()
+        self.assertIn("rook_auth:", yaml_text)
+        self.assertIn("rook_data_fetch:", yaml_text)
+        self.assertIn("process_rook_auth_jobs", yaml_text)
+        self.assertIn("process_rook_data_fetch_jobs", yaml_text)
+        self.assertFalse((settings.BASE_DIR / "assets/scripts/process_rook_auth_jobs.sh").exists())
+        self.assertFalse((settings.BASE_DIR / "assets/scripts/process_rook_data_fetch_jobs.sh").exists())
+        self.assertFalse((settings.BASE_DIR / "assets/scripts/process_pending_rook_sync_scan.sh").exists())
+        self.assertFalse((settings.BASE_DIR / "assets/scripts/process_health_regular.sh").exists())
+        self.assertFalse((settings.BASE_DIR / "wearables/management/commands/process_health_jobs.py").exists())
+        self.assertFalse((settings.BASE_DIR / "wearables/management/commands/run_scheduled_worker.py").exists())
 
     def test_migration_does_not_import_live_enums(self):
         migration = (settings.BASE_DIR / "wearables/migrations/0001_initial.py").read_text()
@@ -54,10 +68,11 @@ class ReviewStaticContractsTests(SimpleTestCase):
         self.assertIn("FROZEN_WEARABLESOURCE_CHOICES", migration)
         self.assertIn("default='wearables-v1.2'", migration)
 
-    def test_wearable_modules_have_no_row_locks_or_inner_imports(self):
+    def test_wearable_modules_have_no_raw_sql_or_inner_imports(self):
         for path in (settings.BASE_DIR / "wearables/services").glob("*.py"):
             contents = path.read_text()
-            self.assertNotIn(".select_for_update()", contents, str(path))
+            for raw_operation in (".raw(", "RawSQL(", "cursor.execute("):
+                self.assertNotIn(raw_operation, contents, str(path))
             tree = ast.parse(contents)
             inner_imports = [
                 node.lineno for node in ast.walk(tree)
@@ -92,8 +107,8 @@ class ReviewStaticContractsTests(SimpleTestCase):
         ))
 
     @override_settings(ROOK_READ_TIMEOUT_SECONDS=120, ROOK_CONNECT_TIMEOUT_SECONDS=20)
-    def test_recovery_lease_exceeds_worst_case_network_duration(self):
-        self.assertGreater(recovery_lease_minutes(), (21 * 140) / 60)
+    def test_stale_job_reclaim_window_is_bounded_and_does_not_expand_with_provider_timeout(self):
+        self.assertEqual(STALE_JOB_MINUTES, 15)
 
 
 class ReviewDatabaseTests(TestCase):
@@ -167,7 +182,7 @@ class ReviewDatabaseTests(TestCase):
             disconnected_at=timezone.now(),
         )
         stale.status = ConnectionStatus.ACTIVE
-        with self.assertRaisesRegex(RookServiceError, "authorization changed"):
+        with self.assertRaises(RookServiceError):
             save_recovery_outcome(stale, fields=["status"])
         self.connection.refresh_from_db()
         self.assertEqual(self.connection.status, ConnectionStatus.DISCONNECTED)
@@ -199,34 +214,33 @@ class ReviewDatabaseTests(TestCase):
         self.assertEqual(HealthDailySummary.objects.filter(customer_profile=self.profile).count(), 12)
         self.assertEqual(HealthDailySummary.objects.filter(metric="test_metric_5").first().latest, 5.0)
 
-    def test_long_recovery_lease_does_not_expire_at_fifteen_minutes(self):
+    def test_abandoned_recovery_and_regular_jobs_both_fail_after_deadline(self):
         now = timezone.now()
-        recovery = HealthProcessingJob.objects.create(
-            idempotency_key="review-recovery", job_type=HealthJobType.RECOVERY_PULL,
+        recovery = RookOutbox.objects.create(
+            idempotency_key="review-recovery", job_type=HealthJobType.FETCH_ROOK_DATA,
             status=HealthJobStatus.RUNNING, scheduled_at=now,
             locked_at=now - timedelta(minutes=20), attempt_count=1,
         )
-        ordinary = HealthProcessingJob.objects.create(
-            idempotency_key="review-normalize", job_type=HealthJobType.NORMALIZE_DOCUMENT,
+        ordinary = RookOutbox.objects.create(
+            idempotency_key="review-revoke", job_type=HealthJobType.REVOKE_ROOK_CONNECTION,
             status=HealthJobStatus.RUNNING, scheduled_at=now,
             locked_at=now - timedelta(minutes=20), attempt_count=1,
         )
         reset_stale_health_jobs()
         recovery.refresh_from_db()
         ordinary.refresh_from_db()
-        self.assertEqual(recovery.status, HealthJobStatus.RUNNING)
+        self.assertEqual(recovery.status, HealthJobStatus.FAILED)
         self.assertEqual(ordinary.status, HealthJobStatus.FAILED)
-        heartbeat_health_job(recovery)
-        recovery.refresh_from_db()
-        self.assertGreater(recovery.locked_at, now - timedelta(seconds=5))
+        with self.assertRaises(LostHealthJobLease):
+            heartbeat_health_job(recovery)
 
     def test_previous_worker_attempt_cannot_complete_new_claim(self):
-        job = HealthProcessingJob.objects.create(
-            idempotency_key="review-stale-attempt", job_type=HealthJobType.RECOVERY_PULL,
+        job = RookOutbox.objects.create(
+            idempotency_key="review-stale-attempt", job_type=HealthJobType.FETCH_ROOK_DATA,
             status=HealthJobStatus.RUNNING, scheduled_at=timezone.now(),
             locked_at=timezone.now(), attempt_count=1,
         )
-        HealthProcessingJob.objects.filter(pk=job.pk).update(attempt_count=2)
+        RookOutbox.objects.filter(pk=job.pk).update(attempt_count=2)
         complete_health_job(job, {"incorrect": True})
         job.refresh_from_db()
         self.assertEqual(job.status, HealthJobStatus.RUNNING)
@@ -263,3 +277,16 @@ class ReviewDatabaseTests(TestCase):
         self.assertEqual(result["remapped"], 510)
         self.assertEqual(HealthObservation.objects.filter(local_date=date(2026, 10, 9)).count(), 510)
         self.assertEqual(HealthObservation.objects.filter(observed_at=instant).count(), 510)
+
+    def test_missing_document_normalize_does_not_advance_connection_sync(self):
+        original_last_sync = timezone.localtime() - timedelta(days=3)
+        WearableConnection.objects.filter(pk=self.connection.pk).update(
+            last_data_processed_at=original_last_sync,
+            last_successful_sync=original_last_sync,
+        )
+        from wearables.services.ingestion import normalize_health_document
+        with self.assertRaisesMessage(ValueError, "Health document no longer exists."):
+            normalize_health_document(uuid4())
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.last_data_processed_at, original_last_sync)
+        self.assertEqual(self.connection.last_successful_sync, original_last_sync)

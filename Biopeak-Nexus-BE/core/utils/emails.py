@@ -29,12 +29,30 @@ def send_email(data):
 
 
 def send_templated_email(
-    subject, template, email, from_email: str = settings.DEFAULT_FROM_EMAIL
-):
+    subject,
+    template,
+    email,
+    from_email: str = settings.DEFAULT_FROM_EMAIL,
+    cc: Iterable[str] | str | None = None,
+    send_now: bool = False,
+) -> None:
+    recipients = [email] if isinstance(email, str) else list(email)
+    if isinstance(cc, str):
+        cc_recipients = [cc]
+    elif cc:
+        cc_recipients = list(cc)
+    else:
+        cc_recipients = None
     email_message = EmailMultiAlternatives(
-        subject=subject, to=[email], from_email=from_email
+        subject=subject,
+        to=recipients,
+        from_email=from_email,
+        cc=cc_recipients,
     )
     email_message.attach_alternative(template, "text/html")
+    if send_now:
+        email_message.send()
+        return
     EmailThread(email_message).start()
 
 

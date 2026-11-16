@@ -686,6 +686,33 @@ class AppointmentAuditLog(BaseUUIDModel):
         return f"{self.pk}"
 
 
+class AppointmentStaffNote(BaseUUIDModel):
+    """Append-only staff note on an appointment. Not the booking `notes` field."""
+
+    appointment = models.ForeignKey(
+        Appointment,
+        on_delete=models.CASCADE,
+        related_name="staff_notes",
+    )
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="appointment_staff_notes",
+    )
+    text = models.CharField(max_length=1000)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["appointment", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.pk}"
+
+
 class AppointmentHistory(BaseUUIDModel):
     appointment = models.ForeignKey(
         Appointment,

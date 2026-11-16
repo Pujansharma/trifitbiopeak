@@ -1,5 +1,17 @@
 name: Build and Deploy to ECS
 
+# Auto-deploy: push to main only.
+# Manual deploy any branch: Actions → this workflow → Run workflow →
+#   pick branch under "Use workflow from" (feature to test, or main to roll back).
+#
+# Flow when BACKGROUND_JOBS_SUBNET_IDS + SECURITY_GROUP_IDS vars are set:
+#   1) build image
+#   2) CDK → SQS + Lambda launchers + reclaim/reminder schedules (+ SSM queue URLs)
+#   3) ECS deploy injects PRD_*_OUTBOX_QUEUE_URL from SSM into API/worker
+#      task defs (WA, Google Calendar, protocol AI — YAML-driven)
+#   4) CDK refresh so schedules point at the new task-def revision
+#
+# Prod-only stack: env prefix + assignPublicIp are fixed (not GitHub vars).
 on:
   push:
     branches:
@@ -11,9 +23,18 @@ env:
   ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
   AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
   TASK_DEFINITION_FAMILY: ${{ vars.TASK_DEFINITION_FAMILY }}
+  # Same image as API; used by SQS→Lambda→Fargate WA workers + scheduled jobs.
+  # Leave unset / same as TASK_DEFINITION_FAMILY to RunTask the API task def
+  # (command override). Set a dedicated family only while migrating off it.
+  WORKER_TASK_DEFINITION_FAMILY: ${{ vars.WORKER_TASK_DEFINITION_FAMILY || vars.TASK_DEFINITION_FAMILY }}
   ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
   ECS_SERVICE: ${{ vars.ECS_SERVICE }}
   CONTAINER_NAME: ${{ vars.CONTAINER_NAME }}
+  WORKER_CONTAINER_NAME: ${{ vars.WORKER_CONTAINER_NAME || vars.CONTAINER_NAME }}
+  BACKGROUND_JOBS_ENV_PREFIX: prd
+  BACKGROUND_JOBS_ASSIGN_PUBLIC_IP: ENABLED
+  BACKGROUND_JOBS_SUBNET_IDS: ${{ vars.BACKGROUND_JOBS_SUBNET_IDS }}
+  BACKGROUND_JOBS_SECURITY_GROUP_IDS: ${{ vars.BACKGROUND_JOBS_SECURITY_GROUP_IDS }}
 
 jobs:
   build:
@@ -28,6 +49,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Show deploy ref
+        run: |
+          echo "ref=${GITHUB_REF_NAME}"
+          echo "sha=${GITHUB_SHA}"
+          echo "event=${GITHUB_EVENT_NAME}"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
@@ -49,7 +76,8 @@ jobs:
           images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
           tags: |
             type=sha,format=long
-            type=raw,value=latest
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push image to Amazon ECR
         uses: docker/build-push-action@v7
@@ -65,35 +93,204 @@ jobs:
         id: image-uri
         run: echo "uri=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:sha-${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
-  deploy:
-    name: Deploy to ECS
+  background-jobs:
+    name: Deploy background jobs (CDK)
     runs-on: ubuntu-latest
     needs: build
+    if: ${{ vars.BACKGROUND_JOBS_SUBNET_IDS != '' && vars.BACKGROUND_JOBS_SECURITY_GROUP_IDS != '' }}
     permissions:
       id-token: write
       contents: read
+    outputs:
+      queue_env_lines: ${{ steps.queue-url.outputs.lines }}
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # render: fetches task def by family name automatically + injects new image
-      - name: Render new task definition
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install CDK + Python deps
+        run: |
+          npm install -g aws-cdk
+          python -m pip install --upgrade pip
+          pip install -r infra/requirements.txt
+
+      - name: Resolve account, cluster, worker task def
+        id: aws-ids
+        run: |
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          # Construct ARN — avoids ecs:DescribeClusters on the GHA role.
+          CLUSTER_ARN="arn:aws:ecs:${{ env.AWS_REGION }}:${ACCOUNT}:cluster/${{ env.ECS_CLUSTER }}"
+          # Latest ACTIVE revision ARN (needs ecs:DescribeTaskDefinition).
+          WORKER_TD_ARN=$(aws ecs describe-task-definition \
+            --task-definition "${{ env.WORKER_TASK_DEFINITION_FAMILY }}" \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "account=${ACCOUNT}" >> "$GITHUB_OUTPUT"
+          echo "cluster_arn=${CLUSTER_ARN}" >> "$GITHUB_OUTPUT"
+          echo "worker_td_arn=${WORKER_TD_ARN}" >> "$GITHUB_OUTPUT"
+
+      - name: Bootstrap CDK (idempotent)
+        run: cdk bootstrap "aws://${{ steps.aws-ids.outputs.account }}/${{ env.AWS_REGION }}"
+
+      - name: Reset failed stack / orphan SQS + SSM
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -m infra.scripts.reset_failed_background_jobs_stack \
+            --env-prefix "${{ env.BACKGROUND_JOBS_ENV_PREFIX }}" \
+            --region "${{ env.AWS_REGION }}"
+
+      - name: Deploy BiopeakBackgroundJobs stack
+        env:
+          # Repo root on path so `import infra.*` works.
+          # Must use `python -m infra.app` — NOT `python infra/app.py`, which
+          # puts infra/ on sys.path and shadows PyPI `constructs` with infra/constructs/.
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          cdk deploy "BiopeakBackgroundJobs-${{ env.BACKGROUND_JOBS_ENV_PREFIX }}" \
+            --app "python -m infra.app" \
+            -c "envPrefix=${{ env.BACKGROUND_JOBS_ENV_PREFIX }}" \
+            -c "account=${{ steps.aws-ids.outputs.account }}" \
+            -c "region=${{ env.AWS_REGION }}" \
+            -c "clusterArn=${{ steps.aws-ids.outputs.cluster_arn }}" \
+            -c "workerTaskDefinitionArn=${{ steps.aws-ids.outputs.worker_td_arn }}" \
+            -c "subnetIds=${{ env.BACKGROUND_JOBS_SUBNET_IDS }}" \
+            -c "securityGroupIds=${{ env.BACKGROUND_JOBS_SECURITY_GROUP_IDS }}" \
+            -c "containerName=${{ env.WORKER_CONTAINER_NAME }}" \
+            -c "assignPublicIp=${{ env.BACKGROUND_JOBS_ASSIGN_PUBLIC_IP }}" \
+            --require-approval never
+
+      - name: Sync queue URLs to SSM + export for ECS inject
+        id: queue-url
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          # Resolves SQS by name, PutParameter --overwrite to
+          # /biopeak/{env}/{queue_url_ssm_suffix}, prints PRD_* lines.
+          # YAML-driven — no hardcoded list. Not an AWS::SSM::Parameter in CDK.
+          LINES=$(python -m infra.scripts.export_outbox_queue_env \
+            --env-prefix "${{ env.BACKGROUND_JOBS_ENV_PREFIX }}" \
+            --settings-prefix PRD \
+            --region "${{ env.AWS_REGION }}")
+          {
+            echo "lines<<EOF"
+            printf "%s\n" "$LINES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    needs: [build, background-jobs]
+    if: ${{ always() && needs.build.result == 'success' && (needs.background-jobs.result == 'success' || needs.background-jobs.result == 'skipped') }}
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Show deploy target
+        run: |
+          echo "Deploying image=${{ needs.build.outputs.image }}"
+          echo "ref=${GITHUB_REF_NAME} sha=${GITHUB_SHA}"
+          echo "queue_env=${{ needs.background-jobs.outputs.queue_env_lines }}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Render API task definition
         id: render-task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
           task-definition-family: ${{ env.TASK_DEFINITION_FAMILY }}
           container-name: ${{ env.CONTAINER_NAME }}
           image: ${{ needs.build.outputs.image }}
+          environment-variables: ${{ needs.background-jobs.outputs.queue_env_lines }}
 
-      # deploy: registers new revision + rolling update + waits for stability
-      - name: Deploy to Amazon ECS
+      - name: Deploy API to Amazon ECS
+        id: deploy-api
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.render-task-def.outputs.task-definition }}
           service: ${{ env.ECS_SERVICE }}
           cluster: ${{ env.ECS_CLUSTER }}
           wait-for-service-stability: true
+
+      - name: Render worker task definition
+        id: render-worker-task-def
+        if: ${{ env.WORKER_TASK_DEFINITION_FAMILY != env.TASK_DEFINITION_FAMILY }}
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition-family: ${{ env.WORKER_TASK_DEFINITION_FAMILY }}
+          container-name: ${{ env.WORKER_CONTAINER_NAME }}
+          image: ${{ needs.build.outputs.image }}
+          environment-variables: ${{ needs.background-jobs.outputs.queue_env_lines }}
+
+      - name: Register worker task definition
+        id: deploy-worker
+        if: ${{ env.WORKER_TASK_DEFINITION_FAMILY != env.TASK_DEFINITION_FAMILY }}
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-worker-task-def.outputs.task-definition }}
+          cluster: ${{ env.ECS_CLUSTER }}
+
+      - name: Set up Node.js
+        if: ${{ needs.background-jobs.result == 'success' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Python
+        if: ${{ needs.background-jobs.result == 'success' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Refresh CDK scheduler task-definition revision
+        if: ${{ needs.background-jobs.result == 'success' }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          npm install -g aws-cdk
+          python -m pip install --upgrade pip
+          pip install -r infra/requirements.txt
+
+          WORKER_TD_ARN="${{ steps.deploy-api.outputs.task-definition-arn }}"
+          if [ "${{ env.WORKER_TASK_DEFINITION_FAMILY }}" != "${{ env.TASK_DEFINITION_FAMILY }}" ]; then
+            WORKER_TD_ARN="${{ steps.deploy-worker.outputs.task-definition-arn }}"
+          fi
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          CLUSTER_ARN="arn:aws:ecs:${{ env.AWS_REGION }}:${ACCOUNT}:cluster/${{ env.ECS_CLUSTER }}"
+
+          cdk deploy "BiopeakBackgroundJobs-${{ env.BACKGROUND_JOBS_ENV_PREFIX }}" \
+            --app "python -m infra.app" \
+            -c "envPrefix=${{ env.BACKGROUND_JOBS_ENV_PREFIX }}" \
+            -c "account=${ACCOUNT}" \
+            -c "region=${{ env.AWS_REGION }}" \
+            -c "clusterArn=${CLUSTER_ARN}" \
+            -c "workerTaskDefinitionArn=${WORKER_TD_ARN}" \
+            -c "subnetIds=${{ env.BACKGROUND_JOBS_SUBNET_IDS }}" \
+            -c "securityGroupIds=${{ env.BACKGROUND_JOBS_SECURITY_GROUP_IDS }}" \
+            -c "containerName=${{ env.WORKER_CONTAINER_NAME }}" \
+            -c "assignPublicIp=${{ env.BACKGROUND_JOBS_ASSIGN_PUBLIC_IP }}" \
+            --require-approval never

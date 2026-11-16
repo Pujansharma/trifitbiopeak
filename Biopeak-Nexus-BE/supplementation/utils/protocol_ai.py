@@ -484,6 +484,23 @@ def process_protocol_ai_job(job_id: UUID) -> UUID | None:
     return job.pk
 
 
+def process_protocol_ai_job_until_settled(job_id: UUID) -> ProtocolAiJob | None:
+    """Run Luma try + retry in one wake. Soft miss / missing job returns early."""
+    settled_job = None
+    attempt_number = 0
+    while attempt_number < MAX_PROTOCOL_AI_ATTEMPTS:
+        attempt_number += 1
+        result_id = process_protocol_ai_job(job_id)
+        settled_job = ProtocolAiJob.objects.filter(pk=job_id).first()
+        if settled_job is None:
+            return None
+        if settled_job.status == ProtocolAiJobStatus.COMPLETED:
+            return settled_job
+        if result_id is None:
+            return settled_job
+    return settled_job
+
+
 def reclaim_stale_protocol_ai_jobs() -> None:
     cutoff = timezone.localtime() - STALE_PROTOCOL_AI_PROCESSING
     ProtocolAiJob.objects.filter(
@@ -503,6 +520,7 @@ def process_pending_protocol_ai_jobs(
     limit: int = 1,
     job_id: UUID | None = None,
 ) -> list[UUID | None]:
+    """Local drain of ProtocolAiJob rows (not the SQS outbox path)."""
     reclaim_stale_protocol_ai_jobs()
     if job_id is not None:
         return [process_protocol_ai_job(job_id)]

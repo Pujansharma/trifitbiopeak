@@ -9,11 +9,10 @@ WHATSAPP_HTTP_TIMEOUT = (5, 15)
 
 
 def is_whatsapp_configured():
-    return False
-    # return bool(
-    #     getattr(settings, "WHATSAPP_ACCESS_TOKEN", None)
-    #     and getattr(settings, "WHATSAPP_PHONE_NUMBER_ID", None)
-    # )
+    return bool(
+        getattr(settings, "WHATSAPP_ACCESS_TOKEN", None)
+        and getattr(settings, "WHATSAPP_PHONE_NUMBER_ID", None)
+    )
 
 
 def _api_version():

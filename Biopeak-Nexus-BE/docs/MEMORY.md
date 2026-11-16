@@ -43,7 +43,7 @@ Pointers: appointments → [`appointments-frontend-api.md`](appointments-fronten
 
 - Book → `confirmed`. Cancel/reschedule from `confirmed`|`checked_in`. `in_progress` not reversible. No-show from `confirmed` only.
 - Find Slots: staff **must** `preferred`; customer **must not** (v2 auto-assign). `health_coach_id` → 400 use `specialty_id`. `care_team_id` XOR doctor/specialty. Room w/ ≥1 bookable equipment → `equipment_id` required.
-- Staff find-slots = 15-min grid (`find_appointment_slots`). Customer v2 = service length. Slot `end` = start+15m; book `end` = start+duration.
+- Staff find-slots = 15-min grid (`find_appointment_slots`) on center ∩ preferred schedules; busy/blocks/closures/maint/customer conflict → slot kept with `is_unavailable: true` (omit key when free). Customer v2 = free-only, service length, no flag. Slot `end` = start+15m. Book/reschedule: client `end` ignored; server sets `end` = start+duration. Idempotency hash also ignores `end`.
 - Book/reschedule flatten top-level IDs. Slots nest `care_team`/`doctor`/`specialty`/`room`/`equipment`.
 - Customer overlap GiST **global**. Concurrent book: GiST room/equip/associate → loser `"Slot no longer available."`
 - Invalid center profile/service → 400 no existence oracle.
@@ -52,40 +52,49 @@ Pointers: appointments → [`appointments-frontend-api.md`](appointments-fronten
 - Block book/slots/reschedule/complete when apt local date `> program.expires_at` (null = open).
 - `Appointment.program_service` partial unique one open apt per line. Complete → redeem + `sessions_used`+1.
 - Idempotent book: same key+payload → 200 no re-check; different payload → 409.
+- **Staff notes (2026-11-13):** `AppointmentStaffNote` table (`staff_notes`). Keep booking `Appointment.notes`. `POST /appointments/{id}/staff-notes/` admin/associate, append-only, unbounded count, `text` max 1000, `transaction.atomic` in serializer create. `serialize_appointment_detail(request=)` nests `staff_notes` for admin/associate only (`omit_fields` for customers); prefetches `staff_notes__created_by` on staff serialize paths. Prefetch on detail GET only for admin/associate. User owns migration.
 
 ---
 
 ## Identity / leads / profiles
 
-- Onboarding complete flag = `CustomerProfile.is_onboarding_completed` only (not Lead). Both `is_onboarding_sent` default False.
+- **Ops onboarding email (2026-11-06):** `POST /leads/v2/{id}/ops-onboarding-email/` To = hardcoded `OPS_ONBOARDING_EMAIL_TO`. From = `DEFAULT_FROM_EMAIL` env. Cc = JWT user email. Do not write recipient addresses in docs. Send is synchronous; SMTP failure is 503. Does not set `is_onboarding_sent`. Address line includes state and pincode. Choice fields render labels in the mail.
 - Leads write `/leads/v2/` (POST create+shell). v1 GET/POST/PATCH → 400. Login-phone-direct = User lookup only.
+- **Lead v2 address (2026-11-06):** `GET /leads/v2/` and `GET/PATCH /leads/v2/{id}/` `customer_profile.address` is one object: default `CustomerProfileAddress`, else newest. Includes `label`, `address_type`, `address_type_code`. No `latitude` or `longitude`. `null` when no profile or no address.
 - Associate write `role_ids[]`; RBAC OR across roles. Care-team member still one `role_id`.
 - Unassigned admin (no associate / zero assignments) may hit any center. Associate zero assignments → denied.
 - Customer associate list: `X-Center-ID` exclusive when present.
-- **CustomerProfile.unique_id (2026-11-03):** renamed from `code`. Format `BP-YYMMXXX` (e.g. `BP-2611001`). Global seq `customer_profiles`, `fill_length=3`, never monthly-reset; `YYMM` is create-time stamp only. After `999` digits grow (`1000`…). Unique, nullable until backfill. UUID stays PK/URLs/headers. Helper `accounts/customers/utils/unique_ids.py`. Assign on create (center serializers + lead v2 shell/convert). Do **not** blanket-expose APIs — add per endpoint when asked. Backfill: `assets/scripts/backfill_customer_profile_unique_ids.sql` (Asia/Kolkata). User owns rename migration.
+- **CustomerProfile.unique_id (2026-11-03):** renamed from `code`. Format `BP-YYMMXXX` (e.g. `BP-2611001`). Global seq `customer_profiles`, `fill_length=3`, never monthly-reset; `YYMM` is create-time stamp only. After `999` digits grow (`1000`…). Unique, nullable until backfill. UUID stays PK/URLs/headers. Helper `accounts/customers/utils/unique_ids.py`. Assign on create (center serializers + lead v2 shell/convert). Do **not** blanket-expose APIs — add per endpoint when asked. Exposed (2026-11-05, read-only): `/profiles/`, `/profiles/<pk>/`, `/profiles/v2/` nested `customer_profile`, `/centers/<pk>/customer-profiles/`. Backfill: `assets/scripts/backfill_customer_profile_unique_ids.sql` (Asia/Kolkata). User owns rename migration.
 
 ---
 
-## Communications / Google
+## Communications / Google / Protocol AI jobs
 
 - Spec: [`google-calendar-integration.md`](google-calendar-integration.md). WhatsApp secrets env-only; template names in `WHATSAPP_TEMPLATE_BY_EVENT`.
+- **WhatsApp (2026-11-11):** dedicated `WhatsAppOutbox` + `WHATSAPP_OUTBOX_QUEUE_URL` (batches of ≤10 job ids). Mark `QUEUED` before SQS publish (overlap-safe); no queue URL → leave `PENDING` (local `--limit` drain); publish miss → revert those ids to `PENDING`. SQS → Lambda → ECS `RunTask` (`infra/constructs/worker_launcher.py`); ESM deletes message after successful launch — durability = DB + stale `QUEUED` reclaim + reminder cron re-dispatch. Not on sweep. Webhooks update `WhatsAppOutbox` by `wamid`. Pre-care after confirmed `ACCEPTED`. Reminders: EventBridge cron `:00/:15/:30/:45` `Asia/Kolkata`. Cost notes: `docs/whatsapp-background-jobs-cost.md`.
+- **Google Calendar outbox (2026-11-15):** dedicated `GoogleCalendarOutbox` (appointments + personal block/leave/series) + `GOOGLE_CALENDAR_OUTBOX_QUEUE_URL`. Same QUEUED→SQS→Lambda→ECS path as WA (`process_google_calendar_outbox`). Schedule cron `run_google_calendar_schedule` every 15m Asia/Kolkata (reclaim/dispatch outbox + personal watch-channel renewal) — mirrors `run_whatsapp_reminder_schedule`. Shared `CommunicationOutbox` / wake FIFO / `process_communication_outbox` removed from code + DB (migrated). Not on `sweep_jobs.sh`. After cutover delete legacy AWS `nexus-outbox-worker` / `communication-outbox.fifo` if still present.
+- **Protocol AI + versions (2026-11-15):** package `integrations/protocol_management/` (like WA/GC). Model `ProtocolAiOutbox` in `integrations.models` → FK/OneToOne `supplementation.ProtocolAiJob` (same cross-app pattern as `WhatsAppOutbox` → `appointments.Appointment`). `PROTOCOL_AI_OUTBOX_QUEUE_URL`. SQS `job_ids` = outbox ids. Domain job stays in supplementation.
+- **Appointment integrity (2026-11-15):** package `appointments/appointment_integrity/` (placement only). Exception scans still in-process drain of PENDING `AppointmentExceptionScanJob` — **no SQS** (same as old sweep).
+- **Single Chronos (2026-11-15):** only `scheduled_jobs.maintenance_job` → `prd-maintenance_job` → `run_maintenance_job` (WA + GC + protocol AI + versions + exception-scan drain). Delete old per-integration Chronos + `production-sweep-*` after cutover. `assets/scripts/sweep_jobs.sh` removed.
+- **Background jobs CDK (2026-11-15):** SQS main+DLQ use `RemovalPolicy.DESTROY` (not RETAIN) so CREATE rollback / stack delete do not leave named queues that fail next deploy with AlreadyExists. Do **not** put `AWS::SSM::Parameter` in the CDK stack for queue URLs — fixed names collide when a partial update already owns the param in-stack. GHA `background-jobs`: (1) `reset_failed_background_jobs_stack` clears failed stacks + orphan queues + always deletes `/biopeak/{env}/{queue_url_ssm_suffix}` SSM params; (2) `cdk deploy`; (3) `export_outbox_queue_env` resolves queue URL via SQS name, `PutParameter --overwrite`, prints `PRD_<SUFFIX>=…` for ECS inject (YAML-driven, no hardcoded GHA list). `cdk deploy` must use `python -m infra.app` + `PYTHONPATH=repo root` (not `python infra/app.py` — shadows PyPI `constructs`). API task role `ecsTaskRole` needs `sqs:SendMessage`/`DeleteMessage` on `prd-*-jobs` — `infra/scripts/attach_ecs_task_role_whatsapp_sqs.sh` (wildcard).
 - Book/cancel/reschedule enqueue only (`on_commit`). Outbox fail must not roll back apt.
-- Outbox claim = conditional `update`, no row locks. Stale WA `SENDING` → SKIPPED; stale Google `SENDING` → FAILED.
+- Claim = conditional `update`, no row locks. Stale WA/Google `SENDING` → SKIPPED/FAILED; stale `QUEUED` → PENDING.
 - Shared organizer = `GOOGLE_CALENDAR_ID` on `GoogleCalendarConnection`. Connected = `is_active` + refresh token. Disconnect soft-off only (`is_active=False`).
 - Deactivate tokens only on Google `invalid_grant` when sent token still stored.
 - Google invite attendees = associates only (no customer email). Description = staff summary fields only — no apt code/date/time/mode/equipment/care-team list.
 - Personal inbound: skip Biopeak-marked / shared-organizer events. Edited/gone = soft-off + recreate Google-origin rows.
 - Webhook always 200. Watch: start new then stop old.
-- Sweep: `assets/scripts/sweep_jobs.sh` (reminders → outbox → exceptions → Google renew → protocol AI `--limit 5`).
+- Sweep script = no-op. All 15m work = `run_maintenance_job` Chronos.
 
 ---
 
 ## Supplementation / AI (traps only — contracts in docs/)
 
 - Spec tracker: [`supplementation-plan.md`](supplementation-plan.md). Don't put unbuilt routes in tracker.
-- Global app; admin|associate; no center on most staff routes. Customer plan: `IsCustomerUser` + `X-Customer-Profile-ID`.
+- Global app; admin|associate; no center on most staff routes. Customer plan: `IsCustomerUser` + active `is_main` profile. No `X-Customer-Profile-ID` (2026-11-05).
 - No `select_for_update`. Draft version numbers retry unique (5×). Approve/publish = conditional status updates.
-- AI: `ProtocolAiJob` → Luma `POST .../clients/<uuid>/protocol-recommendation`. Wake FIFO dedup = job id. Processing >2 min → back to pending.
+- AI: `ProtocolAiJob` + `ProtocolAiOutbox`; glue in `integrations.protocol_management`. Luma via job; queue via outbox. Processing >2 min on job → pending. Stale outbox QUEUED→PENDING, SENDING→FAILED.
+- **ProtocolAiOutbox (2026-11-16):** max 1 claim (`MAX_PROTOCOL_AI_OUTBOX_ATTEMPTS=1`) — no outbox retry. Claim/dispatch = PENDING/QUEUED only (`FAILED` terminal). Job try+retry (max 2) via `process_protocol_ai_job_until_settled` inside that wake.
 - Luma errors: map by HTTP status; body `detail` logged only (2026-11-02). 401/404/409/422 + else → "Luma is unavailable." Failures burn attempts.
 - **Held AI items (2026-11-03):** all five dose fields JSON null + instructions `"Do not use."`. Partial null fails job. `ProtocolItem` stays NOT NULL. Accept of held → draft 400 missing dose; FE hide Accept. Deploy Nexus before Luma #250.
 
@@ -116,8 +125,8 @@ Canonical: [`docs/google-calendar-integration.md`](google-calendar-integration.m
 - Outbox `CommunicationOutbox` (`channel=whatsapp|google_calendar`). Worker `process_communication_outbox` (SQS wake + 15 min sweep). Claim via conditional `update` (no `select_for_update`). Stale WhatsApp `SENDING` → **SKIPPED**; stale Google `SENDING` → **FAILED** (retry). HTTP WhatsApp success w/o parsable `wamid` still ACCEPTED; max 2 attempts then SKIPPED.
 - **WA vs Meet (Option A, 2026-09-30):** Book/cancel/reschedule enqueue **GC then WA**. Confirm/reschedule virtual WA defers only while Meet blank **and** same-apt Google still open (`PENDING`/`FAILED` retryable/`SENDING`). Meet already set (reschedule) → no wait. Cancel / reminder / no-show never defer for Meet. In-person never waits. Rebuild `template_parameters` at WA send from live apt. After apt GC `ACCEPTED`/`SKIPPED`, wake if pending WA remains. Reminder/no-show stay WA-only.
 - Unique `(appointment, channel, event_type)` for terminal events: confirmed, cancelled, reminder, no_show, **pre_care, post_care** — while status in pending/sending/accepted/sent/delivered/read/**failed** (blocks dup while worker retries). Reminder/pre/post also anti-join **any** existing row (incl. SKIPPED). Google coalesces one open row per appointment. Webhook `get_or_create` on `event_key`; `IntegrityError` → dup. Webhook `GET|POST /webhooks/whatsapp/`.
-- Ops: SQS wake + EventBridge `rate(15 minutes)` `assets/scripts/sweep_jobs.sh` (reminders → outbox → exception scans → Google watch renewal → protocol/AI → short wearable jobs). Env `*_COMMUNICATION_OUTBOX_WAKE_QUEUE_URL`. **Not** in `deploy-aws.yml`.
-- ROOK schedules (must provision in ECS/EventBridge separately; deploy-aws.yml does not manage schedules): keep existing shared `rate(15 minutes)` target `bash assets/scripts/sweep_jobs.sh` and **add** an independent `rate(15 minutes)` ECS task running `bash assets/scripts/process_health_recovery.sh`. Both entrypoints use distinct PostgreSQL session advisory locks to skip overlapping invocations across ECS tasks. The shared lock protects all existing queue drains; recovery lock enforces one running recovery task globally while normal normalization/freshness work proceeds independently. Recovery runs `--only-recovery --limit 1`, stops at 80 minutes (job lease >=90 minutes); later ticks skip while it is active. Enqueue is oldest-first capped at 2/tick and at most 10 open recovery jobs. Configure both tasks against the same PostgreSQL primary and verify IAM/environment/CloudWatch logs. Do **not** schedule an unguarded `process_health_jobs --only-recovery` task or put recovery back into the shared tick. The code does not create EventBridge schedules automatically.
+- Ops: SQS wake + EventBridge `rate(15 minutes)` `assets/scripts/sweep_jobs.sh` (reminders → outbox → exception scans → Google watch renewal → protocol/AI; ROOK uses independent schedules). Env `*_COMMUNICATION_OUTBOX_WAKE_QUEUE_URL`. **Not** in `deploy-aws.yml`.
+- ROOK outbox (2026-11-16): supersedes always-on health/recovery consumers + advisory-lock sweep. `RookOutbox` + WA/GC SQS→Lambda→ECS via `infra/integrations.yaml` only (`rook_auth` / `rook_data_fetch` / `rook_sync_scan`). No legacy CFN / `reconcile_rook_jobs` / `publish_pending_wakes`. Midnight = `process_pending_rook_sync_scan`. Stale RUNNING reclaim on worker start only. Attempts: auth try1/retry0; fetch try1/retry1. Defer + retryable fail + stale reclaim → `schedule_job_wake`; exhausted → user Sync/Reconnect. Migration `0005` = `RenameModel`→RookOutbox + `DeleteModel` RookWorkerLease. See `docs/ROOK_MANAGER_FLOWS.md`.
 - Google: one fixed shared organizer (`GOOGLE_CALENDAR_ID`). Tokens on `GoogleCalendarConnection` (1:1 `User`, admin or associate). Resolve via `google_email__iexact` + connection/user active + live admin/associate profile + live `google_refresh_token` (not email alone — disconnect keeps `google_email`).
 - Sync best-effort async. Never Google HTTP on request path. `GOOGLE_SYNC_ERRORS` = `(requests.RequestException, ValueError, InvalidToken, ImproperlyConfigured)` — exclude `KeyError`/`TypeError` (our bugs must crash).
 - Event id = appointment UUID hex. Book title `"Appointment Confirmed"`; reschedule `"Appointment Rescheduled"`. Cancel does **not** clear `google_event_id`/`google_meet_link`. Leave virtual → clear Meet (`clear_meet_link=True`). Insert/patch success then `appointment.save` `DatabaseError` → log+swallow; do **not** delete Google event.
@@ -236,14 +245,14 @@ Canonical: [`docs/google-calendar-integration.md`](google-calendar-integration.m
 
 ## 2026-11-03 - ROOK DRF throttling configuration decision
 
-- BioPeak will use its existing Django REST Framework `ScopedRateThrottle` for ROOK API limits. `STG_REDIS_URL` and `PRD_REDIS_URL` are now optional: when absent, Django's default LocMemCache provides per-process limits. Keep `CACHES["health"]` on DummyCache; data remains in PostgreSQL.
-- Important tradeoff: LocMemCache cannot enforce the same budget globally across multiple workers. The readiness command warns about this; security reviewer PR #143's prior shared-cache requirement is not met until BioPeak configures an approved shared default cache. Do not claim LocMem is equivalent to distributed throttling.
+- BioPeak uses DRF `ScopedRateThrottle` for inbound ROOK API limits + LocMemCache (per-process). Readiness warns. Keep `CACHES["health"]` on DummyCache; data remains in PostgreSQL.
+- **2026-11-16:** Removed `STG_REDIS_URL` / `PRD_REDIS_URL` and `WEARABLES_ENABLED` entirely (no kill switch; profile gate `WEARABLES_REQUIRE_PROFILE_FEATURE` + PostHog remain). Outbound ROOK budgets hardcoded `ROOK_API_REQUESTS_PER_*` + Postgres `RookRequestBudget`. Queue URLs match WA/GC (`DEV_/STG_/PRD_ROOK_*_OUTBOX_QUEUE_URL`, GHA inject).
 
 ## 2026-10-29 - PR #143 freshness/recovery/Redis review follow-up
 
 - Hourly freshness enqueue now coalesces open profile jobs and reuses one stable `freshness:<profile>` key after completion; oldest-due profiles first, max 25 queued per scheduler sweep by default (CLI cap 50). Retryable FAILED jobs remain open until the existing retry path finishes.
 - API authorization, notifications, manual retry, and hourly scheduler all use `enqueue_or_reuse_recovery_job`. Never overwrite `import_started_at` when an open recovery job owns it; the shared helper claims a new generation only when no open job exists.
-- Staging/production wearables require a shared ElastiCache Redis URL (`STG_REDIS_URL` / `PRD_REDIS_URL`) for `CACHES['default']`; `health` stays `DummyCache` backed by DB snapshots. Missing URLs fail startup only if wearables are enabled. AWS WAF is supplementary, not a substitute for shared DRF throttle counters.
+- Redis URL env removed (see 2026-11-16 note above). LocMem + Postgres budget remain.
 
 - `POST /supplementation/protocol-versions/<uuid:pk>/approve/` moves `draft` or `under_review` to `approved`. Any other status → 400 `Protocol version can only be approved while it is draft or under review.` Zero supplements → 400 `Add at least one supplement before approving this version.` An inactive supplement on the version → 400 `Supplement is inactive.` The same `UPDATE` requires at least one item and no inactive supplement. Unknown version → 404 `Protocol version not found.` Body is `starts_on` (required), `ends_on` (null or omit stores `starts_on` + 90 days; a sent date stays), `approval_notes` (blank stores null). `ends_on` before `starts_on` → 400 `ends_on must be on or after starts_on.` `ends_on` before today, including the 90-day default, → 400 `ends_on must be on or after today.` `review_on` and `is_ongoing` stay. Other versions keep their status. `Protocol.current_version` stays. Sets `approved_at` (`timezone.localtime()`) and `approved_by`. Writes `approved`, `client_visible` false. Response is `{detail}` only, `data` omitted. 200.
 - `PATCH /supplementation/protocol-versions/<uuid:pk>/extend/` moves `ends_on` later. `scheduled` and `active` only. `expired`, `cancelled`, and every other status → 400 `Protocol version can only be extended while it is scheduled or active.` Unknown version → 404 `Protocol version not found.` `ends_on` required, on or after `starts_on`, on or after today, and after the stored `ends_on`. Null stored `ends_on` → 400 `This version has no end date to extend.` Status, `starts_on`, and `Protocol.current_version` stay. Writes `extended`, `client_visible` true. Response is `{detail}` only. 200. Conditional update matches status and the stored `ends_on`. 0 rows → status 400, or `ends_on must be after the current end date.` A lost race does not write a second event. No `select_for_update`.
@@ -263,3 +272,27 @@ Canonical: [`docs/google-calendar-integration.md`](google-calendar-integration.m
 - Route getters take no id args; `get_object_or_404` from `self.kwargs["pk"]`.
 - Hours/closures: availability URLs use `<uuid:center_id>` so resource `pk` no collide.
 
+
+## ROOK parallel recovery (2026-11-06)
+
+- PostgreSQL jobs remain authoritative; dedicated SQS queues are wake hints only. Separate health/recovery ECS consumers, no WhatsApp queue reuse.
+- Maximum five owned recovery slots globally; one RUNNING pull per connection, with conditional uniqueness and attempt/generation fencing. No raw SQL or select_for_update.
+- Manual cooldown: six elapsed hours since last accepted manual request, per connection. Initial/nightly/webhook/system retry exempt. Newer accepted target retained for follow-up, never replaces a live plan.
+- Provider budgets hardcoded on settings modules (60/min, 1000/day baseline); Postgres enforces. Midnight selection uses synced_through, not webhook freshness.
+- Owner-reviewed migrations and disabled-by-default dedicated infrastructure are release gates. See ROOK_PRODUCTION_HANDOVER.md and ROOK_PRODUCTION_VALIDATION.md; isolated tests do not certify production.
+
+## ROOK Phase 1 agreement (2026-11-10)
+
+- User explicitly retains the existing queue flow and the nightly selection of missing or >=7-day-old pull coverage. This supersedes earlier notes describing the nightly rule as unconfirmed. Do not switch to a rolling seven-day nightly sweep.
+- Scope is ROOK Phase 1 only. Job progress is separate metadata; preserve the PRD's existing health-card states and domain-level progress. Keep last successful check separate from actual measurement time.
+- Production pre-existing history remains disabled until deliberately enabled with ROOK. The client PRD confirms this is intentional. Do not introduce Phase 2 analytics or clinical threshold changes while fixing integration reliability.
+
+## ROOK simplified data path (2026-11-16)
+
+- Table: `HealthProcessingJob` → `RookOutbox` (WA/GC/AI outbox naming; one table, job_type routes queues). Related: `rook_outboxes`.
+- Active jobs only: `authorise_rook_connection`, `revoke_rook_connection`, `fetch_rook_data`. No midnight job type.
+- Workers: WA/GC/AI pattern in `infra/integrations.yaml` — `rook_auth` (`ROOK_AUTH_OUTBOX_QUEUE_URL`, `rook-auth-outbox-jobs`, `process_rook_auth_jobs`) + `rook_data_fetch` (`ROOK_DATA_FETCH_OUTBOX_QUEUE_URL`, `rook-data-fetch-outbox-jobs`, `process_rook_data_fetch_jobs`). SQS `job_ids` ≤10/message. Always-on `run_rook_consumer` removed.
+- Midnight: `scheduled_jobs.rook_sync_scan` `cron(0 0 * * ? *)` Asia/Kolkata → `process_pending_rook_sync_scan` enqueues `fetch_rook_data` only (hardcoded stale/7d/`TIME_ZONE`).
+- Helper: `enqueue_authorise_rook_connection`. Sync API name unchanged.
+- `fetch_rook_data` owns fetch → normalize → analytics (TZ at write). Manual Sync 6h cooldown. Webhook inline normalize; clear `payload` to `{}` after process.
+- Wearables `0005_rookoutbox_and_more`: `RenameModel` HealthProcessingJob→RookOutbox; drop midnight job type; `uniq_rook_running_fetch`; remove `deadline_at`/`worker_run_id`; `DeleteModel` RookWorkerLease. Do not reintroduce Create+Delete for this rename.

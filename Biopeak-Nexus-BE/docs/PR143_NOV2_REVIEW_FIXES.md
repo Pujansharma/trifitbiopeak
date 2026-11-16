@@ -6,7 +6,7 @@ on top of the November 2 project, not a rebase onto an older ZIP.
 ## Reviewer fixes implemented
 
 1. **Cooldowns measured from terminal finish.** The shared
-   `finished_health_jobs()` filter uses `HealthProcessingJob.completed_at`,
+   `finished_health_jobs()` filter uses `RookOutbox.completed_at`,
    with open `PENDING`, `RUNNING`, and retryable `FAILED` jobs excluded from
    re-enqueue. `enqueue_or_reuse_freshness_job`,
    `enqueue_or_reuse_recovery_job`, `eligible_freshness_profiles`, and
@@ -85,7 +85,7 @@ allowlists, callbacks and provider provisioning in each deployment.
   transaction; `(None, False)` now rolls back. NULL import start is retried.
 - **Redis:** Added 3-second connect/read socket timeouts to the shared default
   Redis cache in staging and production without a fail-open fallback.
-- **Indexes:** Added the two requested HealthProcessingJob composite indexes
+- **Indexes:** Added the two requested RookOutbox composite indexes
   and migration `0002_healthprocessingjob_queue_indexes`.
 - **Shared cache:** The default cache uses shared Redis in enabled staging/prod;
   health remains DummyCache with DB snapshots. Redis endpoints must be set

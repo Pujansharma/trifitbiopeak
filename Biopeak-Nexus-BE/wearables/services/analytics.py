@@ -4,6 +4,8 @@ from statistics import mean, pstdev
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
+from django.db import transaction
+from wearables.services.coordination import serialize_profile_changes
 from django.core.cache import caches
 from django.core.cache.backends.dummy import DummyCache
 from django.core.cache.backends.locmem import LocMemCache
@@ -17,6 +19,8 @@ from wearables.models import (
 )
 from wearables.services.lifecycle import can_ingest_source, source_permission_for_domain
 from wearables.services.metrics import is_v1_display_metric
+from wearables.services.observation_values import observation_value as observation_value
+from wearables.services import timeline as timeline_service
 from wearables.utils.constants import (
     ALGORITHM_VERSION,
     DOMAIN_DEFAULT_UNITS,
@@ -36,6 +40,9 @@ from wearables.utils.constants import (
 )
 
 
+
+# Provisional product maximum: confirm 730 days with the product owner.
+MAX_LIFETIME_HISTORY_DAYS = 730
 
 
 def member_today(customer_profile) -> date:
@@ -701,7 +708,11 @@ def build_domain_card(
     }
 
 
+@transaction.atomic
 def refresh_profile_snapshots(customer_profile, domains=None) -> list[dict]:
+    # Serialize recalculations with normalization/revocation for this profile.
+    # Do not let an older calculation overwrite a newer committed snapshot.
+    serialize_profile_changes(customer_profile.pk)
     connections = list(
         WearableConnection.objects.filter(customer_profile=customer_profile).order_by(
             "data_source"
@@ -773,15 +784,21 @@ def dashboard_payload(customer_profile) -> dict:
 
 
 def rolling_averages(summaries: list[HealthDailySummary], *, metric: str,
-                     preferred_units: str, today: date) -> dict:
+                     preferred_units: str, today: date, history_days: int) -> dict:
     dated = [(item.local_date, summary_numeric_value(item)) for item in one_summary_per_day(summaries)]
     dated = [(day, value) for day, value in dated if value is not None and day <= today]
     result = {}
-    for label, length, minimum in (("7d", 7, 7), ("14d", 14, 7),
-                                   ("30d", 30, 21), ("90d", 90, 60),
-                                   ("lifetime", None, 1)):
-        low = today - timedelta(days=length - 1) if length else None
-        values = [value for day, value in dated if low is None or day >= low]
+    windows = (("7d", 7, 7), ("14d", 14, 7), ("30d", 30, 21), ("90d", 90, 60))
+    for label, length, minimum in windows:
+        if length > history_days:
+            result[label] = {
+                "available": False,
+                "observationDays": 0,
+                "requiredObservationDays": minimum,
+            }
+            continue
+        low = today - timedelta(days=length - 1)
+        values = [value for day, value in dated if day >= low]
         entry = {"available": len(values) >= minimum, "observationDays": len(values),
                  "requiredObservationDays": minimum}
         if entry["available"]:
@@ -790,13 +807,35 @@ def rolling_averages(summaries: list[HealthDailySummary], *, metric: str,
             )
             entry["standardDeviation"] = round(pstdev(values), 3)
         result[label] = entry
+    # Lifetime rolling average only when the request loaded the lifetime cap.
+    if history_days >= MAX_LIFETIME_HISTORY_DAYS:
+        low = today - timedelta(days=MAX_LIFETIME_HISTORY_DAYS - 1)
+        values = [value for day, value in dated if day >= low]
+        entry = {"available": len(values) >= 1, "observationDays": len(values),
+                 "requiredObservationDays": 1}
+        if entry["available"]:
+            entry["value"], entry["unit"] = display_value(
+                value=mean(values), metric=metric, preferred_units=preferred_units,
+            )
+            entry["standardDeviation"] = round(pstdev(values), 3)
+        result["lifetime"] = entry
+    else:
+        result["lifetime"] = {
+            "available": False,
+            "observationDays": 0,
+            "requiredObservationDays": 1,
+        }
     return result
 
 
 def domain_metrics_payload(*, customer_profile, domain: str, days: int | None) -> list[dict]:
     today = member_today(customer_profile)
+    # Bound the SQL read to the requested graph window (e.g. last 7 days).
+    # Lifetime history is loaded only when the client asks for lifetime.
+    history_days = min(days or MAX_LIFETIME_HISTORY_DAYS, MAX_LIFETIME_HISTORY_DAYS)
     summaries = HealthDailySummary.objects.filter(
         customer_profile=customer_profile, domain=domain, local_date__lte=today,
+        local_date__gte=today - timedelta(days=history_days - 1),
     ).order_by("metric", "local_date", "last_observed_at")
     grouped: dict[str, list[HealthDailySummary]] = defaultdict(list)
     for summary in summaries.iterator():
@@ -804,17 +843,16 @@ def domain_metrics_payload(*, customer_profile, domain: str, days: int | None) -
             grouped[summary.metric].append(summary)
     identity = getattr(customer_profile, "rook_identity", None)
     preferred_units = identity.preferred_units if identity else PreferredUnits.METRIC
-    cutoff = today - timedelta(days=days - 1) if days else None
     return [
         {
             "metric": metric,
             "points": graph_values(
-                summaries=one_summary_per_day([
-                    item for item in metric_summaries if cutoff is None or item.local_date >= cutoff
-                ]), metric=metric, preferred_units=preferred_units,
+                summaries=one_summary_per_day(metric_summaries),
+                metric=metric, preferred_units=preferred_units,
             ),
             "rollingAverages": rolling_averages(
-                metric_summaries, metric=metric, preferred_units=preferred_units, today=today,
+                metric_summaries, metric=metric, preferred_units=preferred_units,
+                today=today, history_days=history_days,
             ),
             "chartType": "stacked" if metric in {
                 "deep_sleep_duration_seconds", "rem_sleep_duration_seconds", "light_sleep_duration_seconds"
@@ -831,8 +869,9 @@ def sleep_session_payload(*, customer_profile, days: int | None) -> list[dict]:
         metric__in=("sleep_start_time", "sleep_end_time"), is_current=True,
         local_date__lte=today,
     ).order_by("local_date", "document_id")
-    if days:
-        observations = observations.filter(local_date__gte=today - timedelta(days=days - 1))
+    # An omitted window must not fetch all retained sleep observations.
+    bounded_days = min(days or MAX_LIFETIME_HISTORY_DAYS, MAX_LIFETIME_HISTORY_DAYS)
+    observations = observations.filter(local_date__gte=today - timedelta(days=bounded_days - 1))
     by_document = {}
     for obs in observations.iterator():
         row = by_document.setdefault(str(obs.document_id), {"date": obs.local_date})
@@ -844,7 +883,8 @@ def sleep_session_payload(*, customer_profile, days: int | None) -> list[dict]:
 def domain_payload(*, customer_profile, domain: str, days: int | None,
                    window: str | None = None) -> dict:
     if window:
-        days = {"7d": 7, "14d": 14, "30d": 30, "90d": 90, "lifetime": None}[window]
+        days = {"7d": 7, "14d": 14, "30d": 30, "90d": 90, "lifetime": MAX_LIFETIME_HISTORY_DAYS}[window]
+    days = min(days or MAX_LIFETIME_HISTORY_DAYS, MAX_LIFETIME_HISTORY_DAYS)
     connections = list(
         WearableConnection.objects.filter(customer_profile=customer_profile).order_by("data_source")
     )
@@ -863,18 +903,6 @@ def domain_payload(*, customer_profile, domain: str, days: int | None,
     if domain == HealthDomain.SLEEP:
         result["sleepSessions"] = sleep_session_payload(customer_profile=customer_profile, days=days)
     return result
-
-
-def observation_value(observation: HealthObservation) -> dict:
-    if observation.numeric_value is not None:
-        return {"type": "number", "value": observation.numeric_value}
-    if observation.text_value:
-        return {"type": "text", "value": observation.text_value}
-    if observation.boolean_value is not None:
-        return {"type": "boolean", "value": observation.boolean_value}
-    return {"type": "unavailable"}
-
-from wearables.services import timeline as timeline_service
 
 
 def timeline_payload(*, customer_profile, start_date, end_date, domain, offset, limit):

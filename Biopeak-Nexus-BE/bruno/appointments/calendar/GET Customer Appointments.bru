@@ -5,12 +5,14 @@ meta {
 }
 
 get {
-  url: {{baseURL}}/appointments/customer-appointments/{{customer_profile_id}}/
+  url: {{baseURL}}/appointments/customer-appointments/{{customer_profile_id}}/?page=1&limit=10
   body: none
   auth: inherit
 }
 
 params:query {
+  page: 1
+  limit: 10
   ~therapy_service_program: 1
 }
 
@@ -21,6 +23,8 @@ settings {
 
 docs {
   Customer-only list for one owned customer_profile_id (all centers).
+  Paginated (`page`, `limit`; default page size 10, max 50).
+  Envelope: count, next, previous, data = appointment array.
   Sorted by status: in_progress → confirmed → checked_in →
   completed → cancelled (then no_show), then start_datetime ascending.
   Each list item includes nested center {id, code, name} (booked center).

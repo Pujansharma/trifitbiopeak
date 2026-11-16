@@ -19,5 +19,5 @@ settings {
 }
 
 docs {
-  Public callback used by ROOK after authorization. Only use a valid one-time state and identifiers from a genuine connect flow; querying does not itself authorize a connection.
+  Public, one-time ROOK callback. Uses only genuine state/client/member identifiers. A valid return normally queues server verification and responds 202. It does not call ROOK or grant authorization in this HTTP request. Authorization becomes confirmed only after the regular worker verifies it.
 }

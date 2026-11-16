@@ -1,5 +1,4 @@
 from corsheaders.defaults import default_headers
-from django.core.exceptions import ImproperlyConfigured
 
 from core.settings.base import *
 from core.settings.rook_static import (
@@ -62,6 +61,7 @@ MAILERS = {
         "OPTIONS": {
             "host": config("PRD_EMAIL_HOST"),
             "use_tls": True,
+            "timeout": 10,
             "username": config("PRD_EMAIL_HOST_USER"),
             "password": config("PRD_EMAIL_HOST_PASSWORD"),
         },
@@ -140,11 +140,14 @@ GOOGLE_REDIRECT_URI = config("PRD_GOOGLE_REDIRECT_URI", None)
 GOOGLE_CALENDAR_TOKEN_ENCRYPTION_KEY = config("PRD_GOOGLE_CALENDAR_TOKEN_ENCRYPTION_KEY", None)
 GOOGLE_CALENDAR_ID = config("PRD_GOOGLE_CALENDAR_ID", None)
 ADMIN_FRONTEND_URL = config("PRD_ADMIN_FRONTEND_URL", None)
-COMMUNICATION_OUTBOX_WAKE_QUEUE_URL = config(
-    "PRD_COMMUNICATION_OUTBOX_WAKE_QUEUE_URL", default=""
+WHATSAPP_OUTBOX_QUEUE_URL = config(
+    "PRD_WHATSAPP_OUTBOX_QUEUE_URL", default=""
 )
-PROTOCOL_AI_WAKE_QUEUE_URL = config(
-    "PRD_PROTOCOL_AI_WAKE_QUEUE_URL", default=""
+GOOGLE_CALENDAR_OUTBOX_QUEUE_URL = config(
+    "PRD_GOOGLE_CALENDAR_OUTBOX_QUEUE_URL", default=""
+)
+PROTOCOL_AI_OUTBOX_QUEUE_URL = config(
+    "PRD_PROTOCOL_AI_OUTBOX_QUEUE_URL", default=""
 )
 LUMA_BASE_URL = config("PRD_LUMA_BASE_URL", default="")
 LUMA_NEXUS_API_KEY = config("PRD_LUMA_NEXUS_API_KEY", default="")
@@ -159,10 +162,8 @@ WHATSAPP_WABA_ID = config("PRD_WHATSAPP_WABA_ID", None)
 WHATSAPP_APP_ID = config("PRD_WHATSAPP_APP_ID", None)
 WHATSAPP_TEMPLATE_LANGUAGE = config("PRD_WHATSAPP_TEMPLATE_LANGUAGE", "en")
 
-# ROOK / Wearables Phase 1 — additive. All keys remain external to source control.
-# The mobile app may use PostHog to hide the feature UI. Retain this
-# independent backend kill switch for API/webhook/job safety.
-WEARABLES_ENABLED = config("PRD_WEARABLES_ENABLED", default=False, cast=bool)
+# ROOK / Wearables Phase 1 — credentials stay in env; quotas hardcoded here.
+# Mobile UI flag is separate (PostHog). Profile gate: WEARABLES_REQUIRE_PROFILE_FEATURE.
 WEARABLES_REQUIRE_PROFILE_FEATURE = config(
     "PRD_WEARABLES_REQUIRE_PROFILE_FEATURE", default=True, cast=bool
 )
@@ -184,6 +185,14 @@ ROOK_PREEXISTING_ENABLED = False  # Requires ROOK historical-import entitlement.
 # Review the hardcoded allowlist for this deployment before enabling it.
 ROOK_PROVISIONED_SOURCES = ROOK_PROVISIONED_SOURCE_NAMES
 ROOK_SYNC_DELAY_HOURS = config("PRD_ROOK_SYNC_DELAY_HOURS", default=48, cast=int)
+# Outbound ROOK HTTP budget (Postgres RookRequestBudget). Not DRF inbound throttle.
+ROOK_API_REQUESTS_PER_MINUTE = 60
+ROOK_API_REQUESTS_PER_DAY = 1000
+# Same WA/GC pattern: empty until deploy injects PRD_ via GHA/SSM.
+ROOK_AUTH_OUTBOX_QUEUE_URL = config("PRD_ROOK_AUTH_OUTBOX_QUEUE_URL", default="")
+ROOK_DATA_FETCH_OUTBOX_QUEUE_URL = config(
+    "PRD_ROOK_DATA_FETCH_OUTBOX_QUEUE_URL", default=""
+)
 ROOK_CONNECT_TIMEOUT_SECONDS = config("PRD_ROOK_CONNECT_TIMEOUT_SECONDS", default=5, cast=int)
 ROOK_READ_TIMEOUT_SECONDS = config("PRD_ROOK_READ_TIMEOUT_SECONDS", default=12, cast=int)
 ROOK_ALLOW_UNSIGNED_WEBHOOKS = False
@@ -197,25 +206,3 @@ ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS = config(
 HEALTH_TREND_MINIMUM_OBSERVATIONS = config("PRD_HEALTH_TREND_MINIMUM_OBSERVATIONS", default=7, cast=int)
 HEALTH_HISTORICAL_GAP_DAYS = config("PRD_HEALTH_HISTORICAL_GAP_DAYS", default=7, cast=int)
 TIMELINE_INCLUDE_LEGACY_RESULTS = config("PRD_TIMELINE_INCLUDE_LEGACY_RESULTS", default=True, cast=bool)
-
-
-# Use the existing Django/DRF throttle configuration with the default cache.
-# An optional shared Redis URL can replace LocMemCache for cross-worker limits.
-# The separate health cache remains DummyCache and reads database snapshots.
-_shared_redis_url = config("PRD_REDIS_URL", default="").strip()
-if _shared_redis_url:
-    if not _shared_redis_url.startswith(("redis://", "rediss://")):
-        raise ImproperlyConfigured("PRD_REDIS_URL must use redis:// or rediss://.")
-    CACHES["default"] = {
-        "BACKEND": "django.core.cache.backends.redis.RedisCache",
-        "LOCATION": _shared_redis_url,
-        "KEY_PREFIX": "biopeak:prod",
-        "TIMEOUT": 300,
-        # Bound connection attempts and reads on the request-path DRF throttle.
-        # No ignore_exceptions/fail-open fallback: a Redis outage must not
-        # silently disable shared rate limiting across ECS workers.
-        "OPTIONS": {
-            "socket_connect_timeout": 3,
-            "socket_timeout": 3,
-        },
-    }

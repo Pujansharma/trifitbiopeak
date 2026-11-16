@@ -30,6 +30,12 @@ class Lead(BaseUUIDModel):
     home_center = models.ForeignKey(
         Center, on_delete=models.SET_NULL, null=True, blank=True
     )
+    composite_program_template = models.ForeignKey(
+        "composites.CompositeTemplate",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+    )
     is_invited = models.BooleanField(default=False)
     is_joined = models.BooleanField(default=False)
 

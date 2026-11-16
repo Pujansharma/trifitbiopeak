@@ -7,8 +7,11 @@ from wearables.services.connections import record_connection_event
 from wearables.services import connections as connection_service
 from wearables.services.ingestion import json_digest, receipt_payload
 from wearables.services.analytics import invalidate_health_dashboard
-from wearables.services.job_queue import enqueue_or_reuse_recovery_job, open_recovery_jobs
+from wearables.services.job_queue import (
+    enqueue_or_reuse_fetch_rook_data_job, open_fetch_rook_data_jobs,
+)
 from wearables.services.lifecycle import valid_transition
+from wearables.services.authorization_tracking import authorization_granted_at
 from wearables.services.provenance import canonical_source
 from wearables.utils.constants import (
     AuthorizationStatus,
@@ -71,8 +74,9 @@ def stale_rook_notification(*, connection, action_datetime, text: str) -> bool:
         "expired", "disconnect", "deauthor", "revoked", "deleted", "closed",
         "denied", "failed", "error", "unauthor", "invalid", "rejected",
     ))
+    granted_at = authorization_granted_at(connection) if is_negative else None
     if (is_negative and connection.authorization_status == AuthorizationStatus.AUTHORIZED
-            and connection.import_started_at and action_datetime < connection.import_started_at):
+            and granted_at is not None and action_datetime < granted_at):
         return True
     prior_notifications = WearableConnectionEvent.objects.filter(
         connection=connection, event_type="rook_notification",
@@ -99,9 +103,108 @@ def set_notification_import_start_if_unclaimed(connection: WearableConnection) -
         return
     if getattr(connection, "connection_method", None) == ConnectionMethod.API:
         return
-    if getattr(connection, "pk", None) and open_recovery_jobs(connection).exists():
+    if getattr(connection, "pk", None) and open_fetch_rook_data_jobs(connection).exists():
         return
-    connection.import_started_at = timezone.now()
+    connection.import_started_at = timezone.localtime()
+
+
+def is_negative_authorization_notification(text: str) -> bool:
+    return any(token in text for token in (
+        "failed", "denied", "expired", "revoked", "unauthor", "invalid", "rejected",
+    ))
+
+
+def is_positive_authorization_notification(text: str) -> bool:
+    """Hint that ROOK may have a grant. Never treat this as proof of authorization."""
+    if is_negative_authorization_notification(text):
+        return False
+    # Include the full phrase "authorization completed": the substring
+    # "authorized" is not contained in "authorization".
+    return any(token in text for token in (
+        "authorized", "authorization completed", "connected", "linked", "import", "historical",
+    ))
+
+
+def reconnect_hint_from_oauth_events(connection: WearableConnection) -> bool:
+    pending_state = WearableConnectionEvent.objects.filter(
+        connection=connection,
+        event_type__in=("oauth_state_pending", "oauth_state_verification_pending", "oauth_state_queued", "oauth_state_verified"),
+    ).order_by("-created_at").first()
+    return bool(pending_state and pending_state.previous_status in {
+        ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED,
+    })
+
+
+def prepare_api_connection_for_authorization_check(connection: WearableConnection) -> str | None:
+    """Move API rows into AUTHORIZING so immediate verification may run. None = ready."""
+    if connection.status in {ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING}:
+        return None
+    if not valid_transition(connection.status, ConnectionStatus.AUTHORIZING):
+        return "invalid_state_transition"
+    previous_status = connection.status
+    previous_authorization = connection.authorization_status
+    changed = WearableConnection.objects.filter(
+        pk=connection.pk,
+        status=previous_status,
+        authorization_status=previous_authorization,
+    ).update(
+        status=ConnectionStatus.AUTHORIZING,
+        authorization_status=AuthorizationStatus.PENDING,
+        updated_at=timezone.localtime(),
+    )
+    if not changed:
+        return "concurrent_state_change"
+    connection.status = ConnectionStatus.AUTHORIZING
+    connection.authorization_status = AuthorizationStatus.PENDING
+    record_connection_event(
+        connection,
+        event_type="authorization_verification_requested",
+        previous_status=previous_status,
+        detail="Positive ROOK notification triggered immediate server-side authorization verification.",
+    )
+    invalidate_health_dashboard(connection.customer_profile)
+    return None
+
+
+def queue_authorization_verification_for_notification(
+    connection: WearableConnection, *, text: str,
+) -> dict | None:
+    """Route unverified grant hints to ROOK/SDK confirmation. Never authorize from text."""
+    if connection.authorization_status == AuthorizationStatus.AUTHORIZED:
+        return None
+    if connection.status in {
+        ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED,
+    }:
+        return None
+    if not is_positive_authorization_notification(text):
+        return None
+    if connection.connection_method != ConnectionMethod.API:
+        # Native grants are confirmed by the authenticated SDK status endpoint.
+        return {
+            "accepted": True,
+            "skipped": True,
+            "reason": "awaiting_native_authorization",
+            "connectionId": str(connection.pk),
+        }
+    prepare_error = prepare_api_connection_for_authorization_check(connection)
+    if prepare_error is not None:
+        return {
+            "accepted": True,
+            "skipped": True,
+            "reason": prepare_error,
+            "connectionId": str(connection.pk),
+        }
+    from wearables.services.authorization_jobs import verify_rook_connection_now
+    result = verify_rook_connection_now(
+        connection,
+        was_reconnect=reconnect_hint_from_oauth_events(connection),
+    )
+    return {
+        "accepted": True,
+        "authorizationVerified": bool(result.get("authorized")),
+        "verificationReason": result.get("reason"),
+        "connectionId": str(connection.pk),
+    }
 
 
 def apply_notification_state(connection: WearableConnection, text: str) -> None:
@@ -122,7 +225,7 @@ def apply_notification_state(connection: WearableConnection, text: str) -> None:
     )):
         connection.status = ConnectionStatus.DISCONNECTED
         connection.authorization_status = AuthorizationStatus.REVOKED
-        connection.disconnected_at = timezone.now()
+        connection.disconnected_at = timezone.localtime()
         connection.last_error_code = "provider_account_closed"
         connection.last_error_detail = "This upstream account is closed. Connect another provider."
         return
@@ -141,7 +244,7 @@ def apply_notification_state(connection: WearableConnection, text: str) -> None:
     if any(token in text for token in ("disconnect", "deauthor", "revoked")):
         connection.status = ConnectionStatus.DISCONNECTED
         connection.authorization_status = AuthorizationStatus.REVOKED
-        connection.disconnected_at = timezone.now()
+        connection.disconnected_at = timezone.localtime()
         return
     if any(token in text for token in ("permission denied", "insufficient scope")):
         connection.status = ConnectionStatus.PERMISSION_DENIED
@@ -168,31 +271,29 @@ def apply_notification_state(connection: WearableConnection, text: str) -> None:
         # ROOK extraction completion is not proof that Biopeak persisted and
         # normalized the documents. A recovery worker must reconcile the local
         # canonical store before making the member-facing import complete.
+        # Notification text also cannot create a new authorization grant.
+        if connection.authorization_status != AuthorizationStatus.AUTHORIZED:
+            return
         if connection.import_status == HistoricalImportStatus.COMPLETED:
             return
         connection.status = ConnectionStatus.IMPORTING
-        connection.authorization_status = AuthorizationStatus.AUTHORIZED
         connection.import_status = HistoricalImportStatus.RUNNING
         set_notification_import_start_if_unclaimed(connection)
-        connection.connected_at = connection.connected_at or timezone.now()
+        connection.connected_at = connection.connected_at or timezone.localtime()
         return
     if any(token in text for token in ("connected", "authorized", "authorization completed", "linked")):
         # Generic notifications may be duplicated or delayed. A healthy and
         # already-authorized connection must not re-enter Historical Import.
-        if connection.authorization_status == AuthorizationStatus.AUTHORIZED:
-            if connection.status in {ConnectionStatus.ACTIVE, ConnectionStatus.IDLE,
-                                     ConnectionStatus.PARTIAL, ConnectionStatus.IMPORTING,
-                                     ConnectionStatus.HISTORICAL_REIMPORT,
-                                     ConnectionStatus.RECONNECTED}:
-                return
-            if connection.status == ConnectionStatus.PROVIDER_ERROR and connection.import_status == HistoricalImportStatus.COMPLETED:
-                connection.status = ConnectionStatus.ACTIVE if connection.last_successful_sync else ConnectionStatus.IDLE
-                return
-        connection.status = ConnectionStatus.IMPORTING
-        connection.authorization_status = AuthorizationStatus.AUTHORIZED
-        connection.import_status = HistoricalImportStatus.RUNNING
-        set_notification_import_start_if_unclaimed(connection)
-        connection.connected_at = connection.connected_at or timezone.now()
+        # Unverified grants are handled by queue_authorization_verification_for_notification.
+        if connection.authorization_status != AuthorizationStatus.AUTHORIZED:
+            return
+        if connection.status in {ConnectionStatus.ACTIVE, ConnectionStatus.IDLE,
+                                 ConnectionStatus.PARTIAL, ConnectionStatus.IMPORTING,
+                                 ConnectionStatus.HISTORICAL_REIMPORT,
+                                 ConnectionStatus.RECONNECTED}:
+            return
+        if connection.status == ConnectionStatus.PROVIDER_ERROR and connection.import_status == HistoricalImportStatus.COMPLETED:
+            connection.status = ConnectionStatus.ACTIVE if connection.last_successful_sync else ConnectionStatus.IDLE
 
 
 @transaction.atomic
@@ -224,7 +325,7 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
             "status": DocumentStatus.PROCESSED,
             "reason": "notification",
             "payload": receipt_payload(payload),
-            "received_at": timezone.now(),
+            "received_at": timezone.localtime(),
         },
     )
     if not created:
@@ -243,27 +344,22 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
     if (connection.last_error_code == "provider_account_closed"
             and not any(token in text for token in ("deleted", "closed"))):
         return {"accepted": True, "skipped": True, "reason": "provider_account_closed"}
+    if (connection.last_error_code == "revoke_pending"
+            and connection.authorization_status == AuthorizationStatus.REVOKED):
+        # A late notification must not clear the revocation barrier or let a
+        # reconnect race with an already queued remote revoke. The revoke
+        # worker confirms absence of the provider server-to-server.
+        return {"accepted": True, "skipped": True, "reason": "revocation_pending"}
     resumed = False
-    if (connection.status in {ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING}
-            and any(token in text for token in ("authorized", "connected", "linked"))
-            and not any(token in text for token in (
-                "failed", "denied", "expired", "revoked", "unauthor", "invalid", "rejected",
-            ))):
-        pending_state = WearableConnectionEvent.objects.filter(
-            connection=connection,
-            event_type__in=["oauth_state_pending", "oauth_state_verified"],
-        ).order_by("-created_at").first()
-        if pending_state and pending_state.previous_status in {
-            ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED,
-        }:
-            connection_service.authorization_confirmed(connection, was_reconnect=True)
-            resumed = True
+    verification = queue_authorization_verification_for_notification(connection, text=text)
+    if verification is not None:
+        return verification
     if not resumed:
         apply_notification_state(connection, text)
     if not valid_transition(previous_status, connection.status) and not resumed:
         connection.status = previous_status
         return {"accepted": True, "skipped": True, "reason": "invalid_state_transition"}
-    connection.last_webhook_received_at = timezone.now()
+    connection.last_webhook_received_at = timezone.localtime()
     if connection.status == ConnectionStatus.PROVIDER_ERROR:
         connection.last_error_code = "rook_notification"
         connection.last_error_detail = str(payload.get("message") or text)[:512]
@@ -280,7 +376,7 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
         "last_webhook_received_at": connection.last_webhook_received_at,
         "last_error_code": connection.last_error_code,
         "last_error_detail": connection.last_error_detail,
-        "updated_at": timezone.now(),
+        "updated_at": timezone.localtime(),
     }
     filters = {
         "pk": connection.pk,
@@ -313,7 +409,7 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
     if (upstream_import_complete and connection.connection_method == "api"
             and connection.authorization_status == AuthorizationStatus.AUTHORIZED
             and connection.import_status == HistoricalImportStatus.RUNNING):
-        enqueue_or_reuse_recovery_job(
+        enqueue_or_reuse_fetch_rook_data_job(
             connection=connection, customer_profile=connection.customer_profile,
         )
     if (
@@ -323,11 +419,11 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
         and previous_status not in {ConnectionStatus.IMPORTING, ConnectionStatus.HISTORICAL_REIMPORT}
         and connection.connection_method == "api"
     ):
-        enqueue_or_reuse_recovery_job(
+        enqueue_or_reuse_fetch_rook_data_job(
             connection=connection, customer_profile=connection.customer_profile,
         )
     if connection.status == ConnectionStatus.PROVIDER_ERROR:
-        enqueue_or_reuse_recovery_job(
+        enqueue_or_reuse_fetch_rook_data_job(
             connection=connection, customer_profile=connection.customer_profile,
         )
     return {
@@ -335,4 +431,3 @@ def process_rook_notification(payload: dict, *, signature_valid: bool = False) -
         "connectionId": str(connection.pk),
         "status": connection.status,
     }
-

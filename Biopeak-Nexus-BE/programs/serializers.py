@@ -29,6 +29,7 @@ from programs.models import (
 )
 from programs.services.serializers import BaseServiceSerializer
 from programs.utils.constants import ProgramType
+from programs.utils.helper import has_program_classification_flags
 
 
 class ProgramAvailableRedeemableCenterSerializer(BaseModelSerializer):
@@ -80,6 +81,7 @@ class AssignedProgramServiceSerializer(BaseModelSerializer):
 
 
 class BaseProgramSerializer(BaseModelSerializer):
+    is_part_of_package = serializers.BooleanField(read_only=True)
     is_discarded = serializers.BooleanField(
         source="therapy_program.is_discarded", read_only=True, default=False,
     )
@@ -114,6 +116,7 @@ class BaseProgramSerializer(BaseModelSerializer):
             "expires_at",
             "is_complimentary",
             "is_credit",
+            "is_part_of_package",
             "price",
             "services_count",
             "sessions_count",
@@ -131,6 +134,13 @@ class BaseProgramSerializer(BaseModelSerializer):
             "created_at",
             "updated_at",
         ]
+
+    def to_representation(self, instance: Program):
+        """Expose the package marker only on composite program objects."""
+        representation = super().to_representation(instance)
+        if instance.program_type != ProgramType.COMPOSITE:
+            representation.pop("is_part_of_package", None)
+        return representation
 
 
 class ProgramSerializer(BaseModelSerializer):
@@ -175,6 +185,16 @@ class ProgramPaymentHistorySerializer(BaseModelSerializer):
     def create(self, validated_data: dict):
         program = validated_data["program"]
         amount_received = validated_data["amount_received"]
+        program_updates = {
+            "credit_received": Coalesce(F("credit_received"), Decimal("0.00"))
+            + amount_received,
+            "updated_at": timezone.localtime(),
+        }
+        if (
+            program.program_type == ProgramType.COMPOSITE
+            and has_program_classification_flags(validated_data)
+        ):
+            program_updates["is_part_of_package"] = False
         validated_data.pop("is_credit", None)
         validated_data.pop("is_complimentary", None)
         with transaction.atomic():
@@ -186,11 +206,7 @@ class ProgramPaymentHistorySerializer(BaseModelSerializer):
                 is_complimentary=False,
                 price__isnull=False,
                 price__gte=F("paid_total") + amount_received,
-            ).update(
-                credit_received=Coalesce(F("credit_received"), Decimal("0.00"))
-                + amount_received,
-                updated_at=timezone.localtime(),
-            )
+            ).update(**program_updates)
             if not updated_count:
                 current_program = Program.objects.filter(pk=program.pk).only(
                     "is_complimentary", "price", "credit_received",

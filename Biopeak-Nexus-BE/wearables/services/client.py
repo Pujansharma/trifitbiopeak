@@ -1,22 +1,32 @@
 import base64
+from hashlib import sha256
 from typing import Any
 from urllib.parse import urlparse
 
 import requests
 from django.conf import settings
+from django.core.cache import caches
+from django.core.cache.backends.dummy import DummyCache
+from django.core.cache.backends.locmem import LocMemCache
+from redis.exceptions import RedisError
 
 from core.utils.log import logger
+from django.utils import timezone
+from wearables.services.provider_errors import RookConfigurationError, RookServiceError, RookRequestDeferred
+from wearables.services.rate_limit import reserve_provider_request, block_provider_requests
+from wearables.services.rate_policy import retry_after_time
+from wearables.services.runtime import integer_setting
 
 
-class RookConfigurationError(RuntimeError):
-    pass
+def shared_summary_cache():
+    cache = caches["health"]
+    return None if isinstance(cache, (DummyCache, LocMemCache)) else cache
 
 
-class RookServiceError(RuntimeError):
-    def __init__(self, detail: str, *, status_code: int = 502):
-        super().__init__(detail)
-        self.detail = detail
-        self.status_code = status_code
+def summary_cache_key(*, base_url: str, client_uuid: str, rook_user_id: str,
+                      health_pillar: str, summary_date: str):
+    digest = sha256(f"{base_url}:{client_uuid}:{rook_user_id}:{health_pillar}:{summary_date}".encode()).hexdigest()
+    return f"rook:summary:v1:{digest}"
 
 
 def authorized_source_names(payload: Any) -> set[str]:
@@ -125,6 +135,22 @@ class RookClient:
             "Accept": "application/json",
         }
 
+    def before_request(self):
+        self.ensure_configured()
+        reserve_provider_request(self.base_url, self.client_uuid)
+
+    def check_response(self, response):
+        if response.status_code == 429:
+            retry_at = retry_after_time(response.headers.get("Retry-After"), now=timezone.localtime())
+            block_provider_requests(self.base_url, self.client_uuid, retry_at)
+            raise RookRequestDeferred(retry_at, reason="provider_429")
+        if response.status_code >= 400:
+            # Do not log URLs: ROOK authorizer paths contain member identifiers.
+            logger.warning(f"ROOK request failed with HTTP {response.status_code}.")
+            raise RookServiceError(
+                f"ROOK request failed with HTTP {response.status_code}.", status_code=response.status_code,
+            )
+
     def request_json(
         self,
         method: str,
@@ -133,6 +159,7 @@ class RookClient:
         json_body: dict | None = None,
         parameters: dict | None = None,
     ) -> dict:
+        self.before_request()
         try:
             response = requests.request(
                 method,
@@ -146,13 +173,7 @@ class RookClient:
             raise RookServiceError(
                 "ROOK could not be reached. Please retry."
             ) from error
-        if response.status_code >= 400:
-            logger.warning(
-                f"ROOK request failed with HTTP {response.status_code} for {method} {url}"
-            )
-            raise RookServiceError(
-                f"ROOK request failed with HTTP {response.status_code}."
-            )
+        self.check_response(response)
         if response.status_code == 204 or not response.content:
             return {}
         try:
@@ -170,7 +191,22 @@ class RookClient:
         health_pillar: str,
         summary_date: str,
     ) -> list[dict]:
+        self.ensure_configured()
+        # Optional cross-worker reuse reduces duplicate member/date fetches
+        # across provider jobs. Dummy/LocMem deployments retain direct pulls.
+        cache = shared_summary_cache()
+        cache_key = summary_cache_key(base_url=self.base_url, client_uuid=self.client_uuid,
+                                      rook_user_id=rook_user_id, health_pillar=health_pillar,
+                                      summary_date=summary_date)
+        if cache is not None:
+            try:
+                cached = cache.get(cache_key)
+            except (OSError, RedisError):
+                cached = None
+            if isinstance(cached, list) and cached and all(isinstance(item, dict) for item in cached):
+                return cached
         url = f"{self.base_url}/v2/processed_data/{health_pillar}_health/summary"
+        self.before_request()
         try:
             response = requests.get(
                 url,
@@ -182,12 +218,10 @@ class RookClient:
             raise RookServiceError(
                 "ROOK recovery data could not be reached."
             ) from error
+        # Empty 401/429/500 responses are failures, not successful no-data pulls.
+        self.check_response(response)
         if response.status_code == 204 or not response.content:
             return []
-        if response.status_code >= 400:
-            raise RookServiceError(
-                f"ROOK recovery request failed with HTTP {response.status_code}."
-            )
         try:
             payload = response.json()
         except ValueError as error:
@@ -195,6 +229,13 @@ class RookClient:
         documents = payload if isinstance(payload, list) else [payload]
         if not all(isinstance(document, dict) for document in documents):
             raise RookServiceError("ROOK returned invalid recovery documents.")
+        if cache is not None and documents:
+            try:
+                cache.set(cache_key, documents, timeout=integer_setting(
+                    "ROOK_SUMMARY_CACHE_SECONDS", 15, minimum=1, maximum=60,
+                ))
+            except (OSError, RedisError):
+                logger.warning("ROOK summary cache unavailable; direct pulls remain enabled.")
         return documents
 
     def get_authorizer(
@@ -233,4 +274,3 @@ class RookClient:
             "data_sources/revoke_auth"
         )
         self.request_json("POST", url, json_body={"data_source": data_source})
-

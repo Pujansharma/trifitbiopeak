@@ -1,0 +1,14 @@
+# NON-SECRET operational notes. Do not commit real ROOK/DB/AWS credentials.
+# Credentials use PRD_ROOK_* in production settings. Quotas are hardcoded
+# in core/settings/production.py (ROOK_API_REQUESTS_PER_*).
+
+ROOK_SYNC_UNITS_PER_RUN=3
+ROOK_PULLS_PAUSED=false
+# Queue URLs: GHA export_outbox_queue_env injects these into ECS from SQS
+# names in infra/integrations.yaml. Do not hand-maintain in production .env;
+# leave empty locally and drain with --limit.
+# PRD_ROOK_AUTH_OUTBOX_QUEUE_URL=
+# PRD_ROOK_DATA_FETCH_OUTBOX_QUEUE_URL=
+
+# Nightly discovery is hardcoded (stale, 7 days, Django TIME_ZONE=Asia/Kolkata).
+# Initial backfill requires ROOK_PREEXISTING_ENABLED and provider entitlement.

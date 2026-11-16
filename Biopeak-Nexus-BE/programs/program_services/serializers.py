@@ -55,6 +55,7 @@ from programs.services.utils.constants import (
 from programs.utils.db import cancel_program_service, discard_therapy_program_service
 from programs.utils.constants import ProgramType
 from programs.utils.audit import create_program_audit_log
+from programs.utils.helper import has_program_classification_flags
 from programs.therapy.serializers import TherapyCenterAdditionSerializer
 
 PROVIDER_LIFECYCLE_HANDLERS = {
@@ -1114,5 +1115,11 @@ class TherapyProgramServiceSerializer(BaseModelSerializer):
                         validated_data.get("updated_by"),
                     )
                     setattr(program, field, value)
+                if (
+                    program.program_type == ProgramType.COMPOSITE
+                    and has_program_classification_flags(program_data)
+                ):
+                    program.is_part_of_package = False
+                    program_data["is_part_of_package"] = False
                 program.save(update_fields=[*program_data, "updated_at"])
         return instance

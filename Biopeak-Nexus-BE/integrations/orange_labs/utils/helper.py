@@ -1,3 +1,6 @@
+from datetime import date
+from pathlib import Path
+
 import arrow
 
 from core.utils.log import logger
@@ -41,6 +44,32 @@ def get_orange_result_dates(orders: list[dict]):
             created_timestamp.date() if created_timestamp is not None else None
         ),
     }
+
+
+def get_orange_report_filename(
+        report_date: date,
+        report_number: int,
+        source_file_name: str = "",
+):
+    extension = Path(source_file_name or "").suffix.lower()
+    return (
+        f"Blood_Test_Report_{report_date.strftime('%y%m%d')}_{report_number}"
+        f"{extension}"
+    )
+
+
+def apply_orange_report_filenames(reports: list, report_date: date):
+    renamed_reports = []
+    for report_number, report in enumerate(reports, start=1):
+        renamed_reports.append({
+            **report,
+            "file_name": get_orange_report_filename(
+                report_date,
+                report_number,
+                report.get("file_name") or "",
+            ),
+        })
+    return renamed_reports
 
 
 def _validate_orange_report_orders(orders: list):
