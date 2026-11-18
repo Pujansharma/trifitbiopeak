@@ -79,59 +79,6 @@ def process_authorise_rook_connection(job: RookOutbox) -> dict:
     return {"authorized": True, "initialSyncQueued": True}
 
 
-
-def verify_rook_connection_now(
-    connection: WearableConnection, *, was_reconnect: bool = False,
-    actor_user=None, correlation_id: str = "",
-) -> dict:
-    """Verify a pending ROOK grant in this request; never enqueue auth work."""
-    connection = (
-        WearableConnection.objects.select_related("identity", "customer_profile")
-        .filter(pk=connection.pk).first()
-    )
-    if connection is None:
-        return {"authorized": False, "reason": "connection_missing"}
-    generation = str(connection.authorization_generation)
-    if connection.status not in {ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING}:
-        return {
-            "authorized": connection.authorization_status == AuthorizationStatus.AUTHORIZED,
-            "reason": "authorization_no_longer_pending",
-        }
-    if connection.connection_method != "api":
-        return {"authorized": False, "reason": "not_api_connection"}
-    if not has_active_wearable_consent(connection.customer_profile):
-        return {"authorized": False, "reason": "consent_revoked"}
-
-    try:
-        sources = RookClient().get_authorized_sources(
-            rook_user_id=connection.identity.rook_user_id,
-        )
-    except RookServiceError as error:
-        if error.status_code == 422:
-            return {"authorized": False, "reason": "authorization_pending", "retryRequired": True}
-        raise
-
-    if connection.data_source not in sources:
-        return {"authorized": False, "reason": "provider_not_authorized", "retryRequired": True}
-
-    with transaction.atomic():
-        serialize_profile_changes(connection.customer_profile_id)
-        current = serialize_connection_changes(connection.pk)
-        if (str(current.authorization_generation) != generation
-                or current.status not in {ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING}):
-            return {"authorized": False, "reason": "authorization_superseded"}
-        if not has_active_wearable_consent(current.customer_profile):
-            return {"authorized": False, "reason": "consent_revoked"}
-        authorization_confirmed(
-            current, was_reconnect=was_reconnect, actor_user=actor_user,
-            correlation_id=correlation_id,
-        )
-        WearableConnectionEvent.objects.filter(
-            connection=current,
-            event_type__in=("oauth_state_pending", "oauth_state_verification_pending", "oauth_state_queued"),
-        ).update(event_type="oauth_state_verified", updated_at=timezone.localtime())
-    return {"authorized": True, "initialSyncQueued": True}
-
 def process_revoke_rook_connection(job: RookOutbox) -> dict:
     if job.connection_id is None:
         raise ValueError("Revocation job has no connection.")

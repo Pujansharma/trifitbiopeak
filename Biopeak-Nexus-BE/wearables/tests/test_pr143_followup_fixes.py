@@ -19,20 +19,15 @@ from accounts.users.models import User
 from accounts.utils.constants import UserType
 from wearables.models import RookOutbox, WearableConnection, WearableConnectionEvent, WearableConsent
 from wearables.management.commands.check_rook_configuration import rook_readiness_checks
-from wearables.serializers import TimelineQuerySerializer
 from wearables.services.client import RookServiceError, validate_authorization_url
 from wearables.services.connections import get_or_create_connection
 from wearables.services.identity import get_or_create_rook_identity
 from wearables.services.job_processor import process_pending_rook_outbox
 from wearables.services.wake import QUEUE_KIND_AUTH, QUEUE_KIND_DATA_FETCH
-from wearables.services.job_claims import claim_health_job
 from wearables.services.job_queue import enqueue_or_reuse_fetch_rook_data_job
-from wearables.services.authorization_jobs import process_authorise_rook_connection
 from wearables.services.oauth import callback_url_for_connection, complete_oauth_callback
-from wearables.services.timeline import timeline_payload
 from wearables.utils.constants import (
     AuthorizationStatus, ConnectionStatus, ConsentStatus, HealthJobStatus, HealthJobType,
-    HEALTH_TIMELINE_MAXIMUM_LIMIT, HEALTH_TIMELINE_MAXIMUM_OFFSET,
 )
 
 
@@ -42,7 +37,7 @@ def collect_rook_transaction_state(*, rook_user_id: str, results: list[bool]) ->
 
 
 
-class HostAndTimelineLimitTests(SimpleTestCase):
+class AuthorizationHostAllowlistTests(SimpleTestCase):
     @override_settings(ROOK_AUTHORIZATION_ALLOWED_HOSTS=[])
     def test_missing_authorization_allowlist_rejects_garmin_and_other_providers(self):
         for provider, url in (
@@ -86,35 +81,6 @@ class HostAndTimelineLimitTests(SimpleTestCase):
         with self.assertRaises(RookServiceError):
             validate_authorization_url("Garmin", "https://valid-provider.example/authorize")
 
-    def test_timeline_offset_boundary_is_validated(self):
-        self.assertTrue(TimelineQuerySerializer(data={"offset": HEALTH_TIMELINE_MAXIMUM_OFFSET}).is_valid())
-        serializer = TimelineQuerySerializer(data={"offset": HEALTH_TIMELINE_MAXIMUM_OFFSET + 1})
-        self.assertFalse(serializer.is_valid())
-        self.assertIn("offset", serializer.errors)
-
-    def test_timeline_service_rejects_unbounded_offsets_and_limits(self):
-        parameters = {
-            "customer_profile": SimpleNamespace(), "start_date": None,
-            "end_date": None, "domain": "heart", "offset": 0, "limit": 50,
-        }
-        with self.assertRaises(ValueError):
-            timeline_payload(**{**parameters, "offset": HEALTH_TIMELINE_MAXIMUM_OFFSET + 1})
-        with self.assertRaises(ValueError):
-            timeline_payload(**{**parameters, "limit": HEALTH_TIMELINE_MAXIMUM_LIMIT + 1})
-
-    @override_settings(TIMELINE_INCLUDE_LEGACY_RESULTS=True)
-    @patch("wearables.services.timeline._timeline_gaps", return_value=[])
-    @patch("wearables.services.timeline._clinical_entries", return_value=[])
-    @patch("wearables.services.timeline._wearable_entries", return_value=[])
-    def test_maximum_allowed_page_still_uses_bounded_queryset_slices(self, wearables, clinical, gaps):
-        maximum = HEALTH_TIMELINE_MAXIMUM_OFFSET + HEALTH_TIMELINE_MAXIMUM_LIMIT + 1
-        timeline_payload(
-            customer_profile=SimpleNamespace(rook_identity=None), start_date=None,
-            end_date=None, domain=None, offset=HEALTH_TIMELINE_MAXIMUM_OFFSET,
-            limit=HEALTH_TIMELINE_MAXIMUM_LIMIT,
-        )
-        self.assertEqual(wearables.call_args.kwargs["maximum"], maximum)
-        self.assertEqual(clinical.call_args.kwargs["maximum"], maximum)
 
 
 class FollowupJobTests(TestCase):
@@ -259,7 +225,7 @@ class FollowupJobTests(TestCase):
 
 class OAuthTransactionBoundaryTests(TransactionTestCase):
     @override_settings(ROOK_CLIENT_UUID="review-client", ROOK_CALLBACK_URL="https://r.test/r")
-    @patch("wearables.services.authorization_jobs.RookClient")
+    @patch("wearables.services.connections.RookClient")
     def test_external_rook_authorization_check_runs_before_atomic_block(self, client_class):
         user = User.objects.create_user(email="pr143-oauth@example.com")
         UserAccount.objects.create(user=user, account_type=UserType.CUSTOMER)
@@ -292,11 +258,11 @@ class OAuthTransactionBoundaryTests(TransactionTestCase):
             urlsplit(callback).path.rsplit("/", 1)[-1],
             rook_client_uuid="review-client", rook_user_id=identity.rook_user_id,
         )
-        self.assertEqual(result, "pending")
-        self.assertEqual(transaction_state_during_rook_call, [])
-        queued = RookOutbox.objects.get(connection=connection, job_type=HealthJobType.AUTHORISE_ROOK_CONNECTION)
-        self.assertTrue(process_authorise_rook_connection(claim_health_job(queued.pk))["authorized"])
+        self.assertEqual(result, "authorized")
         self.assertEqual(transaction_state_during_rook_call, [False])
+        self.assertFalse(RookOutbox.objects.filter(
+            connection=connection, job_type=HealthJobType.AUTHORISE_ROOK_CONNECTION,
+        ).exists())
         self.assertTrue(WearableConnectionEvent.objects.filter(
             connection=connection, event_type="oauth_state_verified",
         ).exists())

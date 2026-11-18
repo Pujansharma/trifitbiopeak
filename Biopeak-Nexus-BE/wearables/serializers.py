@@ -8,8 +8,6 @@ from rest_framework import serializers
 from core.utils.serializers import BaseSerializer
 from wearables.utils.constants import (
     HEALTH_DOMAIN_ORDER,
-    HEALTH_TIMELINE_MAXIMUM_LIMIT,
-    HEALTH_TIMELINE_MAXIMUM_OFFSET,
     NATIVE_WEARABLE_SOURCES,
     HistoricalImportStatus,
     PermissionStatus,
@@ -139,26 +137,4 @@ class DomainQuerySerializer(BaseSerializer):
     window = serializers.ChoiceField(
         choices=("7d", "14d", "30d", "90d", "lifetime"), required=False,
     )
-
-
-class TimelineQuerySerializer(BaseSerializer):
-    start = serializers.DateField(required=False)
-    end = serializers.DateField(required=False)
-    domain = serializers.ChoiceField(
-        choices=[(domain, domain) for domain in HEALTH_DOMAIN_ORDER],
-        required=False,
-    )
-    offset = serializers.IntegerField(
-        min_value=0, max_value=HEALTH_TIMELINE_MAXIMUM_OFFSET, default=0,
-    )
-    limit = serializers.IntegerField(
-        min_value=1, max_value=HEALTH_TIMELINE_MAXIMUM_LIMIT, default=50,
-    )
-
-    def validate(self, attributes):
-        start = attributes.get("start")
-        end = attributes.get("end")
-        if start and end and end < start:
-            raise serializers.ValidationError("End date must be on or after start date.")
-        return attributes
 

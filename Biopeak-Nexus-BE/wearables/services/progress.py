@@ -2,7 +2,7 @@
 from django.db.models import Max, Prefetch, prefetch_related_objects
 from django.utils import timezone
 
-from wearables.models import HealthObservation, RookOutbox, WearableConnection
+from wearables.models import HealthDailySummary, RookOutbox, WearableConnection
 from wearables.services.progress_policy import (
     domain_sync_progress,
     sync_operation_state,
@@ -32,9 +32,9 @@ def attach_connection_progress(connections: list, customer_profile):
     by_source = {connection.data_source: connection for connection in connections}
     for connection in connections:
         connection.measurement_domains = {}
-    rows = HealthObservation.objects.filter(customer_profile=customer_profile, is_current=True).values(
-        "domain", "data_sources",
-    ).annotate(latest=Max("observed_at"))
+    rows = HealthDailySummary.objects.filter(
+        customer_profile=customer_profile, last_observed_at__isnull=False,
+    ).values("domain", "data_sources").annotate(latest=Max("last_observed_at"))
     for row in rows.iterator():
         for source in row["data_sources"]:
             connection = by_source.get(source)
@@ -45,10 +45,10 @@ def attach_connection_progress(connections: list, customer_profile):
 
 def connection_measurement_domains(connection: WearableConnection):
     if not hasattr(connection, "measurement_domains"):
-        rows = HealthObservation.objects.filter(
-            customer_profile=connection.customer_profile, is_current=True,
+        rows = HealthDailySummary.objects.filter(
+            customer_profile=connection.customer_profile,
             data_sources__contains=[connection.data_source],
-        ).values("domain").annotate(latest=Max("observed_at"))
+        ).values("domain").annotate(latest=Max("last_observed_at"))
         connection.measurement_domains = {row["domain"]: row["latest"] for row in rows}
     return connection.measurement_domains
 

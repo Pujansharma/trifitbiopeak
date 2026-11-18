@@ -16,7 +16,6 @@ from django.db import transaction
 from django.utils import timezone
 
 from wearables.models import WearableConnectionEvent
-from wearables.models import WearableConnection
 from wearables.services import connections as connection_service
 from wearables.services.client import RookConfigurationError
 from wearables.utils.constants import AuthorizationStatus, ConnectionStatus
@@ -137,7 +136,13 @@ def claim_oauth_state(event: WearableConnectionEvent, new_type: str) -> None:
 def complete_oauth_callback(
     state_token: str, *, rook_client_uuid: str, rook_user_id: str, cancelled: bool = False
 ) -> str:
-    """Consume the one-use callback and verify ROOK immediately, without an auth job."""
+    """Consume a valid callback and verify ROOK synchronously when possible.
+
+    The callback never trusts browser parameters as proof of authorization.
+    Biopeak asks ROOK server-to-server first. The existing authorization
+    outbox is used only when ROOK has not propagated the grant yet or the
+    direct lookup fails transiently.
+    """
     digest = _decode_state(state_token)
     configured_client_uuid = str(getattr(settings, "ROOK_CLIENT_UUID", ""))
     if not configured_client_uuid or not hmac.compare_digest(configured_client_uuid, str(rook_client_uuid)):
@@ -153,12 +158,14 @@ def complete_oauth_callback(
         raise OAuthStateError("ROOK member identity does not match.")
 
     max_age = timedelta(minutes=max(1, getattr(settings, "ROOK_OAUTH_TIMEOUT_MINUTES", 15)))
+
     with transaction.atomic():
+        # Re-read mutable callback/connection state before any provider I/O.
         event = pending_events.filter(
             event_type="oauth_state_pending", payload__nonceDigest=digest,
         ).first()
         if event is None:
-            raise OAuthStateError("Authorization state was already used by another request.")
+            raise OAuthStateError("Authorization state is unknown or already used.")
         connection = event.connection
         if not hmac.compare_digest(connection.identity.rook_user_id, str(rook_user_id)):
             raise OAuthStateError("ROOK member identity does not match.")
@@ -180,22 +187,45 @@ def complete_oauth_callback(
         if connection.status not in {ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING}:
             claim_oauth_state(event, "oauth_state_superseded")
             return "authorized" if connection.authorization_status == AuthorizationStatus.AUTHORIZED else "cancelled"
-
+        event_id = event.pk
         was_reconnect = event.previous_status in {
             ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED,
         }
-        claim_oauth_state(event, "oauth_state_verification_pending")
-        connection_id = connection.pk
-        correlation_id = event.correlation_id
 
-    # Network I/O intentionally occurs outside the transaction. A positive callback
-    # is only a trigger; get_authorized_sources is the actual proof of authorization.
-    from wearables.services.authorization_jobs import verify_rook_connection_now
-    connection = WearableConnection.objects.select_related("identity", "customer_profile").get(pk=connection_id)
-    result = verify_rook_connection_now(
-        connection, was_reconnect=was_reconnect, correlation_id=correlation_id,
+    # Important: no ROOK HTTP request is made while the database transaction
+    # above is open. This direct check may itself confirm the connection and
+    # enqueue only the heavier fetch_rook_data work.
+    outcome = connection_service.verify_api_authorization_with_fallback(
+        connection,
+        was_reconnect=was_reconnect,
     )
-    return "authorized" if result.get("authorized") else "pending"
+
+    if outcome not in {"authorized", "queued"}:
+        with transaction.atomic():
+            current_event = WearableConnectionEvent.objects.filter(pk=event_id).first()
+            if current_event is not None and current_event.event_type == "oauth_state_pending":
+                claim_oauth_state(current_event, "oauth_state_superseded")
+        connection.refresh_from_db()
+        return (
+            "authorized"
+            if connection.authorization_status == AuthorizationStatus.AUTHORIZED
+            else "cancelled"
+        )
+
+    with transaction.atomic():
+        current_event = WearableConnectionEvent.objects.filter(pk=event_id).first()
+        if current_event is None:
+            raise OAuthStateError("Authorization state no longer exists.")
+        if current_event.event_type != "oauth_state_pending":
+            connection.refresh_from_db()
+            if connection.authorization_status == AuthorizationStatus.AUTHORIZED:
+                return "authorized"
+            raise OAuthStateError("Authorization state was already used by another request.")
+        claim_oauth_state(
+            current_event,
+            "oauth_state_verified" if outcome == "authorized" else "oauth_state_queued",
+        )
+    return "authorized" if outcome == "authorized" else "pending"
 
 
 def expire_oauth_attempts(customer_profile) -> int:
@@ -204,14 +234,14 @@ def expire_oauth_attempts(customer_profile) -> int:
     pending = list(
         WearableConnectionEvent.objects.select_related("connection").filter(
             connection__customer_profile=customer_profile,
-            event_type__in=("oauth_state_pending", "oauth_state_verification_pending"),
+            event_type="oauth_state_pending",
             created_at__lt=cutoff,
         )
     )
     for event in pending:
         with transaction.atomic():
             changed = WearableConnectionEvent.objects.filter(
-                pk=event.pk, event_type__in=("oauth_state_pending", "oauth_state_verification_pending")
+                pk=event.pk, event_type="oauth_state_pending"
             ).update(event_type="oauth_state_expired", updated_at=timezone.localtime())
             if changed:
                 _cancel_pending_connection(event.connection, reason="ROOK authorization timed out.", prior_status=event.previous_status)

@@ -13,7 +13,7 @@ from accounts.customers.models import Customer, CustomerProfile
 from accounts.models import UserAccount
 from accounts.users.models import User
 from accounts.utils.constants import UserType
-from wearables.models import RookOutbox, WearableConnection, WearableConnectionEvent
+from wearables.models import WearableConnection, WearableConnectionEvent
 from wearables.services.client import RookServiceError
 from wearables.services.connections import (
     get_or_create_connection,
@@ -21,9 +21,7 @@ from wearables.services.connections import (
     refresh_authorizing_connections,
 )
 from wearables.services.identity import get_or_create_rook_identity
-from wearables.services.job_claims import claim_health_job
-from wearables.services.authorization_jobs import process_authorise_rook_connection
-from wearables.utils.constants import AuthorizationStatus, ConnectionStatus, HealthJobType
+from wearables.utils.constants import AuthorizationStatus, ConnectionStatus
 
 
 @override_settings(
@@ -53,8 +51,9 @@ class RepeatedDeviceConnectTests(TestCase):
             validated_data=self.validated_data,
         )
 
+    @patch("wearables.services.connections.RookClient.get_authorized_sources", return_value=set())
     @patch("wearables.services.connections.RookClient.get_authorizer")
-    def test_second_connect_preserves_authorizing_and_supersedes_old_token(self, authorizer):
+    def test_second_connect_preserves_authorizing_and_supersedes_old_token(self, authorizer, sources):
         authorizer.return_value = {
             "authorized": False, "authorization_url": "https://connect.garmin.com/one",
         }
@@ -81,9 +80,11 @@ class RepeatedDeviceConnectTests(TestCase):
         )
         self.assertEqual(new_state.previous_status, ConnectionStatus.NEVER_CONNECTED)
         authorizer.assert_called()
+        sources.assert_called_once()
 
+    @patch("wearables.services.connections.RookClient.get_authorized_sources", return_value=set())
     @patch("wearables.services.connections.RookClient.get_authorizer")
-    def test_failed_link_refresh_does_not_cancel_previous_authorizing_attempt(self, authorizer):
+    def test_failed_link_refresh_does_not_cancel_previous_authorizing_attempt(self, authorizer, sources):
         authorizer.side_effect = [
             {"authorized": False, "authorization_url": "https://connect.garmin.com/one"},
             RookServiceError("Provider temporarily unavailable."),
@@ -99,6 +100,7 @@ class RepeatedDeviceConnectTests(TestCase):
         self.assertEqual(WearableConnectionEvent.objects.filter(
             connection=connection, event_type="oauth_state_authorizer_failed",
         ).count(), 1)
+        sources.assert_called_once()
 
     @patch("wearables.services.connections.enqueue_or_reuse_fetch_rook_data_job")
     @patch("wearables.services.connections.RookClient.get_authorized_sources", return_value={"Garmin"})
@@ -117,11 +119,9 @@ class RepeatedDeviceConnectTests(TestCase):
             "authorized": False, "authorization_url": "https://connect.garmin.com/one",
         }
         self.start()
-        self.start()
         enqueue.return_value = (SimpleNamespace(pk="existing-recovery"), False)
+        self.start()
         refresh_authorizing_connections(self.profile)
-        queued = RookOutbox.objects.get(customer_profile=self.profile, job_type=HealthJobType.AUTHORISE_ROOK_CONNECTION)
-        self.assertTrue(process_authorise_rook_connection(claim_health_job(queued.pk))["authorized"])
         connection.refresh_from_db()
         self.assertEqual(connection.status, ConnectionStatus.HISTORICAL_REIMPORT)
         self.assertEqual(connection.authorization_status, AuthorizationStatus.AUTHORIZED)

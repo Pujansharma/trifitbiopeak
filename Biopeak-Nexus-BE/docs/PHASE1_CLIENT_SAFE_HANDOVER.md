@@ -1,3 +1,5 @@
+> **Historical Phase 1 snapshot:** The current client routes and removed state callback are documented in [ROOK_SEVEN_API_HANDOVER_20261117.md](ROOK_SEVEN_API_HANDOVER_20261117.md). Do not deploy using the old /r/{state} instructions below.
+
 # Biopeak Nexus — Client-Safe Phase 1 Handover and Release Gate
 
 > **SUPERSEDED (2026-11-16).** Historical ZIP handover. Current ROOK execution is outbox + `infra/integrations.yaml` — see `docs/ROOK_MANAGER_FLOWS.md`. Paths like `process_health_jobs` below are not current.
@@ -26,7 +28,7 @@ This is a source-level integration/review candidate, **not a working or producti
 | `wearables/__init__.py` | New wearables module/application registration scaffolding. |
 | `wearables/admin.py` | New wearables module/application registration scaffolding. |
 | `wearables/apps.py` | New wearables module/application registration scaffolding. |
-| `wearables/callback_urls.py` | Short ROOK OAuth browser return URL after ROOK-appended client/member path. |
+| `wearables/oauth_callback.py` | Short ROOK OAuth browser return URL after ROOK-appended client/member path. |
 | `wearables/device_urls.py` | New additive /devices route tree. |
 | `wearables/health_urls.py` | New additive /health route tree. |
 | `wearables/management/__init__.py` | New wearables module/application registration scaffolding. |
@@ -74,7 +76,7 @@ This is a source-level integration/review candidate, **not a working or producti
 | Original path | Exact change | Why mandatory / if reverted | Existing API impact |
 |---|---|---|---|
 | `accounts/organizations/utils/constants.py` | Add WEARABLES feature choice for existing rollout checks. | Feature flag gating cannot reference the new choice; no existing route or business rule changed. | Additive only at source level; runtime untested |
-| `core/api/urls.py` | Register /devices/, /health/ and short /r/ callback namespaces. | No new member route or ROOK callback can resolve; all original route declarations remain. | Additive only at source level; runtime untested |
+| `core/api/urls.py` | Register /devices/, /health/ and mobile /rook/return/ callback namespace. | No new member route or ROOK callback can resolve; all original route declarations remain. | Additive only at source level; runtime untested |
 | `core/settings/base.py` | Install wearables Django app, rate scopes, isolated health cache and health baseline settings. | New models will not register; rate scopes/cache alias will be undefined. | Additive only at source level; runtime untested |
 | `core/settings/development.py` | Append local ROOK flags/config and two CORS header names. | Development settings cannot access credentials/feature controls and browser profile header may be blocked. | Additive only at source level; runtime untested |
 | `core/settings/production.py` | Append production ROOK flags/config and two CORS header names; feature remains OFF by default. | Production cannot configure optional ROOK integration and its safe rollout. | Additive only at source level; runtime untested |
@@ -109,14 +111,14 @@ Every other original path, including `accounts/users/**`, `accounts/customers/**
 
 | Method | Endpoint | Auth | Backend behavior | Test status |
 |---|---|---|---|---|
-| GET | `/devices/` | Biopeak customer JWT | Connection statuses; `?refresh=true` calls ROOK | **NOT TESTED** |
+| GET | `/devices/providers/` | Biopeak customer JWT | Combined catalogue/status; `?refresh=true` calls ROOK | **NOT TESTED** |
 | POST | `/devices/connect/` | JWT | Consent + new API authorizer/native SDK connection | **NOT TESTED** |
 | POST | `/devices/disconnect/` | JWT | History-preserving provider revoke | **NOT TESTED** |
 | POST | `/devices/consent/revoke/` | JWT | Explicit member consent revoke and provider shutdown | **NOT TESTED** |
-| POST | `/devices/retry-sync/` | JWT | Idempotent recovery job | **NOT TESTED** |
+| POST | `/devices/sync/` | JWT | Idempotent recovery job | **NOT TESTED** |
 | GET | `/devices/sdk-config/` | JWT | Authorized native SDK config | **NOT TESTED** |
-| POST | `/devices/native-status/` | JWT | SDK permission and connection state | **NOT TESTED** |
-| GET | `/r/{state_token}/client_uuid/{client_uuid}/user_id/{rook_user_id}` | Public, one-time token | Checks token/client/user, authenticates ROOK server-side | **Isolated state checks only** |
+| PATCH | `/devices/native-status/` | JWT | SDK permission and connection state | **NOT TESTED** |
+| GET | `/rook/return/` | Public navigation return | Redirects to mobile app; app verifies using provider refresh | **Regression tests added** |
 | GET | `/health/dashboard/` | JWT | Six stable health domains | **NOT TESTED** |
 | GET | `/health/{domain}/` | JWT | Domain detail/graphs/baselines | **NOT TESTED** |
 | GET | `/health/timeline/` | JWT | Wearables + profile-scoped lab/assessment milestone union | **Isolated merge/order checks only** |
@@ -132,7 +134,7 @@ The client-original lab timeline view intentionally exposes only a **milestone/a
 ## ROOK callback and provider contract
 
 - The current ROOK authorizer API documents `redirect_url` max 50 characters, and appends `/client_uuid/<client_uuid>/user_id/<user_id>` to its **path**. We use `ROOK_CALLBACK_URL=https://short-approved-host/r` and append a cryptographically random 16-character path nonce; too-long URLs are rejected before database changes. Callback route is registered as `/r/` and verifies client UUID, ROOK member ID, one-time nonce, expiry and ROOK server-side authorization.
-- If short callback host cannot be deployed, omit `ROOK_CALLBACK_URL` and let the authenticated frontend poll `/devices/?refresh=true`; do not assume redirect success.
+- Keep `ROOK_CALLBACK_URL` empty and let the authenticated frontend call `/devices/providers/?refresh=true`; do not assume redirect success.
 - The published ROOK v1 per-provider authorizer supports Garmin, Oura, Polar, Fitbit, Withings, Whoop and Dexcom. Strava authorization is explicitly rejected by the new serializer instead of making an upstream unsupported API call.
 - ROOK webhook signature uses nested metadata timestamps, webhook secret and exact source identity, plus idempotent notification/document receipts. All live variants/SDK behavior remain pending sandbox validation.
 

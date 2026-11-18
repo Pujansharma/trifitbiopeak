@@ -1,7 +1,7 @@
 """Browser callback bridge tests (no database, OAuth secrets, or ROOK network)."""
 
 from django.test import SimpleTestCase
-from django.urls import resolve, reverse
+from django.urls import Resolver404, resolve
 
 
 class RookMobileCallbackBridgeTests(SimpleTestCase):
@@ -65,8 +65,6 @@ class RookMobileCallbackBridgeTests(SimpleTestCase):
         response = self.client.post("/rook/return")
         self.assertEqual(response.status_code, 405)
 
-    def test_existing_stateful_route_stays_registered(self) -> None:
-        match = resolve(
-            f"/r/AAAAAAAAAAAAAAAA/client_uuid/{self.client_uuid}/user_id/{self.rook_user_id}"
-        )
-        self.assertEqual(match.url_name, "rook-oauth-return")
+    def test_legacy_state_callback_is_unregistered(self) -> None:
+        with self.assertRaises(Resolver404):
+            resolve(f"/r/AAAAAAAAAAAAAAAA/client_uuid/{self.client_uuid}/user_id/{self.rook_user_id}")

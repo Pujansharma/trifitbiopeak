@@ -16,7 +16,7 @@ from accounts.models import UserAccount
 from accounts.users.models import User
 from accounts.utils.constants import UserType
 from wearables.models import (
-    HealthDomainSnapshot, RookOutbox, RookHealthDocument,
+    HealthDomainSnapshot, RookOutbox, RookWebhookReceipt,
     WearableConsent,
 )
 from wearables.serializers import DeviceConnectSerializer
@@ -33,7 +33,6 @@ from wearables.services.recovery import process_fetch_rook_data
 from wearables.services.job_queue import enqueue_or_reuse_fetch_rook_data_job
 from wearables.services.client import RookServiceError
 from wearables.services.metrics import extract_metric_values, is_v1_display_metric
-from wearables.services.timeline import timeline_payload
 from wearables.utils.constants import (
     AuthorizationStatus, ConfidenceLevel, ConnectionStatus, ConsentStatus,
     HealthCardState, HealthDomain, HealthJobType, HistoricalImportStatus,
@@ -197,7 +196,7 @@ class PhaseOnePersistenceContractTests(TestCase):
         self.assertEqual(result["importedDocumentCount"], 1)
         self.assertFalse(result["partial"])
         self.assertEqual(self.garmin.import_status, HistoricalImportStatus.COMPLETED)
-        self.assertTrue(RookHealthDocument.objects.filter(status="processed").exists())
+        self.assertTrue(RookWebhookReceipt.objects.filter(status="processed").exists())
 
     @override_settings(ROOK_PREEXISTING_ENABLED=True)
     @patch("wearables.services.recovery.normalize_health_document", return_value={"skipped": True})
@@ -214,17 +213,6 @@ class PhaseOnePersistenceContractTests(TestCase):
         self.garmin.refresh_from_db()
         self.assertEqual(self.garmin.import_status, HistoricalImportStatus.FAILED)
         self.assertIsNone(self.garmin.import_completed_at)
-
-    def test_timeline_gaps_are_not_dependent_on_page_size(self):
-        self.process_document(self.document(day="2026-10-08"))
-        self.process_document(self.document(day="2026-10-13"))
-        for offset in (0, 1):
-            result = timeline_payload(customer_profile=self.profile,
-                                      start_date=None, end_date=None, domain="activity",
-                                      offset=offset, limit=1)
-            self.assertEqual(result["gapScope"], "filtered_timeline")
-            self.assertEqual(len(result["gaps"]), 1)
-            self.assertEqual(result["gaps"][0]["missingDays"], 4)
 
     def test_snapshot_cache_reuse_and_invalidation_across_reads(self):
         def sample_card(**kw):

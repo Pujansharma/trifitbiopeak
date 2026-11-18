@@ -5,7 +5,6 @@ Run with Python 3.14 and a PostgreSQL test database. No ROOK calls needed.
 from datetime import timedelta
 from unittest.mock import patch
 
-from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
@@ -17,7 +16,7 @@ from wearables.management.commands.check_rook_configuration import rook_readines
 from wearables.models import WearableConsent, RookOutbox, WearableConnection
 from wearables.services.connections import authorization_confirmed, get_or_create_connection
 from wearables.services.identity import get_or_create_rook_identity
-from wearables.services.job_selection import connections_requiring_fetch_rook_data
+from wearables.services.scheduling import run_rook_sync_scan
 from wearables.services.job_queue import enqueue_or_reuse_fetch_rook_data_job
 from wearables.utils.constants import (
     AuthorizationStatus, ConnectionStatus, ConsentStatus, HealthJobStatus, HealthJobType,
@@ -50,33 +49,52 @@ class QueueCoalescingTests(TestCase):
         )
         self.connection.refresh_from_db()
 
-    def test_reconcile_command_does_not_enqueue_legacy_freshness_jobs(self):
-        call_command("enqueue_health_freshness_checks", verbosity=0)
-        call_command("enqueue_health_freshness_checks", verbosity=0)
-        self.assertEqual(
-            RookOutbox.objects.filter(
-                customer_profile=self.profile, job_type="freshness_check",
-            ).count(),
-            0,
+    @patch("wearables.services.job_queue.schedule_job_wake")
+    def test_nightly_scan_enqueues_only_fetch_jobs(self, schedule_wake):
+        now = timezone.now()
+        WearableConnection.objects.filter(pk=self.connection.pk).update(
+            synced_through=now - timedelta(days=8),
         )
+        first_scan = run_rook_sync_scan(now=now)
+        second_scan = run_rook_sync_scan(now=now)
+        self.assertEqual(first_scan["enqueuedCount"], 1)
+        self.assertEqual(second_scan["enqueuedCount"], 0)
+        self.assertEqual(RookOutbox.objects.filter(
+            customer_profile=self.profile,
+            job_type=HealthJobType.FETCH_ROOK_DATA,
+        ).count(), 1)
+        self.assertFalse(RookOutbox.objects.filter(job_type="freshness_check").exists())
+        schedule_wake.assert_called()
 
-    def test_one_open_recovery_and_hourly_cooldown_are_filtered_at_database_level(self):
+    def test_one_open_recovery_and_hourly_cooldown_enforced_by_queue(self):
         self.connection.last_successful_sync = None
         self.connection.save(update_fields=["last_successful_sync", "updated_at"])
-        self.assertIn(self.connection.pk, list(connections_requiring_fetch_rook_data().values_list("pk", flat=True)))
         job, created = enqueue_or_reuse_fetch_rook_data_job(
             connection=self.connection, customer_profile=self.profile,
         )
         self.assertTrue(created)
-        self.assertFalse(connections_requiring_fetch_rook_data().filter(pk=self.connection.pk).exists())
+        reused, created = enqueue_or_reuse_fetch_rook_data_job(
+            connection=self.connection, customer_profile=self.profile,
+        )
+        self.assertFalse(created)
+        self.assertEqual(reused.pk, job.pk)
         RookOutbox.objects.filter(pk=job.pk).update(
             status=HealthJobStatus.COMPLETED, completed_at=timezone.now(),
         )
-        self.assertFalse(connections_requiring_fetch_rook_data().filter(pk=self.connection.pk).exists())
+        recent, created = enqueue_or_reuse_fetch_rook_data_job(
+            connection=self.connection, customer_profile=self.profile,
+        )
+        self.assertFalse(created)
+        self.assertIsNone(recent)
         RookOutbox.objects.filter(pk=job.pk).update(
             completed_at=timezone.now() - timedelta(hours=2),
         )
-        self.assertTrue(connections_requiring_fetch_rook_data().filter(pk=self.connection.pk).exists())
+        replacement, created = enqueue_or_reuse_fetch_rook_data_job(
+            connection=self.connection, customer_profile=self.profile,
+        )
+        self.assertTrue(created)
+        self.assertNotEqual(replacement.pk, job.pk)
+        self.assertEqual(replacement.status, HealthJobStatus.PENDING)
 
     @patch("wearables.services.job_queue.enqueue_health_job")
     def test_authorization_reuses_inflight_recovery_without_changing_import_start(self, enqueue):

@@ -185,62 +185,21 @@ class WearableConnectionEvent(BaseUUIDModel):
         return f"{self.connection_id}:{self.event_type}"
 
 
-class RookHealthDocument(BaseUUIDModel):
-    customer_profile = models.ForeignKey(
-        CustomerProfile,
-        on_delete=models.CASCADE,
-        related_name="rook_health_documents",
-    )
-    identity = models.ForeignKey(
-        RookMemberIdentity,
-        on_delete=models.CASCADE,
-        related_name="health_documents",
-    )
-    document_identity = models.CharField(max_length=64, unique=True)
-    content_hash = models.CharField(max_length=64)
-    data_structure = models.CharField(max_length=128, db_index=True)
-    document_version = models.PositiveIntegerField(default=1)
-    observed_at = models.DateTimeField(db_index=True)
-    source_key = models.CharField(max_length=64, blank=True, db_index=True)
-    data_sources = models.JSONField(default=list, blank=True)
-    source_label = models.CharField(max_length=255, blank=True)
-    device_metadata = models.JSONField(default=list, blank=True)
-    source_contexts = models.JSONField(default=list, blank=True)
-    payload = models.JSONField(default=dict)
-    status = models.CharField(
-        max_length=16,
-        choices=DocumentStatus,
-        default=DocumentStatus.RECEIVED,
-    )
-    received_at = models.DateTimeField()
-    processed_at = models.DateTimeField(null=True, blank=True)
-    failure_detail = models.CharField(max_length=512, blank=True)
-
-    class Meta:
-        ordering = ["-observed_at"]
-        indexes = [
-            models.Index(fields=["customer_profile", "observed_at"], name="w_rookhealthdo_1_idx"),
-            models.Index(
-                fields=["customer_profile", "data_structure", "observed_at"],
-                name="wear_doc_prof_struct_time",
-            ),
-            models.Index(fields=["status", "received_at"], name="w_rookhealthdo_3_idx"),
-        ]
-
-    def __str__(self):
-        return self.document_identity
-
-
 class RookWebhookReceipt(BaseUUIDModel):
+    """One accepted or rejected ROOK delivery.
+
+    While QUEUED the raw ROOK body is held in ``payload``; it is replaced by a
+    compact summary once the delivery is processed or rejected. ``document_identity``
+    is the canonical correction key (member, structure, UTC instant), and
+    ``document_version`` / ``content_hash`` decide duplicates and corrections.
+    """
+
     receipt_key = models.CharField(max_length=64, unique=True)
     rook_user_id = models.CharField(max_length=50, blank=True, db_index=True)
-    document = models.ForeignKey(
-        RookHealthDocument,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="receipts",
-    )
+    document_identity = models.CharField(max_length=64, blank=True)
+    document_version = models.PositiveIntegerField(default=1)
+    content_hash = models.CharField(max_length=64, blank=True)
+    observed_at = models.DateTimeField(null=True, blank=True)
     signature_valid = models.BooleanField(default=False)
     status = models.CharField(
         max_length=16,
@@ -253,63 +212,13 @@ class RookWebhookReceipt(BaseUUIDModel):
 
     class Meta:
         ordering = ["-received_at"]
-        indexes = [models.Index(fields=["status", "received_at"], name="w_rookwebhookr_1_idx")]
-
-    def __str__(self):
-        return self.receipt_key
-
-
-class HealthObservation(BaseUUIDModel):
-    customer_profile = models.ForeignKey(
-        CustomerProfile,
-        on_delete=models.CASCADE,
-        related_name="health_observations",
-    )
-    document = models.ForeignKey(
-        RookHealthDocument,
-        on_delete=models.CASCADE,
-        related_name="observations",
-    )
-    connection = models.ForeignKey(
-        WearableConnection,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="observations",
-    )
-    observation_identity = models.CharField(max_length=64, unique=True)
-    domain = models.CharField(max_length=16, choices=HealthDomain, db_index=True)
-    metric = models.CharField(max_length=128, db_index=True)
-    field_path = models.CharField(max_length=512)
-    observed_at = models.DateTimeField(db_index=True)
-    local_date = models.DateField(db_index=True)
-    numeric_value = models.FloatField(null=True, blank=True)
-    text_value = models.CharField(max_length=512, blank=True)
-    boolean_value = models.BooleanField(null=True, blank=True)
-    unit = models.CharField(max_length=32, blank=True)
-    source_key = models.CharField(max_length=64, blank=True, db_index=True)
-    data_sources = models.JSONField(default=list, blank=True)
-    provenance = models.JSONField(default=dict, blank=True)
-    confidence = models.FloatField(default=1.0)
-    document_version = models.PositiveIntegerField(default=1)
-    # Retain superseded versions for the canonical append-only audit timeline.
-    is_current = models.BooleanField(default=True, db_index=True)
-
-    class Meta:
-        ordering = ["-observed_at"]
         indexes = [
-            models.Index(
-                fields=["customer_profile", "domain", "observed_at"],
-                name="wear_obs_prof_domain_time",
-            ),
-            models.Index(
-                fields=["customer_profile", "metric", "local_date"],
-                name="wear_obs_prof_metric_day",
-            ),
+            models.Index(fields=["status", "received_at"], name="w_rookwebhookr_1_idx"),
+            models.Index(fields=["document_identity", "status"], name="w_rookwebhook_ident_idx"),
         ]
 
     def __str__(self):
-        return self.observation_identity
+        return self.receipt_key
 
 
 class HealthDailySummary(BaseUUIDModel):
@@ -332,6 +241,9 @@ class HealthDailySummary(BaseUUIDModel):
     completeness = models.FloatField(default=0.0)
     first_observed_at = models.DateTimeField(null=True, blank=True)
     last_observed_at = models.DateTimeField(null=True, blank=True)
+    # One entry per canonical ROOK document; see wearables/services/daily_contributions.py.
+    contributions = models.JSONField(default=dict, blank=True)
+    data_sources = models.JSONField(default=list, blank=True)
 
     class Meta:
         ordering = ["-local_date"]
@@ -391,13 +303,6 @@ class HealthDomainSnapshot(BaseUUIDModel):
 class RookOutbox(BaseUUIDModel):
     customer_profile = models.ForeignKey(
         CustomerProfile,
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="rook_outboxes",
-    )
-    document = models.ForeignKey(
-        RookHealthDocument,
         null=True,
         blank=True,
         on_delete=models.CASCADE,

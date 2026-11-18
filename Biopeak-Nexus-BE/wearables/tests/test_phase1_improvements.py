@@ -7,8 +7,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from wearables.models import (
-    HealthDailySummary, HealthObservation, RookOutbox,
-    RookHealthDocument, WearableConnectionEvent,
+    HealthDailySummary, RookOutbox, WearableConnectionEvent,
 )
 from wearables.services.authorization_jobs import (
     process_authorise_rook_connection,
@@ -249,11 +248,15 @@ class PhaseOneImprovementDatabaseTests(TestCase):
         old_generation = self.connection.authorization_generation
         RookOutbox.objects.filter(pk=queued.pk).update(status=HealthJobStatus.FAILED, attempt_count=1)
         prepare.return_value = self.connection
+        client.return_value.get_authorized_sources.return_value = set()
         client.return_value.get_authorizer.return_value = {"authorized": False, "authorization_url": "https://connect.garmin.com/authorize"}
         result = start_connection(request=SimpleNamespace(user=self.user), customer_profile=self.profile,
                                   validated_data={"data_source": "Garmin", "consent_version": "v1", "historical_days": 7})
         self.assertNotEqual(result["connection"].authorization_generation, old_generation)
-        self.assertTrue(RookOutbox.objects.filter(status=HealthJobStatus.PENDING, job_type=HealthJobType.AUTHORISE_ROOK_CONNECTION).exists())
+        self.assertFalse(RookOutbox.objects.filter(
+            status=HealthJobStatus.PENDING,
+            job_type=HealthJobType.AUTHORISE_ROOK_CONNECTION,
+        ).exists())
 
     @patch("wearables.services.authorization_jobs.RookClient")
     def test_user_not_yet_created_waits_for_authorization(self, client):
@@ -317,7 +320,8 @@ class PhaseOneImprovementDatabaseTests(TestCase):
         for day, steps in ((old_day, 9000), (new_day, 5000)):
             HealthDailySummary.objects.create(
                 customer_profile=self.profile, domain=HealthDomain.ACTIVITY,
-                metric="steps", local_date=day, maximum=steps,
+                metric="steps", local_date=day, source_key="lifetime-source", unit="steps",
+                count=1, minimum=steps, maximum=steps, average=steps, total=steps, latest=steps,
             )
         activity = domain_payload(
             customer_profile=self.profile, domain=HealthDomain.ACTIVITY,
@@ -340,18 +344,17 @@ class PhaseOneImprovementDatabaseTests(TestCase):
 
         for index, day in enumerate((old_day, new_day)):
             instant = timezone.now() - timedelta(days=index)
-            document = RookHealthDocument.objects.create(
-                customer_profile=self.profile, identity=self.identity,
-                document_identity=f"lifetime-test-{index}-{self.profile.pk}",
-                content_hash="a" * 64, data_structure="sleep_health_summary",
-                observed_at=instant, received_at=instant,
-            )
-            HealthObservation.objects.create(
-                customer_profile=self.profile, document=document,
-                observation_identity=f"lifetime-sleep-{index}-{self.profile.pk}",
-                domain=HealthDomain.SLEEP, metric="sleep_start_time",
-                field_path="sleep_start_time", observed_at=instant, local_date=day,
-                text_value=f"{day.isoformat()}T23:00:00Z",
+            HealthDailySummary.objects.create(
+                customer_profile=self.profile, domain=HealthDomain.SLEEP,
+                metric="sleep_start_time", local_date=day, source_key="lifetime-sleep-source",
+                unit="ISO-8601", first_observed_at=instant, last_observed_at=instant,
+                contributions={
+                    f"lifetime-test-{index}-{self.profile.pk}": {
+                        "v": 1, "u": "ISO-8601", "n": 0, "s": 0.0,
+                        "tv": f"{day.isoformat()}T23:00:00Z", "at": instant.isoformat(),
+                        "ds": ["Garmin"], "cf": 1.0,
+                    },
+                },
             )
         sleep = domain_payload(
             customer_profile=self.profile, domain=HealthDomain.SLEEP,

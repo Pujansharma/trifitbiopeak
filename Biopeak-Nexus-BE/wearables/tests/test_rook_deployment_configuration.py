@@ -37,7 +37,7 @@ class RookDeploymentConfigurationTests(SimpleTestCase):
         errors = {key for severity, key, _ in findings if severity == "ERROR"}
         self.assertIn("ROOK_CLIENT_UUID", errors)
         self.assertIn("ROOK_SECRET_KEY", errors)
-        self.assertIn("ROOK_WEBHOOK_HASH_KEY", errors)
+        self.assertNotIn("ROOK_WEBHOOK_HASH_KEY", errors)
 
     @override_settings(
         ROOK_PROVISIONED_SOURCES="Garmin",
@@ -46,7 +46,7 @@ class RookDeploymentConfigurationTests(SimpleTestCase):
         ROOK_SECRET_KEY="testing-secret",
         ROOK_WEBHOOK_HASH_KEY="testing-hash",
         ROOK_AUTHORIZATION_ALLOWED_HOSTS=["connect.garmin.com"],
-        ROOK_CALLBACK_URL="https://bpk.example/r",
+        ROOK_CALLBACK_URL="",
         ROOK_ALLOW_UNSIGNED_WEBHOOKS=False,
         ROOK_API_REQUESTS_PER_MINUTE=60,
         ROOK_API_REQUESTS_PER_DAY=1000,
@@ -54,6 +54,17 @@ class RookDeploymentConfigurationTests(SimpleTestCase):
     def test_configured_api_provider_reports_no_local_errors(self):
         findings = rook_readiness_checks()
         self.assertFalse([f for f in findings if f[0] == "ERROR"])
+
+    @override_settings(
+        ROOK_PROVISIONED_SOURCES="Garmin",
+        ROOK_AUTHORIZATION_ALLOWED_HOSTS=["connect.garmin.com"],
+        ROOK_CLIENT_UUID="test-client",
+        ROOK_SECRET_KEY="test-secret",
+        ROOK_CALLBACK_URL="https://bpk.example/r",
+    )
+    def test_legacy_state_callback_is_not_allowed_by_preflight(self):
+        errors = {name for severity, name, _ in rook_readiness_checks() if severity == "ERROR"}
+        self.assertIn("ROOK_CALLBACK_URL", errors)
 
     @override_settings(ROOK_API_REQUESTS_PER_MINUTE=None,
                        ROOK_API_REQUESTS_PER_DAY=None)

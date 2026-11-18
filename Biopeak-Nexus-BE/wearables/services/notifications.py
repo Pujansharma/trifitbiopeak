@@ -8,7 +8,7 @@ from wearables.services import connections as connection_service
 from wearables.services.ingestion import json_digest, receipt_payload
 from wearables.services.analytics import invalidate_health_dashboard
 from wearables.services.job_queue import (
-    enqueue_or_reuse_fetch_rook_data_job, open_fetch_rook_data_jobs,
+    enqueue_or_reuse_fetch_rook_data_job, open_fetch_rook_data_jobs, enqueue_authorise_rook_connection,
 )
 from wearables.services.lifecycle import valid_transition
 from wearables.services.authorization_tracking import authorization_granted_at
@@ -128,7 +128,7 @@ def is_positive_authorization_notification(text: str) -> bool:
 def reconnect_hint_from_oauth_events(connection: WearableConnection) -> bool:
     pending_state = WearableConnectionEvent.objects.filter(
         connection=connection,
-        event_type__in=("oauth_state_pending", "oauth_state_verification_pending", "oauth_state_queued", "oauth_state_verified"),
+        event_type__in=("oauth_state_pending", "oauth_state_queued", "oauth_state_verified"),
     ).order_by("-created_at").first()
     return bool(pending_state and pending_state.previous_status in {
         ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED,
@@ -136,7 +136,7 @@ def reconnect_hint_from_oauth_events(connection: WearableConnection) -> bool:
 
 
 def prepare_api_connection_for_authorization_check(connection: WearableConnection) -> str | None:
-    """Move API rows into AUTHORIZING so immediate verification may run. None = ready."""
+    """Move API rows into AUTHORIZING so verification may run. None = ready."""
     if connection.status in {ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING}:
         return None
     if not valid_transition(connection.status, ConnectionStatus.AUTHORIZING):
@@ -160,7 +160,7 @@ def prepare_api_connection_for_authorization_check(connection: WearableConnectio
         connection,
         event_type="authorization_verification_requested",
         previous_status=previous_status,
-        detail="Positive ROOK notification triggered immediate server-side authorization verification.",
+        detail="Positive ROOK notification queued server-side authorization verification.",
     )
     invalidate_health_dashboard(connection.customer_profile)
     return None
@@ -194,15 +194,13 @@ def queue_authorization_verification_for_notification(
             "reason": prepare_error,
             "connectionId": str(connection.pk),
         }
-    from wearables.services.authorization_jobs import verify_rook_connection_now
-    result = verify_rook_connection_now(
-        connection,
+    enqueue_authorise_rook_connection(
+        connection=connection,
         was_reconnect=reconnect_hint_from_oauth_events(connection),
     )
     return {
         "accepted": True,
-        "authorizationVerified": bool(result.get("authorized")),
-        "verificationReason": result.get("reason"),
+        "authorizationQueued": True,
         "connectionId": str(connection.pk),
     }
 

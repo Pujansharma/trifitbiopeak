@@ -1,10 +1,8 @@
 from django.urls import path
 
-from wearables.views import HealthDashboardView, HealthDomainView, HealthTimelineView
+from wearables.views import HealthDashboardView, HealthDomainView
 
 urlpatterns = [
-    path("dashboard/", HealthDashboardView.as_view(), name="health-dashboard"),
-    path("timeline/", HealthTimelineView.as_view(), name="health-timeline"),
-    path("<str:domain>/", HealthDomainView.as_view(), name="health-domain"),
+    path("domain-summary/", HealthDashboardView.as_view(), name="health-domain-summary"),
+    path("domain-summary/<str:domain>/", HealthDomainView.as_view(), name="health-domain-summary-detail"),
 ]
-

@@ -7,7 +7,6 @@ import ast
 from datetime import date, datetime, timedelta, timezone as utc_timezone
 from types import SimpleNamespace
 from uuid import uuid4
-from unittest.mock import patch
 
 from django.conf import settings
 from django.db import connection
@@ -20,7 +19,7 @@ from accounts.models import UserAccount
 from accounts.users.models import User
 from accounts.utils.constants import UserType
 from wearables.models import (
-    HealthDailySummary, HealthObservation, RookOutbox, RookHealthDocument,
+    HealthDailySummary, RookOutbox, RookWebhookReceipt,
     WearableConsent, WearableConnection,
 )
 from wearables.services.connections import get_or_create_connection, save_connection_transition
@@ -42,6 +41,15 @@ from wearables.utils.constants import (
     AuthorizationStatus, ConnectionStatus, ConsentStatus,
     HealthDomain, HealthJobStatus, HealthJobType, PermissionStatus,
 )
+
+
+def numeric_contribution(value, instant, *, version=1):
+    """One ROOK document's share of a daily summary row (see daily_contributions)."""
+    number = float(value)
+    return {
+        "v": version, "u": "steps", "n": 1, "s": number, "mn": number, "mx": number,
+        "lv": number, "at": instant.isoformat(), "ds": ["Garmin"], "cf": 1.0,
+    }
 
 
 class ReviewStaticContractsTests(SimpleTestCase):
@@ -150,8 +158,12 @@ class ReviewDatabaseTests(TestCase):
         self.assertTrue(first["queued"])
         self.assertTrue(second["duplicate"])
         self.assertTrue(updated["queued"])
-        self.assertEqual(RookHealthDocument.objects.count(), 1)
-        self.assertEqual(RookHealthDocument.objects.first().document_version, 2)
+        self.assertEqual(
+            RookWebhookReceipt.objects.exclude(document_identity="").values("document_identity").distinct().count(),
+            1,
+        )
+        latest = RookWebhookReceipt.objects.filter(status="processed").order_by("-document_version").first()
+        self.assertEqual(latest.document_version, 2)
 
     def test_stale_connection_object_cannot_override_disconnection(self):
         WearableConnection.objects.filter(pk=self.connection.pk).update(
@@ -188,26 +200,22 @@ class ReviewDatabaseTests(TestCase):
         self.assertEqual(self.connection.status, ConnectionStatus.DISCONNECTED)
 
     def test_daily_aggregates_do_not_make_one_query_per_metric(self):
-        incoming = ingest_rook_document(self.payload(), signature_valid=True,
-                                        enqueue_normalization=False)
-        document = RookHealthDocument.objects.filter(pk=incoming["documentId"]).first()
         day = date(2026, 10, 8)
-        HealthObservation.objects.bulk_create([
-            HealthObservation(
-                customer_profile=self.profile, document=document, connection=self.connection,
-                observation_identity=f"review-aggregation-{index}",
-                domain=HealthDomain.ACTIVITY, metric=f"test_metric_{index}",
-                field_path=f"measurement.{index}", observed_at=document.observed_at,
-                local_date=day, numeric_value=float(index), unit="steps",
-                source_key="Garmin", data_sources=["Garmin"],
-            ) for index in range(12)
-        ])
+        instant = datetime(2026, 10, 8, 10, 0, tzinfo=utc_timezone.utc)
+        for index in range(12):
+            HealthDailySummary.objects.create(
+                customer_profile=self.profile, domain=HealthDomain.ACTIVITY,
+                metric=f"test_metric_{index}", local_date=day, source_key="Garmin",
+                unit="steps", contributions={"review-doc": numeric_contribution(index, instant)},
+            )
+        # Stale aggregates prove the rebuild recomputes them from the stored entries.
+        HealthDailySummary.objects.filter(metric="test_metric_5").update(latest=None, count=0)
         with CaptureQueriesContext(connection) as queries:
             rebuild_daily_summaries(
                 customer_profile=self.profile, local_date=day,
                 domains={HealthDomain.ACTIVITY},
             )
-        # BEGIN/COMMIT and INSERT statements are not N+1 reads.
+        # BEGIN/COMMIT and UPDATE statements are not N+1 reads.
         selects = [entry["sql"] for entry in queries
                    if entry["sql"].lstrip().upper().startswith("SELECT")]
         self.assertLessEqual(len(selects), 2, selects)
@@ -246,37 +254,25 @@ class ReviewDatabaseTests(TestCase):
         self.assertEqual(job.status, HealthJobStatus.RUNNING)
         self.assertNotIn("incorrect", job.payload)
 
-    def test_remap_processes_multiple_batches_and_keeps_utc_instants(self):
-        document_id = ingest_rook_document(
-            self.payload(), signature_valid=True, enqueue_normalization=False,
-        )["documentId"]
-        document = RookHealthDocument.objects.filter(pk=document_id).first()
+    def test_remap_moves_every_document_entry_and_keeps_utc_instants(self):
         instant = datetime(2026, 10, 8, 23, 30, tzinfo=utc_timezone.utc)
-        HealthObservation.objects.bulk_create([
-            HealthObservation(
-                customer_profile=self.profile, document=document, connection=self.connection,
-                observation_identity=f"review-timezone-{index}",
-                domain=HealthDomain.ACTIVITY, metric="steps",
-                field_path=f"steps.{index}", observed_at=instant,
-                local_date=date(2026, 10, 8), numeric_value=float(index),
-                unit="steps", source_key="Garmin", data_sources=["Garmin"],
-            ) for index in range(510)
-        ])
+        HealthDailySummary.objects.create(
+            customer_profile=self.profile, domain=HealthDomain.ACTIVITY, metric="steps",
+            local_date=date(2026, 10, 8), source_key="Garmin", unit="steps",
+            contributions={
+                f"review-timezone-{index}": numeric_contribution(index, instant)
+                for index in range(510)
+            },
+        )
         self.identity.timezone_name = "Asia/Kolkata"
         self.identity.save(update_fields=["timezone_name", "updated_at"])
-        # More than 500 observations must be committed in separate small
-        # transactions rather than a single long history-wide transaction.
-        original_bulk_update = HealthObservation.objects.bulk_update
-        with patch.object(
-            HealthObservation.objects, "bulk_update", wraps=original_bulk_update,
-        ) as bulk_update:
-            result = remap_member_local_days(self.profile)
-        self.assertEqual(
-            [len(call.args[0]) for call in bulk_update.call_args_list], [500, 10],
-        )
+        result = remap_member_local_days(self.profile)
         self.assertEqual(result["remapped"], 510)
-        self.assertEqual(HealthObservation.objects.filter(local_date=date(2026, 10, 9)).count(), 510)
-        self.assertEqual(HealthObservation.objects.filter(observed_at=instant).count(), 510)
+        moved = HealthDailySummary.objects.get(local_date=date(2026, 10, 9), metric="steps")
+        self.assertEqual(moved.count, 510)
+        self.assertEqual(len(moved.contributions), 510)
+        self.assertEqual(moved.last_observed_at, instant)
+        self.assertFalse(HealthDailySummary.objects.filter(local_date=date(2026, 10, 8)).exists())
 
     def test_missing_document_normalize_does_not_advance_connection_sync(self):
         original_last_sync = timezone.localtime() - timedelta(days=3)

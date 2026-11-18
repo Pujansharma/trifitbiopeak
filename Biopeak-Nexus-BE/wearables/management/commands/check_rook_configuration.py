@@ -84,12 +84,19 @@ def rook_readiness_checks() -> list[tuple[str, str, str]]:
             if not getattr(settings, "ROOK_SECRET_KEY", ""):
                 checks.append(("ERROR", "ROOK_SECRET_KEY", "Missing ROOK API secret key."))
             callback = getattr(settings, "ROOK_CALLBACK_URL", "")
-            if callback and not validate_rook_callback(callback):
-                checks.append(("ERROR", "ROOK_CALLBACK_URL", "Expected short HTTPS URL ending in /r; full redirect with state token <= 50 characters."))
-            if not callback:
-                checks.append(("WARN", "ROOK_CALLBACK_URL", "No secure browser callback configured; authorization depends on authenticated device-status refresh."))
-            if callback and validate_rook_callback(callback):
-                checks.append(("INFO", "ROOK_CALLBACK_URL", "Valid URL format. Register it in ROOK and verify external HTTPS access."))
+            if callback:
+                checks.append((
+                    "ERROR", "ROOK_CALLBACK_URL",
+                    "Legacy /r/<state>/ OAuth callback has been retired. Clear this setting and use "
+                    "an approved mobile /rook/return/ HTTPS redirect_url in Connect.",
+                ))
+            else:
+                checks.append((
+                    "INFO", "ROOK_CALLBACK_URL",
+                    "Legacy callback disabled. Connect may supply an allowlisted HTTPS "
+                    "redirect_url to /rook/return/; verify authorization using "
+                    "GET /api/v1/devices/providers/?refresh=true.",
+                ))
         if any(source in NATIVE_WEARABLE_SOURCES for source in sources):
             sdk_secret = getattr(settings, "ROOK_SDK_SECRET", "")
             if not getattr(settings, "ROOK_SDK_CLIENT_UUID", "") or not sdk_secret:
@@ -98,12 +105,12 @@ def rook_readiness_checks() -> list[tuple[str, str, str]]:
                 checks.append(("ERROR", "ROOK_SDK_SECRET", "Mobile SDK credential MUST differ from server-side ROOK_SECRET_KEY."))
             if not getattr(settings, "ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC", False):
                 checks.append(("ERROR", "ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC", "Confirm with ROOK that this dedicated SDK secret is a distributable mobile credential, then explicitly approve exposure."))
-    if not getattr(settings, "ROOK_WEBHOOK_HASH_KEY", ""):
-        checks.append(("ERROR", "ROOK_WEBHOOK_HASH_KEY", "Webhook hash key absent. Signed ingestion cannot be verified."))
-    else:
-        checks.append(("INFO", "ROOK_WEBHOOK_HASH_KEY", "Hash key present; ROOK dashboard delivery and signature must still be tested."))
+    # The HTTP webhook endpoints have been retired. Direct ROOK API fetch
+    # workers still ingest documents through wearables.services.ingestion.
+    if getattr(settings, "ROOK_WEBHOOK_HASH_KEY", ""):
+        checks.append(("INFO", "ROOK_WEBHOOK_HASH_KEY", "Legacy signing key is configured but no ROOK HTTP webhook endpoint is mounted."))
     if getattr(settings, "ROOK_ALLOW_UNSIGNED_WEBHOOKS", False):
-        checks.append(("ERROR", "ROOK_ALLOW_UNSIGNED_WEBHOOKS", "Disable unsigned webhooks before testing or production."))
+        checks.append(("WARN", "ROOK_ALLOW_UNSIGNED_WEBHOOKS", "Obsolete ROOK webhook setting is enabled; remove it from deployment configuration."))
     if not getattr(settings, "ROOK_BASE_URL", ""):
         checks.append(("ERROR", "ROOK_BASE_URL", "Missing upstream HTTPS API URL."))
     else:

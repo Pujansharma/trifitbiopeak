@@ -5,7 +5,7 @@ from accounts.customers.models import Customer, CustomerProfile
 from accounts.models import UserAccount
 from accounts.users.models import User
 from accounts.utils.constants import UserType
-from wearables.models import HealthDailySummary, RookHealthDocument
+from wearables.models import HealthDailySummary, RookWebhookReceipt
 from wearables.services.identity import get_or_create_rook_identity
 from wearables.services.connections import get_or_create_connection
 from wearables.models import WearableConsent
@@ -68,8 +68,12 @@ class RookIngestionTests(TestCase):
         self.assertTrue(replay["duplicate"])
         self.assertEqual(same_version_conflict["reason"], "same_version_conflict")
         self.assertEqual(correction["version"], 2)
-        document = RookHealthDocument.objects.get()
-        self.assertEqual(document.document_version, 2)
-        self.assertEqual(document.payload, {})
+        processed = RookWebhookReceipt.objects.get(status="processed", document_version=2)
+        # The raw ROOK body is released once processed; only the compact summary remains.
+        self.assertNotIn("accumulated_steps_int", processed.payload)
+        self.assertEqual(
+            RookWebhookReceipt.objects.filter(status="rejected", reason="same_version_conflict").count(), 1,
+        )
         summary = HealthDailySummary.objects.get(metric="steps")
         self.assertEqual(summary.maximum, 7000.0)
+        self.assertEqual(summary.count, 1)

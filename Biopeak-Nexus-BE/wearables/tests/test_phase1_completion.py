@@ -14,7 +14,7 @@ from accounts.customers.models import Customer, CustomerProfile
 from accounts.models import UserAccount
 from accounts.users.models import User
 from accounts.utils.constants import UserType
-from wearables.models import RookHealthDocument, WearableConsent
+from wearables.models import RookWebhookReceipt, WearableConsent
 from wearables.services.analytics import card_state, connection_priority_state, trend_payload
 from wearables.services.connections import disconnect_connection, get_or_create_connection
 from wearables.services.identity import get_or_create_rook_identity
@@ -164,7 +164,7 @@ class IngestionSafetyTests(TestCase):
         with self.captureOnCommitCallbacks(execute=True):
             oura_result = ingest_rook_document(self.payload("Oura"), signature_valid=True)
         self.assertTrue(oura_result.get("queued"))
-        self.assertEqual(RookHealthDocument.objects.count(), 1)
+        self.assertEqual(RookWebhookReceipt.objects.filter(status="processed").count(), 1)
         revoke.assert_not_called()
 
     @patch("wearables.services.connections.RookClient.revoke_source")
@@ -173,10 +173,10 @@ class IngestionSafetyTests(TestCase):
         first = ingest_rook_document(self.payload("Garmin"), signature_valid=True)
         replay = ingest_rook_document(self.payload("Garmin"), signature_valid=True)
         self.assertTrue(first.get("skipped"))
-        self.assertEqual(RookHealthDocument.objects.count(), 0)
+        self.assertEqual(RookWebhookReceipt.objects.filter(status="processed").count(), 0)
         self.assertTrue(replay.get("duplicate"))
 
     def test_unknown_source_does_not_create_unapproved_connection(self):
         result = ingest_rook_document(self.payload("Fitbit"), signature_valid=True)
         self.assertEqual(result["reason"], "unlinked_source")
-        self.assertEqual(RookHealthDocument.objects.count(), 0)
+        self.assertEqual(RookWebhookReceipt.objects.filter(status="processed").count(), 0)

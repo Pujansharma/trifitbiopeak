@@ -100,7 +100,7 @@ Paths, request bodies, authentication and `{detail, data}` envelopes are preserv
 New serialized connection fields are additive: `lastManualSyncQueuedAt`,
 `pendingSyncRequestedAt`, `lastDataProcessedAt`.
 
-`POST /api/v1/devices/retry-sync/`:
+`POST /api/v1/devices/sync/`:
 - HTTP 202: accepted; `queued=true`, `alreadyQueued`, `jobId`, `connection` and additive
   `syncRequestAccepted=true`, `cooldownActive=false`, `nextSyncAllowedAt`.
 - HTTP 200 inside cooldown: `queued=false`, `syncRequestAccepted=false`,

@@ -1,3 +1,5 @@
+> **Historical behavior note:** Current client endpoint is GET `/api/v1/devices/providers/` and POST `/api/v1/devices/sync/`. Older endpoint references below are not current.
+
 # ROOK Phase 1 improvements — 10 November 2026
 
 This document describes the updated candidate built from `Biopeak_ROOK_Parallel_Workers_Updated(1).zip` and the client's Longitudinal Health Platform PRD. It is the current ROOK operating guide; older manager-flow and parallel-worker documents describe earlier versions.

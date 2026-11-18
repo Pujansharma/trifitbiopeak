@@ -177,8 +177,6 @@ class PreferredUnits(models.TextChoices):
 # Outbox attempts: auth = try 1 / retry 0; data_fetch = try 1 / retry 1.
 MAX_ROOK_AUTH_OUTBOX_ATTEMPTS = 1
 MAX_ROOK_DATA_FETCH_OUTBOX_ATTEMPTS = 2
-HEALTH_TIMELINE_MAXIMUM_OFFSET = 1000
-HEALTH_TIMELINE_MAXIMUM_LIMIT = 200
 
 ALGORITHM_VERSION = "wearables-v1.2"
 

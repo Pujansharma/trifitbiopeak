@@ -3,7 +3,7 @@
 ROOK redirects to a server-owned HTTPS URL and appends its client and member
 identifiers as URL path segments. This callback is *navigation only*: it does
 not create sessions, modify wearable connections, or assert OAuth success.
-The authenticated app MUST refresh /devices/?refresh=true before showing
+The authenticated app MUST refresh /devices/providers/?refresh=true before showing
 an authorized/connected state.
 """
 

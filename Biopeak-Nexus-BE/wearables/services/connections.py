@@ -9,6 +9,7 @@ from wearables.services.coordination import serialize_profile_changes, serialize
 from accounts.customers.models import CustomerProfile
 from wearables.models import (
     RookMemberIdentity,
+    WearableConsent,
     WearableConnection,
     WearableConnectionEvent,
 )
@@ -24,7 +25,7 @@ from wearables.services.identity import (
 )
 from wearables.services.job_queue import (
     enqueue_or_reuse_fetch_rook_data_job,
-    cancel_connection_work, enqueue_revoke_job,
+    enqueue_authorise_rook_connection, cancel_connection_work, enqueue_revoke_job,
 )
 from wearables.services.analytics import invalidate_health_dashboard
 from wearables.services import oauth as oauth_service
@@ -37,7 +38,7 @@ from wearables.utils.constants import (
     AuthorizationStatus,
     ConnectionMethod,
     ConnectionStatus,
-    HealthJobType,
+    ConsentStatus,
     HistoricalImportStatus,
     PermissionStatus,
 )
@@ -245,6 +246,132 @@ def authorization_confirmed(
     return connection
 
 
+def verify_api_authorization_direct(
+    connection: WearableConnection,
+    *,
+    was_reconnect: bool = False,
+    actor_user=None,
+    correlation_id: str = "",
+) -> str:
+    """Verify a pending API grant directly with ROOK and confirm it locally.
+
+    The ROOK HTTP request happens before the short database transaction. A
+    missing provider in ROOK's authorized-source list is a normal propagation
+    state and returns ``pending`` so callers may enqueue the existing durable
+    authorization retry as a fallback.
+    """
+    if connection.connection_method != ConnectionMethod.API:
+        return "not_applicable"
+    generation = str(connection.authorization_generation)
+    if connection.status not in {ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING}:
+        return (
+            "authorized"
+            if connection.authorization_status == AuthorizationStatus.AUTHORIZED
+            else "superseded"
+        )
+    if not WearableConsent.objects.filter(
+        customer_profile=connection.customer_profile,
+        status=ConsentStatus.GRANTED,
+        revoked_at__isnull=True,
+    ).exists():
+        return "consent_revoked"
+    try:
+        sources = RookClient().get_authorized_sources(
+            rook_user_id=connection.identity.rook_user_id,
+        )
+    except RookServiceError as error:
+        # ROOK documents 422 while its member/provider authorization record is
+        # not available yet. Treat it exactly like eventual-consistency delay.
+        if error.status_code == 422:
+            return "pending"
+        raise
+
+    with transaction.atomic():
+        serialize_profile_changes(connection.customer_profile_id)
+        current = serialize_connection_changes(connection.pk)
+        if str(current.authorization_generation) != generation:
+            return "superseded"
+        if current.status not in {ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING}:
+            return (
+                "authorized"
+                if current.authorization_status == AuthorizationStatus.AUTHORIZED
+                else "superseded"
+            )
+        has_consent = WearableConsent.objects.filter(
+            customer_profile=current.customer_profile,
+            status=ConsentStatus.GRANTED,
+            revoked_at__isnull=True,
+        ).exists()
+        if not has_consent:
+            return "consent_revoked"
+        if current.data_source not in sources:
+            return "pending"
+        authorization_confirmed(
+            current,
+            was_reconnect=was_reconnect,
+            actor_user=actor_user,
+            correlation_id=correlation_id,
+        )
+    connection.refresh_from_db()
+    return "authorized"
+
+
+def verification_failure_is_retryable(error: RookServiceError) -> bool:
+    """Return whether a direct authorization lookup should fall back to outbox."""
+    return error.status_code == 429 or error.status_code >= 500
+
+
+def enqueue_authorization_verification_fallback(
+    connection: WearableConnection,
+    *,
+    was_reconnect: bool,
+) -> str:
+    """Queue durable verification and report a concurrent state change safely."""
+    job = enqueue_authorise_rook_connection(
+        connection=connection,
+        was_reconnect=was_reconnect,
+    )
+    connection.refresh_from_db()
+    if connection.authorization_status == AuthorizationStatus.AUTHORIZED:
+        return "authorized"
+    if (
+        job is None
+        or connection.status not in {ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING}
+    ):
+        return "superseded"
+    return "queued"
+
+
+def verify_api_authorization_with_fallback(
+    connection: WearableConnection,
+    *,
+    was_reconnect: bool = False,
+    actor_user=None,
+    correlation_id: str = "",
+) -> str:
+    """Prefer synchronous ROOK verification; queue only pending/transient work."""
+    try:
+        outcome = verify_api_authorization_direct(
+            connection,
+            was_reconnect=was_reconnect,
+            actor_user=actor_user,
+            correlation_id=correlation_id,
+        )
+    except RookServiceError as error:
+        if not verification_failure_is_retryable(error):
+            raise
+        return enqueue_authorization_verification_fallback(
+            connection,
+            was_reconnect=was_reconnect,
+        )
+    if outcome == "pending":
+        return enqueue_authorization_verification_fallback(
+            connection,
+            was_reconnect=was_reconnect,
+        )
+    return outcome
+
+
 def connection_attempt_origin(connection: WearableConnection) -> str:
     """Return the state before the *current* authorization attempt began.
 
@@ -270,7 +397,7 @@ def connection_attempt_origin(connection: WearableConnection) -> str:
         return request_event.previous_status
     callback_event = (
         WearableConnectionEvent.objects.filter(
-            connection=connection, event_type__in=("oauth_state_pending", "oauth_state_verification_pending"),
+            connection=connection, event_type="oauth_state_pending",
         ).order_by("-created_at").first()
     )
     return callback_event.previous_status if callback_event is not None else connection.status
@@ -311,15 +438,23 @@ def start_connection(
         ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING,
     }
     if pending_authorization and connection.connection_method == ConnectionMethod.API:
-        # Recover legacy exhausted checks before issuing another link. The old
-        # generation stays terminal; this explicit Connect may start a new one.
-        from wearables.services.authorization_jobs import verify_rook_connection_now
-        verify_rook_connection_now(
-            connection, was_reconnect=connection_attempt_origin(connection) in {
+        # A repeated Connect first checks ROOK directly. Only a propagation
+        # delay or transient provider failure falls back to the durable queue.
+        verify_api_authorization_with_fallback(
+            connection,
+            was_reconnect=connection_attempt_origin(connection) in {
                 ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED,
             },
+            actor_user=request.user,
+            correlation_id=correlation_id,
         )
         connection.refresh_from_db()
+        if connection.authorization_status == AuthorizationStatus.AUTHORIZED:
+            return {
+                "connection": connection,
+                "authorization_method": connection.connection_method,
+                "authorization_url": None,
+            }
         pending_authorization = connection.status in {
             ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING,
         }
@@ -377,7 +512,7 @@ def start_connection(
 
     previous_callback_ids = list(
         WearableConnectionEvent.objects.filter(
-            connection=connection, event_type__in=("oauth_state_pending", "oauth_state_verification_pending"),
+            connection=connection, event_type="oauth_state_pending",
         ).values_list("pk", flat=True)
     )
     callback_url = oauth_service.callback_url_for_connection(
@@ -461,21 +596,25 @@ def start_connection(
         save_connection_transition(
             connection, status=ConnectionStatus.AUTHORIZING,
             authorization_status=AuthorizationStatus.PENDING,
-            actor_user=request.user, event_type="authorization_verification_started",
+            actor_user=request.user, event_type="authorization_verification_requested",
             correlation_id=correlation_id,
         )
-        from wearables.services.authorization_jobs import verify_rook_connection_now
-        verification = verify_rook_connection_now(
-            connection, was_reconnect=was_reconnect, actor_user=request.user,
+        verification = verify_api_authorization_with_fallback(
+            connection,
+            was_reconnect=was_reconnect,
+            actor_user=request.user,
             correlation_id=correlation_id,
         )
         connection.refresh_from_db()
-        if verification.get("authorized"):
+        if verification == "authorized":
             oauth_service.retire_oauth_callback_state(
                 connection, callback_url, event_type="oauth_state_verified",
             )
-            return {"connection": connection, "authorization_method": ConnectionMethod.API,
-                    "authorization_url": None}
+            return {
+                "connection": connection,
+                "authorization_method": ConnectionMethod.API,
+                "authorization_url": None,
+            }
     else:
         save_connection_transition(
             connection, status=ConnectionStatus.AUTHORIZING,
@@ -494,15 +633,14 @@ def start_connection(
 
 
 def refresh_authorizing_connections(customer_profile: CustomerProfile) -> None:
-    """Verify pending ROOK authorizations immediately during authenticated refresh."""
+    """Verify pending API grants directly, using outbox only as fallback."""
     oauth_service.expire_oauth_attempts(customer_profile)
-    from wearables.services.authorization_jobs import verify_rook_connection_now
     connections = WearableConnection.objects.filter(
         customer_profile=customer_profile, connection_method=ConnectionMethod.API,
         status__in=(ConnectionStatus.CONNECTING, ConnectionStatus.AUTHORIZING),
-    ).select_related("identity")
+    )
     for connection in connections.iterator():
-        verify_rook_connection_now(
+        verify_api_authorization_with_fallback(
             connection,
             was_reconnect=connection_attempt_origin(connection) in {
                 ConnectionStatus.DISCONNECTED, ConnectionStatus.AUTHORIZATION_EXPIRED,

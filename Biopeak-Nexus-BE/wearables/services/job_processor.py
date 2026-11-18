@@ -7,7 +7,7 @@ from django.db.models import Case, IntegerField, Value, When
 from django.utils import timezone
 
 from integrations.utils.sqs_dispatch import delete_queue_message
-from wearables.models import RookOutbox, RookHealthDocument, WearableConnection
+from wearables.models import RookOutbox, RookWebhookReceipt, WearableConnection
 from wearables.services.authorization_jobs import (
     process_authorise_rook_connection,
     process_revoke_rook_connection,
@@ -71,7 +71,7 @@ def run_claimed_health_job(job: RookOutbox) -> dict:
         ValueError,
         TypeError,
         DatabaseError,
-        RookHealthDocument.DoesNotExist,
+        RookWebhookReceipt.DoesNotExist,
         WearableConnection.DoesNotExist,
         LostHealthJobLease,
     )

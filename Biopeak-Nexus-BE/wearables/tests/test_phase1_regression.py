@@ -11,7 +11,7 @@ from accounts.customers.models import Customer, CustomerProfile
 from accounts.models import UserAccount
 from accounts.users.models import User
 from accounts.utils.constants import UserType
-from wearables.models import HealthDailySummary, HealthObservation, RookHealthDocument
+from wearables.models import HealthDailySummary, RookWebhookReceipt
 from wearables.services.analytics import (
     dashboard_payload, health_cache_key, invalidate_health_dashboard,
     member_today, trend_direction, trend_payload,
@@ -68,35 +68,43 @@ class PhaseOnePersistenceRegressionTests(TestCase):
                 normalize_health_document(result["documentId"])
         return result
 
-    def test_higher_document_version_keeps_previous_observation_but_excludes_from_rollups(self):
+    def test_higher_document_version_replaces_previous_version_in_daily_summary(self):
         self.ingest_and_process(self.payload(1, 5000, event_id="old"))
         self.ingest_and_process(self.payload(2, 7000, event_id="new"))
-        self.assertEqual(RookHealthDocument.objects.count(), 1)
-        self.assertEqual(HealthObservation.objects.filter(metric="steps").count(), 2)
-        self.assertEqual(HealthObservation.objects.filter(metric="steps", is_current=True).count(), 1)
-        self.assertEqual(HealthObservation.objects.get(metric="steps", is_current=True).numeric_value, 7000)
-        self.assertEqual(HealthDailySummary.objects.get(metric="steps").maximum, 7000)
+        # One canonical document identity; both processed versions remain as receipts.
+        self.assertEqual(
+            RookWebhookReceipt.objects.exclude(document_identity="").values("document_identity").distinct().count(),
+            1,
+        )
+        summary = HealthDailySummary.objects.get(metric="steps")
+        self.assertEqual(summary.count, 1)
+        self.assertEqual(summary.maximum, 7000)
+        self.assertEqual(summary.total, 7000)
+        self.assertEqual(next(iter(summary.contributions.values()))["v"], 2)
 
     def test_replaying_normalization_keeps_exactly_one_active_version(self):
         result = self.ingest_and_process(self.payload(1, 5000))
         self.ingest_and_process(self.payload(2, 7000))
         with self.captureOnCommitCallbacks(execute=True):
             normalize_health_document(result["documentId"])
-        self.assertEqual(HealthObservation.objects.filter(metric="steps", is_current=True).count(), 1)
+        summary = HealthDailySummary.objects.get(metric="steps")
+        self.assertEqual(summary.count, 1)
+        self.assertEqual(summary.maximum, 7000)
 
-    def test_timezone_remap_rebuilds_calendar_buckets_without_losing_data(self):
+    def test_timezone_remap_moves_entries_to_local_day_without_losing_data(self):
         self.ingest_and_process(self.payload(1, 3500, moment="2026-10-08T23:30:00Z"))
-        observation = HealthObservation.objects.get(metric="steps")
-        self.assertEqual(observation.local_date, date(2026, 10, 8))
+        summary = HealthDailySummary.objects.get(metric="steps")
+        self.assertEqual(summary.local_date, date(2026, 10, 8))
         self.identity.timezone_name = "Asia/Kolkata"
         self.identity.save(update_fields=["timezone_name", "updated_at"])
         with self.captureOnCommitCallbacks(execute=True):
             result = remap_member_local_days(self.profile)
-        observation.refresh_from_db()
         self.assertEqual(result["remapped"], 1)
-        self.assertEqual(observation.local_date, date(2026, 10, 9))
-        self.assertEqual(HealthObservation.objects.count(), 1)
-        self.assertTrue(HealthDailySummary.objects.filter(local_date=date(2026, 10, 9)).exists())
+        moved = HealthDailySummary.objects.get(metric="steps")
+        self.assertEqual(moved.local_date, date(2026, 10, 9))
+        self.assertEqual(moved.total, 3500)
+        self.assertEqual(moved.last_observed_at, datetime(2026, 10, 8, 23, 30, tzinfo=dt_timezone.utc))
+        self.assertFalse(HealthDailySummary.objects.filter(local_date=date(2026, 10, 8)).exists())
 
 
 class PhaseOneAnalyticsRegressionTests(SimpleTestCase):

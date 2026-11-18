@@ -41,7 +41,7 @@ Exhausted / terminal fail → user Sync or Reconnect. Defer (slice / rate / auth
 
 | Manager flow | Implementation |
 | --- | --- |
-| User authorizes → auth queue → seven-day initial sync | Connect returns authorization URL. Callback/status/positive notification queues per-generation auth job. Worker checks ROOK authorized-source list, then enqueues initial pull. |
+| User authorizes → direct ROOK verification → seven-day initial sync | Connect returns authorization URL. Mobile return bridge and authenticated status refresh call ROOK's authorized-source list directly. If the grant is confirmed, Biopeak authorizes locally and enqueues only the initial data pull. Missing propagation or transient ROOK failures fall back to the per-generation auth outbox. Positive notification hints still use the auth outbox. |
 | Sync → current minus last-sync → normalize → analytics | `retry-sync` freezes incremental window, coalesces open work, 202. Recovery resumes by date/pillar; analytics + success timestamps after full window. |
 | Midnight → seven-day rule → same pipeline | `process_pending_rook_sync_scan` finds eligible API connections and enqueues the same fetch path. No downloads in the scan command. |
 | Revoke → revoke queue | Local consent/connection closes immediately. Durable revoke job confirms source absent upstream. |
@@ -57,11 +57,11 @@ Exhausted / terminal fail → user Sync or Reconnect. Defer (slice / rate / auth
 
 ## Authorization and initial import
 
-`POST /api/v1/devices/connect/` still returns an interactive provider URL when needed. Connection stays authorizing until the auth outbox job confirms grant, then enqueues history import. Generations fence delayed workers/callbacks. Native SDK sources are on-device only; these queues cover API sources.
+`POST /api/v1/devices/connect/` still returns an interactive provider URL when needed. The secure callback and authenticated `GET /api/v1/devices/providers/?refresh=true` path now verify the pending grant synchronously through ROOK's authorized-source endpoint. A confirmed source transitions locally and enqueues `fetch_rook_data`; the authorization outbox is fallback-only for propagation delay or transient ROOK failures. Signed positive notification hints remain queue-backed because they are not interactive proof. Generations fence delayed workers/callbacks. Native SDK sources are on-device only; these queues cover API sources.
 
 ## Manual Sync
 
-`POST /api/v1/devices/retry-sync/` → 202 with `jobId` / coalesce. Window frozen at enqueue. Worker fetches physical/sleep/body per date, checkpoints, then analytics. Cap units per run via `ROOK_SYNC_UNITS_PER_RUN`; overflow defers with wake.
+`POST /api/v1/devices/sync/` → 202 with `jobId` / coalesce. Window frozen at enqueue. Worker fetches physical/sleep/body per date, checkpoints, then analytics. Cap units per run via `ROOK_SYNC_UNITS_PER_RUN`; overflow defers with wake.
 
 Timestamps: `last_sync_requested_at` = queued; `synced_through` = processed window upper bound; `last_pull_completed_at` / `last_successful_sync` = completion — not raw webhook receipt.
 
@@ -90,7 +90,7 @@ Wearables `0005`: `RenameModel` HealthProcessingJob → `RookOutbox`; drop midni
 
 ## Staging checklist (short)
 
-- Authorize API source → auth job → one initial fetch.
+- Authorize API source → direct confirmation when ROOK is ready; otherwise one auth fallback job → one initial fetch.
 - Complete seven-date import; check observations + sync timestamps.
 - Hammer Sync; one open job; frozen window.
 - Kill mid-fetch; next worker reclaim + resume within attempt caps.

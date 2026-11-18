@@ -14,13 +14,11 @@ from django.utils import timezone
 from wearables.models import (
     HealthDailySummary,
     HealthDomainSnapshot,
-    HealthObservation,
     WearableConnection,
 )
+from wearables.services.daily_contributions import contribution_source_change
 from wearables.services.lifecycle import can_ingest_source, source_permission_for_domain
 from wearables.services.metrics import is_v1_display_metric
-from wearables.services.observation_values import observation_value as observation_value
-from wearables.services import timeline as timeline_service
 from wearables.utils.constants import (
     ALGORITHM_VERSION,
     DOMAIN_DEFAULT_UNITS,
@@ -618,11 +616,10 @@ def build_domain_card(
     confidence = confidence_level(coverage, summaries, today=today, connections=connections)
     # A device-methodology change can mimic a physiological trend. Show values,
     # but suppress interpretation until the new source stabilizes (PRD §8.3).
-    if metric and HealthObservation.objects.filter(
+    if metric and _source_change_recent(
         customer_profile=customer_profile, domain=domain, metric=metric,
-        is_current=True, observed_at__gte=timezone.now() - timedelta(days=7),
-        provenance__has_key="sourceChange",
-    ).exists():
+        since=timezone.now() - timedelta(days=7),
+    ):
         confidence = ConfidenceLevel.LOW
     graph = (
         graph_values(
@@ -663,12 +660,11 @@ def build_domain_card(
         )
     if connections and all(c.historical_days_requested == 0 for c in connections):
         messages.append("Historical import is disabled; your history builds from today.")
-    data_source_lists = HealthObservation.objects.filter(
+    data_source_lists = HealthDailySummary.objects.filter(
         customer_profile=customer_profile,
         domain=domain,
         metric=metric or "",
-        is_current=True,
-        observed_at__gte=timezone.now() - timedelta(days=90),
+        last_observed_at__gte=timezone.now() - timedelta(days=90),
     ).values_list("data_sources", flat=True)
     sources = sorted(
         {
@@ -835,7 +831,7 @@ def domain_metrics_payload(*, customer_profile, domain: str, days: int | None) -
     history_days = min(days or MAX_LIFETIME_HISTORY_DAYS, MAX_LIFETIME_HISTORY_DAYS)
     summaries = HealthDailySummary.objects.filter(
         customer_profile=customer_profile, domain=domain, local_date__lte=today,
-        local_date__gte=today - timedelta(days=history_days - 1),
+        local_date__gte=today - timedelta(days=history_days - 1), count__gt=0,
     ).order_by("metric", "local_date", "last_observed_at")
     grouped: dict[str, list[HealthDailySummary]] = defaultdict(list)
     for summary in summaries.iterator():
@@ -864,20 +860,34 @@ def domain_metrics_payload(*, customer_profile, domain: str, days: int | None) -
 
 def sleep_session_payload(*, customer_profile, days: int | None) -> list[dict]:
     today = member_today(customer_profile)
-    observations = HealthObservation.objects.filter(
-        customer_profile=customer_profile, domain=HealthDomain.SLEEP,
-        metric__in=("sleep_start_time", "sleep_end_time"), is_current=True,
-        local_date__lte=today,
-    ).order_by("local_date", "document_id")
-    # An omitted window must not fetch all retained sleep observations.
+    # An omitted window must not fetch all retained sleep history.
     bounded_days = min(days or MAX_LIFETIME_HISTORY_DAYS, MAX_LIFETIME_HISTORY_DAYS)
-    observations = observations.filter(local_date__gte=today - timedelta(days=bounded_days - 1))
-    by_document = {}
-    for obs in observations.iterator():
-        row = by_document.setdefault(str(obs.document_id), {"date": obs.local_date})
-        if obs.text_value:
-            row["startTime" if obs.metric == "sleep_start_time" else "endTime"] = obs.text_value
-    return [row for row in by_document.values() if "startTime" in row or "endTime" in row]
+    rows = HealthDailySummary.objects.filter(
+        customer_profile=customer_profile, domain=HealthDomain.SLEEP,
+        metric__in=("sleep_start_time", "sleep_end_time"),
+        local_date__lte=today,
+        local_date__gte=today - timedelta(days=bounded_days - 1),
+    ).order_by("local_date", "metric")
+    # Each stored document contribution is one session: its own start/end text values,
+    # so separate sessions on the same day stay separate, as they were before.
+    by_session: dict[tuple, dict] = {}
+    for row in rows.iterator():
+        for document_key, entry in (row.contributions or {}).items():
+            text = entry.get("tv")
+            if not isinstance(text, str) or not text:
+                continue
+            session = by_session.setdefault((row.local_date, document_key), {"date": row.local_date})
+            session["startTime" if row.metric == "sleep_start_time" else "endTime"] = text
+    ordered = sorted(by_session.items(), key=lambda item: (item[0][0], item[0][1]))
+    return [row for _key, row in ordered if "startTime" in row or "endTime" in row]
+
+
+def _source_change_recent(*, customer_profile, domain: str, metric: str, since) -> bool:
+    rows = HealthDailySummary.objects.filter(
+        customer_profile=customer_profile, domain=domain, metric=metric,
+        last_observed_at__gte=since,
+    ).only("contributions").iterator()
+    return any(contribution_source_change(row.contributions or {}) is not None for row in rows)
 
 
 def domain_payload(*, customer_profile, domain: str, days: int | None,
@@ -904,9 +914,3 @@ def domain_payload(*, customer_profile, domain: str, days: int | None,
         result["sleepSessions"] = sleep_session_payload(customer_profile=customer_profile, days=days)
     return result
 
-
-def timeline_payload(*, customer_profile, start_date, end_date, domain, offset, limit):
-    return timeline_service.timeline_payload(
-        customer_profile=customer_profile, start_date=start_date,
-        end_date=end_date, domain=domain, offset=offset, limit=limit,
-    )

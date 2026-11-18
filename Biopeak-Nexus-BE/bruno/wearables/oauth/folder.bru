@@ -8,5 +8,5 @@ auth {
 }
 
 docs {
-  Public /r/{state}/client_uuid/{client}/user_id/{user}/ callback, state returned by connect; ROOK normally calls this automatically.
+  Mobile return bridge: GET /rook/return/ (302 to biopeak://oauth-callback). The former GET /r/{state}/... API is removed. The mobile app must verify authorization via authenticated GET /api/v1/devices/providers/?refresh=true.
 }

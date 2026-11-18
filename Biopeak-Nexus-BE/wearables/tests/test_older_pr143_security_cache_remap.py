@@ -14,8 +14,7 @@ from django.test import SimpleTestCase, override_settings
 
 from wearables.management.commands.check_rook_configuration import rook_readiness_checks
 from wearables.services.analytics import dashboard_payload, shared_health_cache_enabled
-from wearables.utils.constants import ConnectionStatus
-from wearables.views import DeviceSDKConfigView
+from django.urls import Resolver404, resolve
 
 
 TEST_CACHE_SETTINGS = {
@@ -25,55 +24,9 @@ TEST_CACHE_SETTINGS = {
 
 
 class OlderPR143SecurityAndCacheTests(SimpleTestCase):
-    def sdk_response(self):
-        connection = SimpleNamespace(identity=SimpleNamespace(rook_user_id="rook-test-member"))
-        profile = SimpleNamespace(pk="test-profile")
-        with (
-            patch.object(DeviceSDKConfigView, "get_customer_profile", return_value=profile),
-            patch("wearables.views.WearableConnection.objects.select_related") as select_related,
-            patch("wearables.views.has_active_wearable_consent", return_value=True),
-        ):
-            select_related.return_value.filter.return_value.exclude.return_value.first.return_value = connection
-            response = DeviceSDKConfigView().get(SimpleNamespace())
-            excluded_statuses = select_related.return_value.filter.return_value.exclude.call_args.kwargs["status__in"]
-        return response, excluded_statuses
-
-    @override_settings(
-        ROOK_SDK_CLIENT_UUID="native-client", ROOK_SDK_SECRET="native-only-test-secret",
-        ROOK_SECRET_KEY="server-private-test-secret",
-        ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC=False,
-    )
-    def test_sdk_secret_not_returned_without_explicit_approval(self):
-        response, _ = self.sdk_response()
-        self.assertEqual(response.status_code, 503)
-        self.assertNotIn("native-only-test-secret", str(response.data))
-
-    @override_settings(
-        ROOK_SDK_CLIENT_UUID="native-client", ROOK_SDK_SECRET="same-key",
-        ROOK_SECRET_KEY="same-key", ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC=True,
-    )
-    def test_sdk_server_basic_auth_key_is_never_returned(self):
-        response, _ = self.sdk_response()
-        self.assertEqual(response.status_code, 503)
-        self.assertNotIn("same-key", str(response.data))
-
-    @override_settings(
-        ROOK_SDK_CLIENT_UUID="native-client", ROOK_SDK_SECRET="mobile-test-secret",
-        ROOK_SECRET_KEY="server-private-test-secret",
-        ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC=True,
-        ROOK_ENVIRONMENT="sandbox",
-    )
-    def test_only_approved_distinct_mobile_credential_is_distributable(self):
-        response, excluded_statuses = self.sdk_response()
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["data"]["secret"], "mobile-test-secret")
-        self.assertIn("no-store", response["Cache-Control"])
-        self.assertCountEqual(excluded_statuses, [
-            ConnectionStatus.NEVER_CONNECTED,
-            ConnectionStatus.DISCONNECTED,
-            ConnectionStatus.AUTHORIZATION_EXPIRED,
-            ConnectionStatus.PERMISSION_DENIED,
-        ])
+    def test_retired_sdk_config_is_not_publicly_routed(self):
+        with self.assertRaises(Resolver404):
+            resolve("/api/v1/devices/sdk-config/")
 
     @override_settings(CACHES=TEST_CACHE_SETTINGS)
     def test_health_cache_disabled_and_reads_from_database_snapshots(self):

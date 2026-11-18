@@ -61,7 +61,6 @@ urlpatterns = [
     path("pre-consultation/", include("pre_consultation.urls")),
     # Mobile contract: core.api.urls is included at site root, so /api/v1/ occurs once.
     # Phase 1 wearable endpoints
-    path("r/", include("wearables.callback_urls")),
     path("api/v1/devices/", include("wearables.device_urls")),
     path("api/v1/health/", include("wearables.health_urls")),
     path("supplementation/", include("supplementation.urls")),

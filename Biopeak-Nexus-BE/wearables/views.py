@@ -1,6 +1,3 @@
-from django.http import JsonResponse
-from rest_framework.permissions import AllowAny
-from rest_framework.views import APIView
 import uuid
 
 from django.conf import settings
@@ -18,12 +15,10 @@ from wearables.serializers import (
     DeviceDisconnectSerializer,
     DomainQuerySerializer,
     NativeDeviceStatusSerializer,
-    TimelineQuerySerializer,
 )
 from wearables.services.analytics import (
     dashboard_payload,
     domain_payload,
-    timeline_payload,
 )
 from wearables.services.client import RookConfigurationError, RookServiceError
 from wearables.services.config import provisioned_sources
@@ -36,8 +31,7 @@ from wearables.services.connections import (
     update_native_connection,
 )
 from wearables.services.identity import resolve_customer_profile
-from wearables.services.oauth import complete_oauth_callback, OAuthStateError
-from wearables.services.consent import has_active_wearable_consent, revoke_wearable_consent
+from wearables.services.consent import has_active_wearable_consent
 from wearables.services.job_queue import enqueue_or_reuse_fetch_rook_data_job
 from wearables.services.sync_policy import ManualSyncCooldown, next_manual_sync_at
 from wearables.services.provider_errors import RookRequestDeferred
@@ -125,46 +119,6 @@ class DeviceConnectView(WearablesAPIView):
         return self.send_response("Wearable connection initiated.", data, status=201)
 
 
-class DeviceListView(WearablesAPIView):
-    throttle_classes = (ScopedRateThrottle,)
-    throttle_scope = "wearable_status"
-
-    @extend_schema(responses=OpenApiTypes.OBJECT)
-    def get(self, request, *args, **kwargs):
-        customer_profile = self.get_customer_profile()
-        refresh_requested = request.query_params.get("refresh", "").lower() in {
-            "1",
-            "true",
-        }
-        refresh_error = None
-        if refresh_requested:
-            try:
-                refresh_authorizing_connections(customer_profile)
-            except (RookConfigurationError, RookServiceError) as error:
-                refresh_error = str(error)
-        connections = list(
-            WearableConnection.objects.select_related("identity")
-            .filter(customer_profile=customer_profile)
-            .order_by("data_source")
-        )
-        attach_connection_progress(connections, customer_profile)
-        identity = RookMemberIdentity.objects.filter(
-            customer_profile=customer_profile
-        ).first()
-        data = {
-            "connections": [
-                serialize_connection(connection) for connection in connections
-            ],
-            "connected": any(
-                connection.authorization_status == "authorized"
-                for connection in connections
-            ),
-            "rookUserId": identity.rook_user_id if identity else None,
-            "refreshError": refresh_error,
-        }
-        return self.send_response("Connected devices retrieved.", data)
-
-
 class DeviceDisconnectView(WearablesAPIView):
     serializer_class = DeviceDisconnectSerializer
     throttle_classes = (ScopedRateThrottle,)
@@ -192,180 +146,196 @@ class DeviceDisconnectView(WearablesAPIView):
 
 
 class DeviceProviderCatalogueView(WearablesAPIView):
-    """Expose explicit provider provisioning, so mobile hides disabled choices."""
-    throttle_classes = (ScopedRateThrottle,)
-    throttle_scope = "wearable_status"
+    """List API providers and the profile's API/native connection statuses."""
 
-    @extend_schema(responses=OpenApiTypes.OBJECT)
-    def get(self, request, *args, **kwargs):
-        self.get_customer_profile()
-        provisioned = provisioned_sources()
-        providers = []
-        for source in WearableSource.values:
-            is_native = source in NATIVE_WEARABLE_SOURCES
-            # Strava's current ROOK authorizer route is unsupported here.
-            supported = source != WearableSource.STRAVA
-            enabled = supported and (provisioned is not None and source in provisioned)
-            providers.append({
-                "name": source,
-                "connectionMethod": "sdk" if is_native else "api",
-                "provisioned": (enabled if provisioned is not None else None),
-                "selectable": enabled,
-                "reason": ("Provisioning not configured" if provisioned is None
-                           else "Unavailable" if not enabled else None),
-            })
-        return self.send_response(
-            "ROOK provider availability retrieved.",
-            {"providers": providers, "provisioningConfigured": provisioned is not None},
-        )
-
-
-class DeviceSDKConfigView(WearablesAPIView):
     throttle_classes = (ScopedRateThrottle,)
     throttle_scope = "wearable_status"
 
     @extend_schema(responses=OpenApiTypes.OBJECT)
     def get(self, request, *args, **kwargs):
         customer_profile = self.get_customer_profile()
-        native_connection = (
+
+        refresh_requested = str(
+            request.query_params.get("refresh", "")
+        ).lower() in {"1", "true"}
+
+        refresh_error = None
+
+        if refresh_requested:
+            try:
+                refresh_authorizing_connections(customer_profile)
+            except (RookConfigurationError, RookServiceError) as error:
+                refresh_error = str(error)
+
+        # 1. Fetch existing API connections.
+        connections = list(
             WearableConnection.objects.select_related("identity")
             .filter(
                 customer_profile=customer_profile,
-                connection_method=ConnectionMethod.SDK,
+                connection_method=ConnectionMethod.API,
             )
-            # A disconnected/expired native connection must not remain a
-            # credential-distribution prerequisite just because its row exists.
-            .exclude(status__in=[
-                ConnectionStatus.NEVER_CONNECTED,
-                ConnectionStatus.DISCONNECTED,
-                ConnectionStatus.AUTHORIZATION_EXPIRED,
-                ConnectionStatus.PERMISSION_DENIED,
-            ])
-            .first()
+            .order_by("data_source")
         )
-        if native_connection is None:
-            self.raise_bad_request(
-                "Start a native wearable connection before requesting SDK configuration."
-            )
-        if not has_active_wearable_consent(customer_profile):
-            self.raise_permission_denied("Wearable consent must be granted before using the SDK.")
-        identity = native_connection.identity
-        client_uuid = getattr(settings, "ROOK_SDK_CLIENT_UUID", "")
-        sdk_secret = getattr(settings, "ROOK_SDK_SECRET", "")
-        if not client_uuid or not sdk_secret:
-            return self.send_response("ROOK mobile SDK is not configured.", status=503)
-        # This endpoint is called by a mobile app and therefore exposes its
-        # response to a potentially compromised handset. A server Basic-auth
-        # key is NEVER an acceptable SDK credential. Exposure requires an
-        # explicit deployment approval of a separate ROOK-issued client key.
-        if (not getattr(settings, "ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC", False)
-                or sdk_secret == getattr(settings, "ROOK_SECRET_KEY", "")):
-            return self.send_response(
-                "ROOK native SDK client credentials are not approved for mobile distribution.",
-                status=503,
-            )
-        data = {
-            "clientUuid": client_uuid,
-            "secret": sdk_secret,
-            "environment": getattr(settings, "ROOK_ENVIRONMENT", "sandbox"),
-            "rookUserId": identity.rook_user_id,
+
+        attach_connection_progress(connections, customer_profile)
+
+        connection_details = [
+            serialize_connection(connection)
+            for connection in connections
+        ]
+
+        connections_by_source = {
+            connection.data_source: connection
+            for connection in connections
         }
-        response = self.send_response("ROOK mobile SDK configuration retrieved.", data)
-        response["Cache-Control"] = "no-store, private"
-        return response
 
+        details_by_source = {
+            detail["provider"]: detail
+            for detail in connection_details
+        }
 
-class NativeDeviceStatusView(WearablesAPIView):
-    serializer_class = NativeDeviceStatusSerializer
-    throttle_classes = (ScopedRateThrottle,)
-    throttle_scope = "wearable_status"
-
-    @extend_schema(responses=OpenApiTypes.OBJECT)
-    def post(self, request, *args, **kwargs):
-        customer_profile = self.get_customer_profile()
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        if not has_active_wearable_consent(customer_profile):
-            self.raise_permission_denied("Wearable consent has been revoked.")
-        try:
-            connection = update_native_connection(
+        # 2. Fetch native connections separately.
+        native_connections = list(
+            WearableConnection.objects.select_related("identity")
+            .filter(
                 customer_profile=customer_profile,
-                actor_user=request.user,
-                validated_data=serializer.validated_data,
-                correlation_id=self.correlation_id(),
+                data_source__in=NATIVE_WEARABLE_SOURCES,
             )
-        except ValueError as error:
-            self.raise_bad_request(str(error))
-        return self.send_response(
-            "Native wearable status updated.",
-            {"connection": serialize_connection(connection)},
+            .order_by("data_source")
         )
 
-
-class HealthDashboardView(WearablesAPIView):
-    throttle_classes = (ScopedRateThrottle,)
-    throttle_scope = "health_read"
-
-    @extend_schema(responses=OpenApiTypes.OBJECT)
-    def get(self, request, *args, **kwargs):
-        customer_profile = self.get_customer_profile()
-        return self.send_response(
-            "Health dashboard retrieved.",
-            dashboard_payload(customer_profile),
+        attach_connection_progress(
+            native_connections,
+            customer_profile,
         )
 
+        native_connections_by_source = {
+            connection.data_source: connection
+            for connection in native_connections
+        }
 
-class HealthDomainView(WearablesAPIView):
-    serializer_class = DomainQuerySerializer
-    throttle_classes = (ScopedRateThrottle,)
-    throttle_scope = "health_read"
+        # 3. Build native status entries, including never-connected sources.
+        native_statuses = []
 
-    @extend_schema(
-        parameters=[DomainQuerySerializer],
-        responses=OpenApiTypes.OBJECT,
-    )
-    def get(self, request, domain, *args, **kwargs):
-        customer_profile = self.get_customer_profile()
-        if domain not in HEALTH_DOMAIN_ORDER:
-            raise NotFound("Health domain not found.")
-        serializer = self.get_serializer(data=request.query_params)
-        serializer.is_valid(raise_exception=True)
-        return self.send_response(
-            "Health domain retrieved.",
-            domain_payload(
-                customer_profile=customer_profile,
-                domain=domain,
-                days=serializer.validated_data["days"],
-                window=serializer.validated_data.get("window"),
+        for source in WearableSource.values:
+            if source not in NATIVE_WEARABLE_SOURCES:
+                continue
+
+            connection = native_connections_by_source.get(source)
+
+            native_statuses.append({
+                "name": source,
+                "connectionMethod": "native",
+                "connected": (
+                    connection is not None
+                    and connection.authorization_status
+                    == AuthorizationStatus.AUTHORIZED
+                ),
+                "status": (
+                    connection.status
+                    if connection
+                    else ConnectionStatus.NEVER_CONNECTED
+                ),
+                "authorizationStatus": (
+                    connection.authorization_status
+                    if connection
+                    else AuthorizationStatus.NOT_STARTED
+                ),
+                "permissionStatus": (
+                    getattr(connection, "permission_status", None)
+                    if connection
+                    else None
+                ),
+                "connection": (
+                    serialize_connection(connection)
+                    if connection
+                    else None
+                ),
+            })
+
+        # 4. Fetch ROOK identity.
+        identity = RookMemberIdentity.objects.filter(
+            customer_profile=customer_profile
+        ).first()
+
+        # 5. Build API provider catalogue with connection statuses.
+        provisioned = provisioned_sources()
+        providers = []
+
+        for source in WearableSource.values:
+            if source in NATIVE_WEARABLE_SOURCES:
+                continue
+
+            # Strava's ROOK authorization route is unsupported.
+            supported = source != WearableSource.STRAVA
+
+            enabled = (
+                supported
+                and provisioned is not None
+                and source in provisioned
+            )
+
+            connection = connections_by_source.get(source)
+
+            authorized = (
+                connection is not None
+                and connection.authorization_status
+                == AuthorizationStatus.AUTHORIZED
+            )
+
+            providers.append({
+                "name": source,
+                "connectionMethod": "api",
+                "provisioned": (
+                    enabled if provisioned is not None else None
+                ),
+                "selectable": enabled,
+                "reason": (
+                    "Provisioning not configured"
+                    if provisioned is None
+                    else "Unavailable"
+                    if not enabled
+                    else None
+                ),
+                "connected": authorized,
+                "status": (
+                    connection.status
+                    if connection
+                    else ConnectionStatus.NEVER_CONNECTED
+                ),
+                "authorizationStatus": (
+                    connection.authorization_status
+                    if connection
+                    else AuthorizationStatus.NOT_STARTED
+                ),
+                "connection": details_by_source.get(source),
+            })
+
+        # 6. Preserve existing combined response structure.
+        data = {
+            "providers": providers,
+            "nativeStatuses": native_statuses,
+            "provisioningConfigured": provisioned is not None,
+            "connections": connection_details,
+            "connected": any(
+                connection.authorization_status
+                == AuthorizationStatus.AUTHORIZED
+                and connection.data_source
+                not in NATIVE_WEARABLE_SOURCES
+                for connection in connections
             ),
+            "rookUserId": (
+                identity.rook_user_id
+                if identity
+                else None
+            ),
+            "refreshError": refresh_error,
+        }
+
+        return self.send_response(
+            "ROOK provider availability retrieved.",
+            data,
         )
-
-
-class HealthTimelineView(WearablesAPIView):
-    serializer_class = TimelineQuerySerializer
-    throttle_classes = (ScopedRateThrottle,)
-    throttle_scope = "health_read"
-
-    @extend_schema(
-        parameters=[TimelineQuerySerializer],
-        responses=OpenApiTypes.OBJECT,
-    )
-    def get(self, request, *args, **kwargs):
-        if not getattr(settings, "TIMELINE_ENABLED", True):
-            raise NotFound("Health timeline is not enabled.")
-        customer_profile = self.get_customer_profile()
-        serializer = self.get_serializer(data=request.query_params)
-        serializer.is_valid(raise_exception=True)
-        data = timeline_payload(
-            customer_profile=customer_profile,
-            start_date=serializer.validated_data.get("start"),
-            end_date=serializer.validated_data.get("end"),
-            domain=serializer.validated_data.get("domain"),
-            offset=serializer.validated_data["offset"],
-            limit=serializer.validated_data["limit"],
-        )
-        return self.send_response("Health timeline retrieved.", data)
-
 
 
 class DeviceRetrySyncView(WearablesAPIView):
@@ -430,43 +400,75 @@ class DeviceRetrySyncView(WearablesAPIView):
         )
 
 
-class RookOAuthCallbackView(APIView):
-    """Public ROOK browser return. Never trusts callback parameters as authorization."""
-    authentication_classes = ()
-    permission_classes = (AllowAny,)
 
-    def get(self, request, *args, **kwargs):
-        state_token = kwargs.get("state_token", "")
-        client_uuid = kwargs.get("client_uuid", "")
-        rook_user_id = kwargs.get("rook_user_id", "")
-        cancelled = bool(request.query_params.get("error")) or request.query_params.get("cancelled", "").lower() in ("1", "true", "yes")
-        try:
-            outcome = complete_oauth_callback(
-                state_token, rook_client_uuid=client_uuid, rook_user_id=rook_user_id, cancelled=cancelled
-            )
-        except OAuthStateError:
-            return JsonResponse({"detail": "Authorization state is invalid or already used."}, status=400)
-        except (RookConfigurationError, RookServiceError):
-            return JsonResponse({"detail": "ROOK authorization confirmation is temporarily unavailable. Check device status in the app."}, status=503)
-        if outcome == "authorized":
-            return JsonResponse({"detail": "Authorization confirmed. Return to the Biopeak app."})
-        if outcome in ("cancelled", "expired"):
-            return JsonResponse({"detail": "Authorization was not completed. Retry from the Biopeak app."}, status=410)
-        return JsonResponse({"detail": "Authorization is being confirmed. Return to the Biopeak app and refresh device status."}, status=202)
-
-
-class DeviceConsentRevokeView(WearablesAPIView):
-    """Member-initiated opt-out; no source or account data is deleted."""
+class NativeDeviceStatusView(WearablesAPIView):
+    serializer_class = NativeDeviceStatusSerializer
     throttle_classes = (ScopedRateThrottle,)
-    throttle_scope = "wearable_connect"
+    throttle_scope = "wearable_status"
 
-    @extend_schema(responses={200: OpenApiTypes.OBJECT})
-    def post(self, request, *args, **kwargs):
-        # Privacy opt-out remains accessible even after feature rollout is disabled.
-        customer_profile = resolve_customer_profile(request)
-        data = revoke_wearable_consent(
-            customer_profile=customer_profile,
-            actor_user=request.user,
-            correlation_id=self.correlation_id(),
+    @extend_schema(responses=OpenApiTypes.OBJECT)
+    def patch(self, request, *args, **kwargs):
+        customer_profile = self.get_customer_profile()
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        if not has_active_wearable_consent(customer_profile):
+            self.raise_permission_denied(
+                "Wearable consent has been revoked."
+            )
+
+        try:
+            connection = update_native_connection(
+                customer_profile=customer_profile,
+                actor_user=request.user,
+                validated_data=serializer.validated_data,
+                correlation_id=self.correlation_id(),
+            )
+        except ValueError as error:
+            self.raise_bad_request(str(error))
+
+        return self.send_response(
+            "Native wearable status updated.",
+            {"connection": serialize_connection(connection)},
         )
-        return self.send_response("Wearable consent revoked. Existing health history retained.", data)
+
+
+class HealthDashboardView(WearablesAPIView):
+    throttle_classes = (ScopedRateThrottle,)
+    throttle_scope = "health_read"
+
+    @extend_schema(responses=OpenApiTypes.OBJECT)
+    def get(self, request, *args, **kwargs):
+        customer_profile = self.get_customer_profile()
+        return self.send_response(
+            "Health dashboard retrieved.",
+            dashboard_payload(customer_profile),
+        )
+
+
+class HealthDomainView(WearablesAPIView):
+    serializer_class = DomainQuerySerializer
+    throttle_classes = (ScopedRateThrottle,)
+    throttle_scope = "health_read"
+
+    @extend_schema(
+        parameters=[DomainQuerySerializer],
+        responses=OpenApiTypes.OBJECT,
+    )
+    def get(self, request, domain, *args, **kwargs):
+        customer_profile = self.get_customer_profile()
+        if domain not in HEALTH_DOMAIN_ORDER:
+            raise NotFound("Health domain not found.")
+        serializer = self.get_serializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        return self.send_response(
+            "Health domain retrieved.",
+            domain_payload(
+                customer_profile=customer_profile,
+                domain=domain,
+                days=serializer.validated_data["days"],
+                window=serializer.validated_data.get("window"),
+            ),
+        )
+

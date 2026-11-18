@@ -159,7 +159,6 @@ def claim_health_job(job_id) -> RookOutbox | None:
         # Fetch ONLY our claim, never a successor's attempt after a reclaim.
         return RookOutbox.objects.select_related(
             "customer_profile",
-            "document",
             "connection__identity",
         ).filter(pk=job_id, claim_token=token, started_at=now).first()
 
