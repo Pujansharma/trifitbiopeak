@@ -537,7 +537,7 @@ def start_connection(
         result = client.get_authorizer(
             rook_user_id=connection.identity.rook_user_id,
             data_source=data_source,
-            redirect_url=callback_url or validated_data.get("redirect_url"),
+            redirect_url=callback_url,
         )
     except (RookConfigurationError, RookServiceError) as error:
         oauth_service.retire_oauth_callback_state(

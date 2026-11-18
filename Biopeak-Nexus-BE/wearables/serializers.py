@@ -67,20 +67,35 @@ class DeviceConnectSerializer(BaseSerializer):
             })
         return attrs
 
-    def validate_redirect_url(self, value):
-        # In production OAuth is returned through the server-owned stateful
-        # callback. Without it, permit mobile redirect hosts explicitly
-        # allowlisted by the operator; no untrusted open redirects.
-        parsed = urlsplit(value)
-        if len(value) > 50:
-            raise serializers.ValidationError("ROOK redirect URLs must be at most 50 characters.")
-        allowed = set(getattr(settings, "ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS", []))
-        if not getattr(settings, "ROOK_CALLBACK_URL", "") and (
-            parsed.scheme != "https" or parsed.hostname not in allowed
-            or parsed.username or parsed.password or parsed.fragment
-        ):
-            raise serializers.ValidationError("Redirect URL is not allowlisted for ROOK authorization.")
-        return value
+    # def validate_redirect_url(self, value):
+    #     # In production OAuth is returned through the server-owned stateful
+    #     # callback. Without it, permit mobile redirect hosts explicitly
+    #     # allowlisted by the operator; no untrusted open redirects.
+    #     parsed = urlsplit(value)
+    #     if len(value) > 50:
+    #         raise serializers.ValidationError("ROOK redirect URLs must be at most 50 characters.")
+    #     allowed = set(getattr(settings, "ROOK_MOBILE_REDIRECT_ALLOWED_HOSTS", []))
+    #     if not getattr(settings, "ROOK_CALLBACK_URL", "") and (
+    #         parsed.scheme != "https" or parsed.hostname not in allowed
+    #         or parsed.username or parsed.password or parsed.fragment
+    #     ):
+    #         raise serializers.ValidationError("Redirect URL is not allowlisted for ROOK authorization.")
+    #     return value
+
+
+
+def validate_redirect_url(self, value):
+    configured = (
+        getattr(settings, "ROOK_CALLBACK_URL", "") or ""
+    ).strip().rstrip("/")
+
+    if not configured or value.rstrip("/") != configured:
+        raise serializers.ValidationError(
+            "Use the backend-configured ROOK callback URL."
+        )
+
+    return value
+
 
     def validate_consent_accepted(self, value):
         if value is not True:

@@ -308,7 +308,7 @@ class DeviceProviderCatalogueView(WearablesAPIView):
                     if connection
                     else AuthorizationStatus.NOT_STARTED
                 ),
-                "connection": details_by_source.get(source),
+                # "connection": details_by_source.get(source),
             })
 
         # 6. Preserve existing combined response structure.
@@ -316,7 +316,7 @@ class DeviceProviderCatalogueView(WearablesAPIView):
             "providers": providers,
             "nativeStatuses": native_statuses,
             "provisioningConfigured": provisioned is not None,
-            "connections": connection_details,
+            # "connections": connection_details,
             "connected": any(
                 connection.authorization_status
                 == AuthorizationStatus.AUTHORIZED

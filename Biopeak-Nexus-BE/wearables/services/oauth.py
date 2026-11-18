@@ -29,49 +29,96 @@ def callback_url_configured() -> bool:
     return bool(getattr(settings, "ROOK_CALLBACK_URL", ""))
 
 
-def callback_url_for_connection(
-    connection, *, actor_user, correlation_id="", previous_status: str | None = None,
-) -> str | None:
-    """Make a short, one-time callback URL compatible with ROOK's authorizer.
+# def callback_url_for_connection(
+#     connection, *, actor_user, correlation_id="", previous_status: str | None = None,
+# ) -> str | None:
+#     """Make a short, one-time callback URL compatible with ROOK's authorizer.
 
-    ROOK's redirect_url limit is 50 characters; it appends
-    /client_uuid/{client_uuid}/user_id/{user_id} to the redirect_url path.
-    Operator config must be an HTTPS origin plus /r, without a query string.
-    Store only a digest of the random path nonce, never a plaintext token.
-    """
-    callback = getattr(settings, "ROOK_CALLBACK_URL", "").strip()
-    if not callback:
-        return None  # Authenticated device status polling is the supported fallback.
+#     ROOK's redirect_url limit is 50 characters; it appends
+#     /client_uuid/{client_uuid}/user_id/{user_id} to the redirect_url path.
+#     Operator config must be an HTTPS origin plus /r, without a query string.
+#     Store only a digest of the random path nonce, never a plaintext token.
+#     """
+#     callback = getattr(settings, "ROOK_CALLBACK_URL", "").strip()
+#     if not callback:
+#         return None  # Authenticated device status polling is the supported fallback.
+#     parsed = urlsplit(callback)
+#     if (
+#         parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+#         or parsed.fragment or parsed.query or parsed.path.rstrip("/") != "/r"
+#         or parsed.port is not None
+#     ):
+#         raise RookConfigurationError(
+#             "ROOK_CALLBACK_URL must be a short HTTPS URL ending in /r, "
+#             "with no query, credentials, fragment, or explicit port."
+#         )
+#     nonce = secrets.token_urlsafe(12)  # 96 bits; 16 URL-safe characters.
+#     redirect_url = f"{callback.rstrip('/')}/{nonce}"
+#     if len(redirect_url) > 50:
+#         raise RookConfigurationError(
+#             "ROOK_CALLBACK_URL is too long. The complete redirect URL, "
+#             "including its one-time state token, must be at most 50 characters."
+#         )
+#     digest = hashlib.sha256(nonce.encode("utf-8")).hexdigest()
+#     WearableConnectionEvent.objects.create(
+#         connection=connection,
+#         event_type="oauth_state_pending",
+#         previous_status=(connection.status if previous_status is None else previous_status),
+#         current_status=connection.status,
+#         actor_user=actor_user,
+#         correlation_id=correlation_id[:128],
+#         detail="One-time ROOK OAuth callback state registered.",
+#         payload={"nonceDigest": digest, "source": connection.data_source,
+#                  "generation": str(connection.authorization_generation)},
+#     )
+#     return redirect_url
+
+
+
+def callback_url_for_connection(
+    connection,
+    *,
+    actor_user,
+    correlation_id="",
+    previous_status=None,
+) -> str:
+    """Return the fixed, backend-configured ROOK callback URL."""
+
+    callback = (
+        getattr(settings, "ROOK_CALLBACK_URL", "") or ""
+    ).strip().rstrip("/")
+
     parsed = urlsplit(callback)
+
     if (
-        parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
-        or parsed.fragment or parsed.query or parsed.path.rstrip("/") != "/r"
-        or parsed.port is not None
+        not callback
+        or len(callback) > 50
+        or parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path != "/rook/return"
     ):
         raise RookConfigurationError(
-            "ROOK_CALLBACK_URL must be a short HTTPS URL ending in /r, "
-            "with no query, credentials, fragment, or explicit port."
+            "Configure ROOK_CALLBACK_URL as an HTTPS "
+            "URL ending in /rook/return, "
+            "without query parameters or fragments, "
+            "and at most 50 characters long."
         )
-    nonce = secrets.token_urlsafe(12)  # 96 bits; 16 URL-safe characters.
-    redirect_url = f"{callback.rstrip('/')}/{nonce}"
-    if len(redirect_url) > 50:
+
+    try:
+        if parsed.port is not None:
+            raise RookConfigurationError(
+                "ROOK callback cannot contain an explicit port."
+            )
+    except ValueError as exc:
         raise RookConfigurationError(
-            "ROOK_CALLBACK_URL is too long. The complete redirect URL, "
-            "including its one-time state token, must be at most 50 characters."
-        )
-    digest = hashlib.sha256(nonce.encode("utf-8")).hexdigest()
-    WearableConnectionEvent.objects.create(
-        connection=connection,
-        event_type="oauth_state_pending",
-        previous_status=(connection.status if previous_status is None else previous_status),
-        current_status=connection.status,
-        actor_user=actor_user,
-        correlation_id=correlation_id[:128],
-        detail="One-time ROOK OAuth callback state registered.",
-        payload={"nonceDigest": digest, "source": connection.data_source,
-                 "generation": str(connection.authorization_generation)},
-    )
-    return redirect_url
+            "Invalid ROOK callback URL port."
+        ) from exc
+
+    return callback
 
 
 def retire_oauth_callback_state(connection, callback_url: str | None, *, event_type: str) -> None:
