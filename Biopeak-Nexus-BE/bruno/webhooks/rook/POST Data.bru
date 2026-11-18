@@ -1,0 +1,46 @@
+meta {
+  name: POST ROOK Data Webhook
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseURL}}/webhooks/rook/data/
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-ROOK-HASH: {{rook_webhook_hash}}
+}
+
+body:json {
+  {
+    "client_uuid": "{{rook_client_uuid}}",
+    "user_id": "{{rook_user_id}}",
+    "version": 2,
+    "document_version": 1,
+    "data_structure": "physical_summary",
+    "physical_health": {
+      "summary": {
+        "physical_summary": {
+          "metadata": {
+            "datetime_string": "2026-11-18T09:23:00.000000Z",
+            "sources_of_data_array": ["Garmin"]
+          },
+          "distance": {"steps_int": 7123}
+        }
+      }
+    }
+  }
+}
+
+docs {
+  ROOK -> Biopeak data webhook. Set rook_webhook_hash to HMAC-SHA256 hex of
+  client_uuid + user_id + the exact nested metadata.datetime_string, keyed
+  with ROOK_WEBHOOK_HASH_KEY. Example payload only; require a real authorized
+  ROOK user_id, active consent and source to create health summaries.
+  Prefer ROOK Portal > Data Webhook > Test webhook for signed end-to-end test.
+  No JWT required; invalid signatures return 403.
+}

@@ -1,0 +1,23 @@
+meta {
+  name: GET Providers Refresh
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseURL}}/api/v1/devices/providers/?refresh=true
+  body: none
+  auth: inherit
+}
+
+headers {
+  Accept: application/json
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Uses the same provider response payload as GET Providers, but first asks ROOK to verify pending API authorizations. Handle data.refreshError when upstream verification is temporarily unavailable. Do not treat the public OAuth browser return as proof of authorization.
+}

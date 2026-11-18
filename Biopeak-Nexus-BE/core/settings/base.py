@@ -83,6 +83,10 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
+# ROOK Data Webhooks can contain up to 16 MB JSON documents. Without this,
+# Django's default 2.5 MB in-memory request limit rejects valid deliveries.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 16 * 1024 * 1024
+
 ROOT_URLCONF = "core.urls"
 
 TEMPLATES = [

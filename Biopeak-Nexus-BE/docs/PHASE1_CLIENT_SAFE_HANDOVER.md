@@ -123,7 +123,7 @@ Every other original path, including `accounts/users/**`, `accounts/customers/**
 | GET | `/health/{domain}/` | JWT | Domain detail/graphs/baselines | **NOT TESTED** |
 | GET | `/health/timeline/` | JWT | Wearables + profile-scoped lab/assessment milestone union | **Isolated merge/order checks only** |
 | POST | `/webhooks/rook/data/` | Signed HMAC | ROOK document ingestion/corrections/jobs | **Isolated HMAC checks only** |
-| POST | `/webhooks/rook/notification/` | Signed HMAC | ROOK lifecycle status receipts | **Isolated HMAC checks only** |
+| POST | `/webhooks/rook/notification/` | Disabled / 404 | Former ROOK lifecycle notifications | **Removed from current public routing (18 Nov 2026)** |
 
 ## PRD Phase 1 coverage
 
@@ -144,7 +144,7 @@ The client-original lab timeline view intentionally exposes only a **milestone/a
 - Added `wearables/migrations/0001_initial.py` — new wearables-related tables/constraints only, dependency on existing customer migration. Dependencies statically resolve; actual `makemigrations --check`, `migrate --plan` and temporary PostgreSQL migration are **NOT TESTED**.
 - Use Python **3.14+** and existing `uv.lock` per original project. The working environment has Python **3.13.5** and lacks Django/test PostgreSQL; dependency install not available offline.
 - Provide `ROOK_CLIENT_UUID`, `ROOK_SECRET_KEY`, `ROOK_WEBHOOK_HASH_KEY` and optional SDK and short callback settings in the secret manager with `DEV_`, `STG_`, `PRD_` prefix as appropriate. See `PHASE1_ROOK_CONFIG.example`. NEVER publish secrets.
-- Register ROOK data and notification webhook URLs, ROOK device/source app approvals, worker schedule and freshness status command. Confirm credentials and queues before go-live.
+- Register only the ROOK data webhook URL, ROOK device/source app approvals, worker schedule and freshness status command. Confirm credentials and queues before go-live.
 - The health cache is `LocMemCache` (per process). It does **not** provide cross-worker invalidation. Use an approved shared cache or turn off/cache very short until multiworker concurrency is validated; no new Redis dependency has been added to avoid lockfile divergence.
 
 ## Testing: executed vs NOT TESTED

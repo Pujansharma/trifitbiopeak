@@ -66,7 +66,6 @@ class RookClientRouteTests(SimpleTestCase):
             "/api/v1/devices/retry-sync/",
             "/api/v1/devices/consent/revoke/",
             "/api/v1/devices/sdk-config/",
-            "/webhooks/rook/data/",
             "/webhooks/rook/notification/",
             "/r/AAAAAAAAAAAAAAAA/client_uuid/f2f2e6d2-1467-4ecc-bb4d-9bfc1249458e/user_id/example",
             "/r/AAAAAAAAAAAAAAAA/client_uuid/f2f2e6d2-1467-4ecc-bb4d-9bfc1249458e/user_id/example/",

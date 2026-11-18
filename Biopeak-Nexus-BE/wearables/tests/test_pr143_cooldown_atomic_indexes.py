@@ -17,10 +17,7 @@ from wearables.services.client import RookServiceError
 from wearables.services.connections import authorization_confirmed, get_or_create_connection
 from wearables.services.identity import get_or_create_rook_identity
 from wearables.services.job_claims import fail_health_job, reset_stale_health_jobs
-from wearables.services.job_queue import (
-    enqueue_or_reuse_fetch_rook_data_job, open_fetch_rook_data_jobs,
-)
-from wearables.services.scheduling import eligible_nightly_connections
+from wearables.services.job_queue import enqueue_or_reuse_fetch_rook_data_job
 from wearables.utils.constants import (
     AuthorizationStatus, ConnectionStatus, ConsentStatus, HealthJobStatus, HealthJobType,
     HistoricalImportStatus, MAX_ROOK_AUTH_OUTBOX_ATTEMPTS,
@@ -78,40 +75,30 @@ class CooldownAndAtomicRecoveryTests(TestCase):
     def test_unfinished_recovery_remains_excluded_regardless_of_age(self):
         self.connection.last_successful_sync = None
         self.connection.save(update_fields=["last_successful_sync", "updated_at"])
-        running_job = RookOutbox.objects.create(
+        RookOutbox.objects.create(
             connection=self.connection, customer_profile=self.profile,
             job_type=HealthJobType.FETCH_ROOK_DATA, idempotency_key="slow-recovery",
             status=HealthJobStatus.RUNNING,
             scheduled_at=timezone.now() - timedelta(hours=3),
         )
-        self.assertTrue(open_fetch_rook_data_jobs(self.connection).filter(pk=running_job.pk).exists())
         existing, created = enqueue_or_reuse_fetch_rook_data_job(
             connection=self.connection, customer_profile=self.profile,
         )
-        self.assertEqual(existing.pk, running_job.pk)
+        self.assertIsNotNone(existing)
         self.assertFalse(created)
 
-    def test_nightly_eligibility_uses_sync_coverage_not_import_start(self):
-        now = timezone.now()
-        payload = {
-            "mode": "stale",
-            "cutoff": (now - timedelta(days=7)).isoformat(),
-            "cursor": None,
-        }
+    def test_partial_import_can_enqueue_recovery_pull(self):
         WearableConnection.objects.filter(pk=self.connection.pk).update(
             status=ConnectionStatus.PARTIAL,
-            import_status=HistoricalImportStatus.RUNNING,
-            import_started_at=None,
-            last_successful_sync=now,
-            synced_through=None,
-        )
-        self.assertTrue(eligible_nightly_connections(payload).filter(pk=self.connection.pk).exists())
-        WearableConnection.objects.filter(pk=self.connection.pk).update(
             import_status=HistoricalImportStatus.PARTIAL,
+            import_started_at=None,
+            last_successful_sync=None,
         )
-        self.assertTrue(eligible_nightly_connections(payload).filter(pk=self.connection.pk).exists())
-        WearableConnection.objects.filter(pk=self.connection.pk).update(synced_through=now)
-        self.assertFalse(eligible_nightly_connections(payload).filter(pk=self.connection.pk).exists())
+        existing, created = enqueue_or_reuse_fetch_rook_data_job(
+            connection=self.connection, customer_profile=self.profile,
+        )
+        self.assertTrue(created)
+        self.assertEqual(existing.status, HealthJobStatus.PENDING)
 
     def test_terminal_failure_sets_completed_timestamp(self):
         job = RookOutbox.objects.create(

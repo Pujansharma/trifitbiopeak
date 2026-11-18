@@ -36,9 +36,16 @@ def signature_message(payload: dict) -> str:
     rook_user_id = payload.get("user_id")
     # ROOK's published contract uses `metadata.datetime_string` for data;
     # status notifications can instead provide `action_datetime`.
+    # Data documents use nested metadata.datetime_string. Signed notification
+    # v2 uses action_datetime; the ROOK portal's notification test may send
+    # metadata.datetime instead. Keep the exact unmodified string.
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
     datetime_value = (
         rook_metadata_datetime_string(payload)
         or payload.get("action_datetime")
+        or metadata.get("datetime")
         or payload.get("datetime")
     )
     if not all(isinstance(value, str) and value for value in
@@ -49,9 +56,10 @@ def signature_message(payload: dict) -> str:
 
 def verify_rook_webhook_signature(*, payload, signature_header: str) -> bool:
     hash_key = getattr(settings, "ROOK_WEBHOOK_HASH_KEY", "")
-    allow_unsigned = getattr(settings, "ROOK_ALLOW_UNSIGNED_WEBHOOKS", False)
+    # Fail closed even in development. A public webhook may not accept unsigned
+    # medical data, regardless of the retired ALLOW_UNSIGNED configuration.
     if not hash_key:
-        return bool(allow_unsigned)
+        return False
     if not isinstance(payload, dict) or not signature_header:
         return False
     message = signature_message(payload)

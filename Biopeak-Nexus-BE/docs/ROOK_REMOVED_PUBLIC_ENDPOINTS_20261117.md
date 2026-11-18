@@ -2,6 +2,10 @@
 
 Base: `Biopeak-Nexus-BE_HealthTimeline_Removed_Endpoints_Updated (1).zip`.
 
+> Historical note: This describes the 17 November removal. As of 18 November,
+> the **data** webhook has been restored, while the **notification** webhook
+> remains removed. Refer to `docs/ROOK_WEBHOOK_RESTORED.md` for current behavior.
+
 ## Current routes
 
 - `GET /api/v1/devices/providers/` **retained**, and `GET /api/v1/devices/providers/?refresh=true` **retained**.

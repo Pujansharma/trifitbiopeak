@@ -37,7 +37,7 @@ class RookDeploymentConfigurationTests(SimpleTestCase):
         errors = {key for severity, key, _ in findings if severity == "ERROR"}
         self.assertIn("ROOK_CLIENT_UUID", errors)
         self.assertIn("ROOK_SECRET_KEY", errors)
-        self.assertNotIn("ROOK_WEBHOOK_HASH_KEY", errors)
+        self.assertIn("ROOK_WEBHOOK_HASH_KEY", errors)
 
     @override_settings(
         ROOK_PROVISIONED_SOURCES="Garmin",

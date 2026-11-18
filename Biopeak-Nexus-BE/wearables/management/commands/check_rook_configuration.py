@@ -45,6 +45,12 @@ def rook_readiness_checks() -> list[tuple[str, str, str]]:
         if not 1 <= approved <= maximum:
             checks.append(("ERROR", key, "Set a positive, approved ROOK account budget before enabling HTTP requests."))
 
+    if not str(getattr(settings, "ROOK_WEBHOOK_HASH_KEY", "") or "").strip():
+        checks.append((
+            "ERROR", "ROOK_WEBHOOK_HASH_KEY",
+            "Set the ROOK signing key from Portal > Setup > Webhook > Signature; "
+            "the inbound ROOK data webhook rejects unsigned deliveries.",
+        ))
     deployment = str(getattr(settings, "SETTINGS_MODULE", "")).rsplit(".", 1)[-1]
     if deployment in {"staging", "production"}:
         for key in ("ROOK_AUTH_OUTBOX_QUEUE_URL", "ROOK_DATA_FETCH_OUTBOX_QUEUE_URL"):
@@ -105,10 +111,7 @@ def rook_readiness_checks() -> list[tuple[str, str, str]]:
                 checks.append(("ERROR", "ROOK_SDK_SECRET", "Mobile SDK credential MUST differ from server-side ROOK_SECRET_KEY."))
             if not getattr(settings, "ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC", False):
                 checks.append(("ERROR", "ROOK_SDK_CLIENT_CREDENTIALS_PUBLIC", "Confirm with ROOK that this dedicated SDK secret is a distributable mobile credential, then explicitly approve exposure."))
-    # The HTTP webhook endpoints have been retired. Direct ROOK API fetch
-    # workers still ingest documents through wearables.services.ingestion.
-    if getattr(settings, "ROOK_WEBHOOK_HASH_KEY", ""):
-        checks.append(("INFO", "ROOK_WEBHOOK_HASH_KEY", "Legacy signing key is configured but no ROOK HTTP webhook endpoint is mounted."))
+    # The ROOK Data Webhook is active; notification webhook is not mounted.
     if getattr(settings, "ROOK_ALLOW_UNSIGNED_WEBHOOKS", False):
         checks.append(("WARN", "ROOK_ALLOW_UNSIGNED_WEBHOOKS", "Obsolete ROOK webhook setting is enabled; remove it from deployment configuration."))
     if not getattr(settings, "ROOK_BASE_URL", ""):

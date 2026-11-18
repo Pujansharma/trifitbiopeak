@@ -66,8 +66,8 @@ class RookSignatureTests(SimpleTestCase):
         )
 
     @override_settings(ROOK_WEBHOOK_HASH_KEY="", ROOK_ALLOW_UNSIGNED_WEBHOOKS=True)
-    def test_allows_unsigned_payload_only_when_explicitly_enabled(self):
-        self.assertTrue(
+    def test_rejects_unsigned_payload_even_when_legacy_flag_is_enabled(self):
+        self.assertFalse(
             verify_rook_webhook_signature(payload={"user_id": "one"}, signature_header="")
         )
 
@@ -95,4 +95,17 @@ class RookSignatureTests(SimpleTestCase):
                    "action": "user_connected", "action_datetime": "2026-10-08T10:00:00Z"}
         digest = hmac.new(b"phase-one-hash-key",
                           b"client-onemember-one2026-10-08T10:00:00Z", hashlib.sha256).hexdigest()
+        self.assertTrue(verify_rook_webhook_signature(payload=payload, signature_header=digest))
+
+    @override_settings(ROOK_WEBHOOK_HASH_KEY="phase-one-hash-key")
+    def test_accepts_rook_notification_portal_test_timestamp(self):
+        payload = {
+            "client_uuid": "client-one", "user_id": "member-one",
+            "action": "user_connected", "metadata": {"datetime": "2026-10-19T10:00:00Z"},
+        }
+        digest = hmac.new(
+            b"phase-one-hash-key",
+            b"client-onemember-one2026-10-19T10:00:00Z",
+            hashlib.sha256,
+        ).hexdigest()
         self.assertTrue(verify_rook_webhook_signature(payload=payload, signature_header=digest))

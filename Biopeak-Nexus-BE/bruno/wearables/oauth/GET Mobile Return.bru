@@ -1,0 +1,19 @@
+meta {
+  name: GET Mobile Return
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseURL}}/rook/return/
+  body: none
+  auth: none
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  Public navigation-only callback. Expect HTTP 302 Location biopeak://oauth-callback. It does NOT grant authorization. The mobile app calls authenticated GET /api/v1/devices/providers/?refresh=true afterward. ROOK can append /client_uuid/{uuid}/user_id/{id} to this URL.
+}
